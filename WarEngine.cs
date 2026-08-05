@@ -2541,7 +2541,7 @@ static class WarEngine
         float effDepth = 0f;
         int tick = 0, routsA = 0, routsD = 0;
         bool contact = false, ambushFired = false;
-        Force fa = null, fd = null;
+        Force? fa = null, fd = null;
         float stratAdv = 1f;
 
         if (!anyGround)
@@ -3173,7 +3173,7 @@ static class WarEngine
 
         if (ShowFrontMap && anyGround && defHasGround)
         {
-            string fm = FrontMap(fa, fd, field, depth);
+            string? fm = FrontMap(fa, fd, field, depth);
             if (fm != null) { sb.Append("\n<b>🗺 نمای جبهه</b>\n").Append(fm).Append('\n'); }
         }
 

@@ -3511,7 +3511,7 @@ partial class Program
                 string senderName = user.FirstName;
                 string grpTitle = chat.Title ?? "";
                 string pref = vLog.IsUserMode==1 ? $"[{grpTitle}] {senderName}: " : $"{senderName}: ";
-                Message sent = null;
+                Message? sent = null;
                 if (!string.IsNullOrEmpty(msg.Text)){
                     string t = pref + msg.Text;
                     if (replyMap!=0) sent = await bot.SendTextMessageAsync(destId, t, replyToMessageId: replyMap, cancellationToken: ct);
@@ -3562,7 +3562,7 @@ partial class Program
                 string sName = user.FirstName;
                 string gTitle = chat.Title ?? "";
                 string pref = vLog.IsUserMode==1 ? $"[{gTitle}] {sName}: " : $"{sName}: ";
-                Message sent = null;
+                Message? sent = null;
                 if (!string.IsNullOrEmpty(msg.Text)){
                     string t = pref + msg.Text;
                     if (replyMap!=0) sent = await bot.SendTextMessageAsync(destId, t, replyToMessageId: replyMap, cancellationToken: ct);
@@ -5319,6 +5319,7 @@ partial class Program
                 sess.AttackPlaneModelAmountsFinal = new List<long>(sess.AttackModelAmounts);
                 // Now bombers per-model
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
+                if (atk == null) { EndSession(uid); await SendTemp(uid, "❌ کشور یافت نشد.", ct: ct); return; }
                 var bomberBreakdown = GetTransferBreakdown(atk, "bombers");
                 if (bomberBreakdown.Count == 0)
                 {
@@ -7785,7 +7786,7 @@ partial class Program
 
                 //  – نردبان تخریب بندر: هر ۲ پیروزی دریایی یک سطح بندر را می‌خورد
                 //     سطح ۵ → ۴ → ۳ → ۲ → ۱ → صفر (تخریب کامل)
-                string portNews = null;
+                string? portNews = null;
                 if (result.AttackerWon)
                 {
                     int hits = Database.AddNavalPortHit(defender.OwnerId, defender.ChatId);
@@ -12055,7 +12056,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminPlayersHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminPlayersHome(CancellationToken ct = default)
     {
         var all = Database.GetAllCountries();
         var top = all.Select(c => new { Country = c, MP = CalcManpower(c) })
@@ -12085,7 +12086,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
 
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static async Task SendAdminPlayerDetail(long adminId, long targetId, CancellationToken ct)
@@ -12147,7 +12148,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminCountriesHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminCountriesHome(CancellationToken ct = default)
     {
         var all = Database.GetAllCountries();
         var top = all.Select(c => new { Country = c, MP = CalcManpower(c) }).OrderByDescending(x => x.MP).Take(8).ToList();
@@ -12167,7 +12168,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🔍 جستجو نام", "adm:countries:search"), InlineKeyboardButton.WithCallbackData("⚔️ محاصره شده‌ها", "adm:countries:sieged") },
             new[] { InlineKeyboardButton.WithCallbackData("🔄 تازه‌سازی", "adm:countries:home"), InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static (string Text, InlineKeyboardMarkup Keyboard) BuildAdminCountrySearchResults(List<Country> results, string query)
@@ -12386,7 +12387,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminWarHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminWarHome(CancellationToken ct = default)
     {
         var sieged = Database.GetSiegedCountries(10);
         var recentBattles = Database.GetRecentBattles(5);
@@ -12410,7 +12411,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🔥 محاصره‌ها", "adm:war:sieged"), InlineKeyboardButton.WithCallbackData("📜 نبردها", "adm:war:battles") },
             new[] { InlineKeyboardButton.WithCallbackData("🛡 رفع بن حمله", "adm:war:clearlocks"), InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static async Task SendAdminOperationsHome(long adminId, CancellationToken ct)
