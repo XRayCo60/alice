@@ -59,6 +59,8 @@ class BattleResult
     public long DefenderBattleshipsLost;
     public long DefenderBattleshipDamage;
     public bool IsNavalBattle;
+    public long AttackerCrewLost;    // ملوان/خدمه‌ی از دست رفته
+    public long DefenderCrewLost;
     public long AttackerBoatsSurvived;
     public long AttackerSubsSurvived;
     public long AttackerBattleshipsSurvived;
@@ -122,22 +124,54 @@ static class WarEngine
     static readonly float[] TimeVision = { 0.80f, 1.00f, 0.75f, 0.45f };
     static readonly float[] TimeAir    = { 0.85f, 1.00f, 0.80f, 0.50f };
 
-    // ═══════════════════ مشخصات فنی واحدها (به تفکیک مدل) ═══════════════════
+    // ═══════════════════ مشخصات فنی واحدها (داده‌ی تاریخی واقعی) ═══════════════
+    //  همه‌ی اعداد از منابع تاریخی‌اند و مستقیم در فرمول‌های فیزیکی استفاده می‌شوند.
+    //  هیچ عدد «قدرت» سرجمعی وجود ندارد — هر عدد معنای فیزیکی دارد.
+
     public readonly struct TankSpec
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float Pen, He, Mg, Armor, Speed, CannonAmmo, MgAmmo, Reliab;
-        public TankSpec(string n, Faction origin, float p, float he, float mg, float ar, float sp, float ca, float ma, float rel)
-        { Name = n; Origin = origin; Pen = p; He = he; Mg = mg; Armor = ar; Speed = sp; CannonAmmo = ca; MgAmmo = ma; Reliab = rel; }
+        public readonly float Caliber;      // میلی‌متر
+        public readonly float MuzzleVel;    // متر بر ثانیه — پایه‌ی بالستیک
+        public readonly float ShellMass;    // کیلوگرم
+        public readonly float PenAt500;     // نفوذ در ۵۰۰ متر (میلی‌متر) — مرجع
+        public readonly float HeFiller;     // کیلوگرم مواد منفجره‌ی گلوله‌ی انفجاری
+        public readonly float RoF;          // گلوله در دقیقه
+        public readonly float ArmorFront;   // زره جلو (میلی‌متر)
+        public readonly float ArmorSide;    // زره پهلو (میلی‌متر)
+        public readonly float Slope;        // ضریب مؤثر شیب زره
+        public readonly float Speed;        // کیلومتر بر ساعت (جاده)
+        public readonly float SpeedOff;     // کیلومتر بر ساعت (آفرود)
+        public readonly int   MgCount;      // تعداد مسلسل
+        public readonly int   CannonRounds; // ظرفیت مهمات توپ
+        public readonly int   MgRounds;     // ظرفیت مهمات مسلسل
+        public readonly float Reliab;       // قابلیت اطمینان مکانیکی ۰..۱
+        public readonly float Optics;       // کیفیت اپتیک ۰..۱
+        public readonly int   Crew;
+        public readonly float TurretSec;    // ثانیه برای چرخش کامل برجک
+        public TankSpec(string n, Faction o, float cal, float mv, float sm, float pen, float he, float rof,
+            float af, float asd, float slope, float sp, float spo, int mg, int cr, int mr, float rel, float opt, int crew, float tsec)
+        { Name=n; Origin=o; Caliber=cal; MuzzleVel=mv; ShellMass=sm; PenAt500=pen; HeFiller=he; RoF=rof;
+          ArmorFront=af; ArmorSide=asd; Slope=slope; Speed=sp; SpeedOff=spo; MgCount=mg;
+          CannonRounds=cr; MgRounds=mr; Reliab=rel; Optics=opt; Crew=crew; TurretSec=tsec; }
     }
 
-    // M2 Medium: توپ ۳۷ سبک، مسلسل فراوان، زره نازک، سریع و بسیار قابل‌اعتماد
-    static readonly TankSpec SpecUSA   = new("M2 Medium",  Faction.USA,   46f, 0.45f, 7f, 30f, 42f, 100f, 90f, 0.95f);
-    // T-28: توپ ۷۶ با گلوله انفجاری قوی، زره ضخیم‌تر، کند و کم‌اعتماد
-    static readonly TankSpec SpecUSSR  = new("T-28",       Faction.USSR,  40f, 1.00f, 4f, 80f, 37f,  70f, 60f, 0.82f);
-    // Panzer III: توپ ۵۰ با نفوذ بالا، اپتیک عالی، متعادل
-    static readonly TankSpec SpecReich = new("Panzer III", Faction.Reich, 67f, 0.55f, 3f, 60f, 40f,  84f, 55f, 0.97f);
+    // M2 Medium — توپ 37mm M6، ۲۰۰ گلوله، ۷ مسلسل با ۱۲۲۵۰ فشنگ، زره ۳۲ پرچی، ۴۲ km/h
+    //   نفوذ واقعی: ۴۶mm در ۴۵۷ متر روی زره سخت‌شده با شیب ۳۰°
+    static readonly TankSpec SpecUSA = new("M2 Medium", Faction.USA,
+        37f, 884f, 0.87f, 46f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f);
+
+    // T-28 — هویتزر 76.2mm KT-28، ۶۹ گلوله، ۴ مسلسل، زره ۳۰ جلو / ۲۰ پهلو، ۳۷ km/h
+    //   نفوذ واقعی فقط ۳۴–۵۰mm در ۵۰۰ متر (سلاح پشتیبانی پیاده، نه ضدزره)
+    //   ولی گلوله‌ی انفجاری ۶۲۱ گرم TNT دارد — بهترین ضدپیاده‌ی این سه
+    static readonly TankSpec SpecUSSR = new("T-28", Faction.USSR,
+        76.2f, 381f, 6.23f, 34f, 0.621f, 4f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f);
+
+    // Panzer III — توپ 5cm KwK 38 L/42، ۹۹ گلوله، اپتیک TZF5d عالی، زره ۶۰ (۳۰+۳۰)
+    //   نفوذ واقعی: ۴۷mm در ۵۰۰ متر با Pzgr.39 (نه ۶۷ که قبلاً بود)
+    static readonly TankSpec SpecReich = new("Panzer III", Faction.Reich,
+        50f, 685f, 2.06f, 47f, 0.175f, 13f, 60f, 30f, 1.02f, 40f, 15f, 3, 99, 4500, 0.97f, 0.95f, 5, 33f);
 
     static TankSpec SpecOf(Faction f) => f == Faction.USA ? SpecUSA : f == Faction.USSR ? SpecUSSR : SpecReich;
 
@@ -145,66 +179,166 @@ static class WarEngine
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float Maneuver, Firepower, Speed, Cas;
-        public FighterSpec(string n, Faction origin, float mn, float fp, float sp, float cas)
-        { Name = n; Origin = origin; Maneuver = mn; Firepower = fp; Speed = sp; Cas = cas; }
+        public readonly float SpeedKmh;     // بیشینه سرعت
+        public readonly float ClimbMs;      // متر بر ثانیه صعود
+        public readonly float CeilingM;     // سقف پرواز (متر)
+        public readonly float TurnSec;      // ثانیه برای یک دور کامل — کوچک‌تر = چابک‌تر
+        public readonly float RangeKm;      // برد رزمی
+        public readonly float GunKgMin;     // وزن آتش (کیلوگرم بر دقیقه) — قدرت آتش واقعی
+        public readonly float AmmoSec;      // ثانیه آتش پیوسته تا اتمام مهمات
+        public readonly float Durability;   // تحمل ساختاری
+        public readonly float BombKg;       // ظرفیت بمب برای پشتیبانی نزدیک
+        public FighterSpec(string n, Faction o, float sp, float climb, float ceil, float turn,
+            float rng, float gun, float ammo, float dur, float bomb)
+        { Name=n; Origin=o; SpeedKmh=sp; ClimbMs=climb; CeilingM=ceil; TurnSec=turn;
+          RangeKm=rng; GunKgMin=gun; AmmoSec=ammo; Durability=dur; BombKg=bomb; }
     }
-    static readonly FighterSpec FighterUSA   = new("P-36",   Faction.USA,   9f, 4.5f, 500f, 0.9f);
-    static readonly FighterSpec FighterUSSR  = new("I-16",   Faction.USSR,  9f, 4.0f, 520f, 0.8f);
-    static readonly FighterSpec FighterReich = new("Bf 109", Faction.Reich, 8f, 8.0f, 570f, 1.0f);
+    // P-36 Hawk — چابک ولی کم‌سرعت و کم‌سلاح (۲ مسلسل)
+    static readonly FighterSpec FighterUSA = new("P-36", Faction.USA,
+        500f, 10.5f, 10000f, 18.5f, 1300f, 12f, 25f, 1.05f, 0f);
+    // I-16 — بسیار چابک، سقف پایین، برد کوتاه، ۲×ShVAK
+    static readonly FighterSpec FighterUSSR = new("I-16", Faction.USSR,
+        525f, 14.7f, 9700f, 17.0f, 700f, 28f, 12f, 0.85f, 200f);
+    // Bf 109E — سریع‌ترین، صعود عالی، ۲×MG17 + ۲×MG FF 20mm
+    static readonly FighterSpec FighterReich = new("Bf 109", Faction.Reich,
+        570f, 15.5f, 11000f, 20.5f, 660f, 44f, 11f, 1.00f, 250f);
     static FighterSpec FighterOf(Faction f) => f == Faction.USA ? FighterUSA : f == Faction.USSR ? FighterUSSR : FighterReich;
 
     public readonly struct BomberSpec
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float Armor, DefMg, Bombload, Speed;
-        public BomberSpec(string n, Faction origin, float ar, float dmg, float bl, float sp)
-        { Name = n; Origin = origin; Armor = ar; DefMg = dmg; Bombload = bl; Speed = sp; }
+        public readonly float SpeedKmh;
+        public readonly float CeilingM;
+        public readonly float RangeKm;
+        public readonly float BombKg;       // بار بمب واقعی
+        public readonly float DefGunKgMin;  // وزن آتش دفاعی
+        public readonly int   DefPositions; // تعداد جایگاه تیرانداز — پوشش کروی
+        public readonly float Durability;   // تحمل ساختاری (B-17 افسانه‌ای)
+        public readonly float AccuracyCep;  // خطای دایره‌ای بمباران (متر) — کمتر = دقیق‌تر
+        public readonly int   Crew;
+        public BomberSpec(string n, Faction o, float sp, float ceil, float rng, float bomb,
+            float defg, int defp, float dur, float cep, int crew)
+        { Name=n; Origin=o; SpeedKmh=sp; CeilingM=ceil; RangeKm=rng; BombKg=bomb;
+          DefGunKgMin=defg; DefPositions=defp; Durability=dur; AccuracyCep=cep; Crew=crew; }
     }
-    static readonly BomberSpec BomberUSA   = new("B-17",   Faction.USA,   8f, 6f, 3600f, 460f);
-    static readonly BomberSpec BomberReich = new("He 111", Faction.Reich, 5f, 4f, 2000f, 435f);
-    static readonly BomberSpec BomberUSSR  = new("DB-3",   Faction.USSR,  3f, 3f, 1000f, 430f);
+    // B-17 — سقف بالا، ۱۳ مسلسل .50، تحمل افسانه‌ای، نشانه‌روی Norden
+    static readonly BomberSpec BomberUSA = new("B-17", Faction.USA,
+        462f, 10850f, 3220f, 2724f, 78f, 8, 2.20f, 350f, 10);
+    // He 111 — متوسط، دفاع ضعیف، دقیق‌تر در ارتفاع کم
+    static readonly BomberSpec BomberReich = new("He 111", Faction.Reich,
+        440f, 6500f, 2300f, 2000f, 22f, 5, 1.00f, 300f, 5);
+    // DB-3 — بار کم، دفاع بسیار ضعیف، آسیب‌پذیر
+    static readonly BomberSpec BomberUSSR = new("DB-3", Faction.USSR,
+        439f, 8400f, 3800f, 1000f, 14f, 3, 0.75f, 420f, 4);
     static BomberSpec BomberOf(Faction f) => f == Faction.USA ? BomberUSA : f == Faction.USSR ? BomberUSSR : BomberReich;
 
-    // ───────────────────────── مشخصات دریایی (بدون سوخت) ─────────────────────
+    // ───────────────────── مشخصات دریایی (بدون هیچ عدد «قدرت») ─────────────────
     public readonly struct BoatSpec
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float Speed, Armor, Torpedo, Mg, Crew, Power;
-        public BoatSpec(string n, Faction origin, float speed, float armor, float torp, float mg, float crew, float power)
-        { Name = n; Origin = origin; Speed = speed; Armor = armor; Torpedo = torp; Mg = mg; Crew = crew; Power = power; }
+        public readonly float SpeedKn;      // گره
+        public readonly float LengthM;      // طول — اثر در سطح مقطع هدف
+        public readonly float BeamM;        // عرض
+        public readonly float DisplacementT;
+        public readonly int   TorpTubes;
+        public readonly float TorpWarheadKg;
+        public readonly float TorpRangeKm;
+        public readonly float GunMm;        // بزرگ‌ترین توپ
+        public readonly float GunKgMin;     // وزن آتش سبک
+        public readonly float HullArmorMm;  // عملاً صفر
+        public readonly float SeaKeeping;   // تحمل دریای متلاطم ۰..۱
+        public readonly int   Crew;
+        public BoatSpec(string n, Faction o, float sp, float len, float beam, float disp,
+            int tt, float twh, float trng, float gun, float gkg, float armor, float sea, int crew)
+        { Name=n; Origin=o; SpeedKn=sp; LengthM=len; BeamM=beam; DisplacementT=disp;
+          TorpTubes=tt; TorpWarheadKg=twh; TorpRangeKm=trng; GunMm=gun; GunKgMin=gkg;
+          HullArmorMm=armor; SeaKeeping=sea; Crew=crew; }
     }
-    static readonly BoatSpec BoatGermany = new("S-Boot",  Faction.Reich, 39.5f, 5f, 18f, 4f, 22f, 12f);
-    static readonly BoatSpec BoatUSA     = new("PT Boat", Faction.USA,   42f,   3f, 14f, 6f, 12f, 10f);
-    static readonly BoatSpec BoatUSSR    = new("G-5",     Faction.USSR,  51f,   2f, 16f, 2f,  6f,  9f);
+    // S-Boot — بدنه‌ی چوبی/فولادی، دریانوردی عالی، اژدر G7a
+    static readonly BoatSpec BoatGermany = new("S-Boot", Faction.Reich,
+        39.5f, 34.9f, 5.28f, 100f, 2, 280f, 7.5f, 20f, 9f, 10f, 0.85f, 24);
+    // PT Boat — بدنه‌ی تخته‌ای، سریع، دریانوردی ضعیف
+    static readonly BoatSpec BoatUSA = new("PT Boat", Faction.USA,
+        41f, 24.4f, 6.3f, 56f, 4, 272f, 4.1f, 20f, 14f, 0f, 0.55f, 14);
+    // G-5 — بسیار سریع ولی فقط برای آب آرام، دریانوردی افتضاح
+    static readonly BoatSpec BoatUSSR = new("G-5", Faction.USSR,
+        51f, 19.1f, 3.4f, 17f, 2, 200f, 3f, 12.7f, 4f, 7f, 0.30f, 6);
     static BoatSpec BoatOf(Faction f) => f == Faction.USA ? BoatUSA : f == Faction.USSR ? BoatUSSR : BoatGermany;
 
     public readonly struct SubSpec
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float SurfSpeed, SubSpeed, Torpedo, Gun, Stealth, Armor, Power;
-        public SubSpec(string n, Faction origin, float surf, float sub, float torp, float gun, float stealth, float armor, float power)
-        { Name = n; Origin = origin; SurfSpeed = surf; SubSpeed = sub; Torpedo = torp; Gun = gun; Stealth = stealth; Armor = armor; Power = power; }
+        public readonly float SurfKn, SubKn;
+        public readonly float TestDepthM;   // عمق ایمن غواصی
+        public readonly int   TorpTubes;
+        public readonly int   TorpLoad;     // تعداد اژدر حمل‌شده
+        public readonly float TorpWarheadKg;
+        public readonly float TorpRangeKm;
+        public readonly float DeckGunMm;
+        public readonly float SubEnduranceH;// ساعت زیر آب با باتری
+        public readonly float DiveSec;      // ثانیه تا غواصی کامل — بقا در حمله‌ی ناگهانی
+        public readonly float NoiseLevel;   // ۰..۱ — کمتر = ساکت‌تر
+        public readonly int   Crew;
+        public SubSpec(string n, Faction o, float sk, float bk, float depth, int tt, int tl,
+            float twh, float trng, float gun, float endur, float dive, float noise, int crew)
+        { Name=n; Origin=o; SurfKn=sk; SubKn=bk; TestDepthM=depth; TorpTubes=tt; TorpLoad=tl;
+          TorpWarheadKg=twh; TorpRangeKm=trng; DeckGunMm=gun; SubEnduranceH=endur;
+          DiveSec=dive; NoiseLevel=noise; Crew=crew; }
     }
-    static readonly SubSpec SubGermany = new("Type VIIC", Faction.Reich, 17.7f, 7.6f, 35f, 8f, 85f, 18f, 28f);
-    static readonly SubSpec SubUSA     = new("Gato",      Faction.USA,   21f,   9f,   45f, 7f, 80f, 15f, 32f);
-    static readonly SubSpec SubUSSR    = new("S-class",   Faction.USSR,  13.5f, 7.5f, 25f, 5f, 75f, 12f, 22f);
+    // Type VIIC — غواصی سریع (۲۵ ثانیه)، ساکت، ۱۴ اژدر
+    static readonly SubSpec SubGermany = new("Type VIIC", Faction.Reich,
+        17.7f, 7.6f, 230f, 5, 14, 280f, 7.5f, 88f, 20f, 25f, 0.30f, 48);
+    // Gato — بزرگ‌تر، ۲۴ اژدر، اژدر Mk14 قوی، غواصی کندتر
+    static readonly SubSpec SubUSA = new("Gato", Faction.USA,
+        21f, 8.75f, 90f, 10, 24, 292f, 8.2f, 76f, 48f, 35f, 0.40f, 60);
+    // S-class — کوچک، اژدر کم، غواصی کند، پرصدا
+    static readonly SubSpec SubUSSR = new("S-class", Faction.USSR,
+        19.5f, 8.7f, 100f, 6, 12, 300f, 4f, 100f, 15f, 48f, 0.55f, 46);
     static SubSpec SubOf(Faction f) => f == Faction.USA ? SubUSA : f == Faction.USSR ? SubUSSR : SubGermany;
 
     public readonly struct BattleshipSpec
     {
         public readonly string Name;
         public readonly Faction Origin;
-        public readonly float Speed, Belt, Deck, Turret, MainGuns, SecGuns, AAGuns, Crew, UnitsBuilt, Power;
-        public BattleshipSpec(string n, Faction origin, float speed, float belt, float deck, float turret, float mainGuns, float sec, float aa, float crew, float built, float power)
-        { Name = n; Origin = origin; Speed = speed; Belt = belt; Deck = deck; Turret = turret; MainGuns = mainGuns; SecGuns = sec; AAGuns = aa; Crew = crew; UnitsBuilt = built; Power = power; }
+        public readonly float SpeedKn;
+        public readonly float LengthM, BeamM;
+        public readonly float DisplacementT;
+        public readonly float BeltMm, DeckMm, TurretMm, ConningMm;
+        public readonly float MainMm;        // قطر توپ اصلی
+        public readonly int   MainGuns;      // تعداد لوله
+        public readonly float MainShellKg;   // وزن گلوله
+        public readonly float MainMuzzleMs;  // سرعت پوزه
+        public readonly float MainRangeKm;   // برد بیشینه
+        public readonly float MainRpm;       // گلوله بر دقیقه هر لوله
+        public readonly float SecMm;
+        public readonly int   SecGuns;
+        public readonly float AaKgMin;       // وزن آتش ضدهوایی
+        public readonly float FireControl;   // کیفیت کنترل آتش ۰..۱ (رادار!)
+        public readonly int   Crew;
+        public BattleshipSpec(string n, Faction o, float sp, float len, float beam, float disp,
+            float belt, float deck, float turret, float conning, float mainMm, int mainN,
+            float shellKg, float muzzle, float rangeKm, float rpm, float secMm, int secN,
+            float aa, float fc, int crew)
+        { Name=n; Origin=o; SpeedKn=sp; LengthM=len; BeamM=beam; DisplacementT=disp;
+          BeltMm=belt; DeckMm=deck; TurretMm=turret; ConningMm=conning; MainMm=mainMm; MainGuns=mainN;
+          MainShellKg=shellKg; MainMuzzleMs=muzzle; MainRangeKm=rangeKm; MainRpm=rpm;
+          SecMm=secMm; SecGuns=secN; AaKgMin=aa; FireControl=fc; Crew=crew; }
     }
-    static readonly BattleshipSpec BSGermany = new("Bismarck",        Faction.Reich, 30f, 320f, 110f, 360f,  8f, 12f, 44f, 2092f, 2f, 180f);
-    static readonly BattleshipSpec BSUSA     = new("Iowa",            Faction.USA,   28f, 305f, 140f, 406f,  9f, 20f, 34f, 1800f, 6f, 195f);
-    static readonly BattleshipSpec BSUSSR    = new("Sovetsky Soyuz",  Faction.USSR,  23f, 225f,  62f, 203f, 12f, 16f, 18f, 1220f, 4f, 150f);
+    // Bismarck — ۸×۳۸cm، کمربند ۳۲۰، عرشه ضعیف ۱۲۰، کنترل آتش عالی ولی رادار ابتدایی
+    static readonly BattleshipSpec BSGermany = new("Bismarck", Faction.Reich,
+        30.1f, 251f, 36f, 50300f, 320f, 120f, 360f, 350f,
+        380f, 8, 800f, 820f, 36.5f, 2.3f, 150f, 12, 190f, 0.82f, 2092);
+    // Iowa — ۹×۴۰۶cm، سریع‌ترین، عرشه ۱۵۲، رادار Mk8 → بهترین کنترل آتش جنگ
+    static readonly BattleshipSpec BSUSA = new("Iowa", Faction.USA,
+        32.5f, 270f, 33f, 57540f, 307f, 152f, 495f, 440f,
+        406f, 9, 1225f, 762f, 38.7f, 2.0f, 127f, 20, 900f, 0.98f, 2700);
+    // Sovetsky Soyuz — هرگز کامل نشد؛ زره متوسط، ضدهوایی ضعیف، بدون رادار
+    static readonly BattleshipSpec BSUSSR = new("Sovetsky Soyuz", Faction.USSR,
+        28f, 269f, 38.9f, 59150f, 375f, 155f, 495f, 425f,
+        406f, 9, 1108f, 830f, 45.6f, 2.0f, 152f, 12, 120f, 0.55f, 1664);
     static BattleshipSpec BattleshipOf(Faction f) => f == Faction.USA ? BSUSA : f == Faction.USSR ? BSUSSR : BSGermany;
 
     // ─────────────────────── نگاشت نام مدل → مشخصات ─────────────────────────
@@ -327,6 +461,7 @@ static class WarEngine
         public float Units, Size0;
         public float Knocked;        // از کار افتاده (قابل بازیابی در صورت تسلط بر میدان)
         public float CAmmo, MAmmo;
+        public float CAmmo0, MAmmo0;   // بار اولیه‌ی مهمات برای محاسبه‌ی نسبت
         public float Morale, Supp;
         public float Fatigue;
         public float Exp;
@@ -467,6 +602,9 @@ static class WarEngine
         public long StratMoney, StratIron;
         public float StratWelfare;
         public bool HadAirCombat, AtkHadAir, DefHadAir;
+        public float BombTonsOnTarget;   // تناژ واقعی بمب روی هدف
+        public long AircrewLost;         // خدمه‌ی پرواز از دست رفته
+        public float EscortAltM, CapAltM; // ارتفاع نبرد — برای گزارش
         public string Narrative;
     }
 
@@ -559,7 +697,7 @@ static class WarEngine
             while (left > 0 && n < MAX_GROUPS)
             {
                 float u = Math.Min(left, (long)Math.Ceiling(tankGrp));
-                InitGroup(ref fo.G[n], attacker, 1, (byte)mi, u, strat, tac, field, ref rng);
+                InitGroup(ref fo.G[n], attacker, 1, (byte)mi, u, fo.Specs[mi], strat, tac, field, ref rng);
                 left -= (long)u; n++;
             }
         }
@@ -567,7 +705,7 @@ static class WarEngine
         while (sLeft > 0 && n < MAX_GROUPS)
         {
             float u = Math.Min(sLeft, (long)Math.Ceiling(infGrp));
-            InitGroup(ref fo.G[n], attacker, 0, 0, u, strat, tac, field, ref rng);
+            InitGroup(ref fo.G[n], attacker, 0, 0, u, nm > 0 ? fo.Specs[0] : SpecUSA, strat, tac, field, ref rng);
             sLeft -= (long)u; n++;
         }
         fo.N = n;
@@ -581,12 +719,25 @@ static class WarEngine
     }
 
     static void InitGroup(ref Group gr, bool atk, byte type, byte model, float units,
-        int strat, int tac, Field field, ref XorRng rng)
+        in TankSpec spec, int strat, int tac, Field field, ref XorRng rng)
     {
         gr = default;
         gr.Type = type; gr.Model = model; gr.Units = units; gr.Size0 = units; gr.Alive = true;
         gr.Morale = rng.Range(0.86f, 1f);
-        gr.CAmmo = units; gr.MAmmo = units;
+        // مهمات از ظرفیت واقعی همان مدل می‌آید، نه یک عدد قراردادی.
+        //  T-28 فقط ۶۹ گلوله دارد، Panzer III نود و نه، M2 دویست.
+        if (type == 1)
+        {
+            gr.CAmmo = units * spec.CannonRounds;
+            gr.MAmmo = units * spec.MgRounds;
+        }
+        else
+        {
+            gr.CAmmo = 0f;
+            gr.MAmmo = units * 120f;          // فشنگ هر سرباز
+        }
+        gr.CAmmo0 = Math.Max(1f, gr.CAmmo);
+        gr.MAmmo0 = Math.Max(1f, gr.MAmmo);
         gr.Exp = rng.Range(0f, 0.1f);
         gr.FireTgt = -1;
 
@@ -689,7 +840,7 @@ static class WarEngine
             if (lvl < 0.15f) continue;
             int s = Math.Clamp((int)(own.IntelOnFoe[j].LastX / SECTOR_KM), 0, SECTORS - 1);
             float pw = foe.G[j].Type == 1
-                ? foe.G[j].Units * (6f + foe.Specs[foe.G[j].Model].Armor * 0.03f + foe.Specs[foe.G[j].Model].Pen * 0.04f)
+                ? foe.G[j].Units * (6f + foe.Specs[foe.G[j].Model].ArmorFront * 0.03f + foe.Specs[foe.G[j].Model].PenAt500 * 0.04f)
                 : foe.G[j].Units * 0.8f;
             own.ThreatMap[s] += pw * lvl;
         }
@@ -1183,7 +1334,7 @@ static class WarEngine
     static bool TriageGroup(ref Group g, Force me, bool attacker, int tick, BattleLog log, ref XorRng rng)
     {
         if (g.Posture == P_RETREAT) return false;
-        float ammoR = (g.CAmmo + g.MAmmo) / Math.Max(0.01f, g.Size0 * 2f);
+        float ammoR = 0.5f * (g.CAmmo / Math.Max(1f, g.CAmmo0) + g.MAmmo / Math.Max(1f, g.MAmmo0));
         if (ammoR <= 0.02f)
         {
             g.Posture = P_RETREAT;
@@ -1208,7 +1359,15 @@ static class WarEngine
             if (!u.Alive) continue;
             if (u.Posture is P_DEFEND or P_AMBUSH or P_HOLD or P_REGROUP) continue;
 
-            float baseKmH = u.Type == 1 ? f.Specs[u.Model].Speed * 0.32f : 4.2f;
+            // سرعت آفرود واقعی همان مدل، نه کسری از سرعت جاده
+            float baseKmH;
+            if (u.Type == 1)
+            {
+                var sp = f.Specs[u.Model];
+                byte terrHere = field.TerrAt(u.X, u.Y);
+                baseKmH = terrHere == T_PLAIN ? sp.Speed * 0.55f : sp.SpeedOff * 0.85f;
+            }
+            else baseKmH = 4.2f;
             if (u.Posture == P_RETREAT) baseKmH *= 1.2f;
             if (u.Posture == P_SCREEN) baseKmH *= 0.7f;
             if (u.Supp > 0.5f) baseKmH *= 0.45f;
@@ -1267,7 +1426,56 @@ static class WarEngine
         }
     }
 
-    // ═══════════ آتش: نفوذ/زره واقعی هر مدل در برابر مدل مقابل ══════════════
+    // ═══════════════ فیزیک بالستیک مشترک (زمین و دریا) ══════════════════════
+
+    // افت سرعت گلوله با فاصله (کشش هوا). گلوله‌ی سنگین‌تر و باریک‌تر بهتر سرعت نگه می‌دارد.
+    //  ضریب مقطعی ساده: جرم / قطر²
+    static float VelocityAt(float muzzleMs, float shellKg, float caliberMm, float rangeM)
+    {
+        float sectional = shellKg / MathF.Max(0.01f, (caliberMm * caliberMm) / 10000f);
+        float k = 0.00042f / MathF.Max(0.05f, sectional);      // نرخ افت
+        return muzzleMs * MathF.Exp(-k * rangeM);
+    }
+
+    // نفوذ در فاصله‌ی دلخواه بر پایه‌ی نفوذ مرجع ۵۰۰ متر و نسبت انرژی جنبشی.
+    //  انرژی ∝ v²، و نفوذ تقریباً با √انرژی رابطه دارد → نفوذ ∝ v
+    static float PenetrationAt(in TankSpec s, float rangeM)
+    {
+        float v500 = VelocityAt(s.MuzzleVel, s.ShellMass, s.Caliber, 500f);
+        float vNow = VelocityAt(s.MuzzleVel, s.ShellMass, s.Caliber, rangeM);
+        return s.PenAt500 * (vNow / MathF.Max(1f, v500));
+    }
+
+    // زره مؤثر با زاویه‌ی برخورد: هرچه زاویه از عمود بیشتر، ضخامت مؤثر بیشتر.
+    //  impactCos = کسینوس زاویه‌ی برخورد (۱ = عمود کامل)
+    static float EffectiveArmor(float plateMm, float slope, float impactCos)
+        => plateMm * slope / Math.Clamp(impactCos, 0.28f, 1f);
+
+    // احتمال نفوذ: تابع سیگموئید حول نسبت نفوذ به زره.
+    //  پراکندگی طبیعی کیفیت فولاد و نقطه‌ی برخورد را مدل می‌کند.
+    static float PenChance(float penMm, float armorMm)
+    {
+        float ratio = penMm / MathF.Max(1f, armorMm);
+        return 1f / (1f + MathF.Exp(-(ratio - 1f) * 6.2f));
+    }
+
+    // آیا هدف از پهلو دیده می‌شود؟ زاویه‌ی بین بردار شلیک و جهت حرکت هدف.
+    //  خروجی: کسینوس زاویه نسبت به جلوی هدف — نزدیک ۱ یعنی شلیک به سینه.
+    static float FacingCos(float shooterX, float shooterY, in Group target)
+    {
+        float dx = shooterX - target.X, dy = shooterY - target.Y;
+        float d = MathF.Sqrt(dx * dx + dy * dy);
+        if (d < 0.001f) return 1f;
+        dx /= d; dy /= d;
+        // جهت رو به جلوی هدف = جهت حرکتش به سمت TgtX/TgtY
+        float fx = target.TgtX - target.X, fy = target.TgtY - target.Y;
+        float fd = MathF.Sqrt(fx * fx + fy * fy);
+        if (fd < 0.001f) return 1f;                    // ایستاده = فرض سینه
+        fx /= fd; fy /= fd;
+        return Math.Clamp(dx * fx + dy * fy, -1f, 1f); // ۱=سینه، ۰=پهلو، -۱=پشت
+    }
+
+    // ═══════════ آتش زمینی: بالستیک واقعی + زاویه + مهمات شمارشی ═════════════
     static float FireSide(Force own, Force foe, Field field, bool attacker,
         float combatMul, float accEnv, int tick, BattleLog log,
         ref XorRng rng, ref bool contact, ref bool ambushFired)
@@ -1284,9 +1492,12 @@ static class WarEngine
             var ospec = own.Specs.Length > 0 ? own.Specs[u.Model] : SpecUSA;
             float famil = own.ModelFamiliar.Length > 0 ? own.ModelFamiliar[u.Model] : 1f;
 
-            int best = -1; float bestScore = 0f, bestDist = 99f;
-            float maxRange = u.Type == 1 ? 2.1f : 0.9f;
+            // برد مؤثر از اپتیک و سرعت پوزه می‌آید، نه عدد ثابت
+            float maxRange = u.Type == 1
+                ? Math.Clamp(1.1f + ospec.Optics * 1.2f + ospec.MuzzleVel / 900f, 1.0f, 2.6f)
+                : 0.9f;
 
+            int best = -1; float bestScore = 0f, bestDist = 99f;
             for (int j = 0; j < foe.N; j++)
             {
                 if (!foe.G[j].Alive) continue;
@@ -1325,79 +1536,112 @@ static class WarEngine
             var fspec = foe.Specs.Length > 0 ? foe.Specs[t.Model] : SpecUSA;
             float intelQ = own.IntelOnFoe[best].Level;
             byte tt = field.TerrAt(t.X, t.Y);
+            float rangeM = bestDist * 1000f;
 
-            float acc = 0.62f * (0.45f + 0.55f * intelQ) * TerAcc[field.TerrAt(u.X, u.Y)] * accEnv
+            // ── دقت: اپتیک، فاصله، محیط، خستگی ──
+            float optics = 0.55f + ospec.Optics * 0.45f;
+            float rangeFall = 1f / (1f + rangeM / 900f);       // افت دقت با فاصله
+            float acc = 0.86f * optics * rangeFall * (0.45f + 0.55f * intelQ)
+                        * TerAcc[field.TerrAt(u.X, u.Y)] * accEnv
                         * (1f - u.Supp * 0.5f) * nightPenalty;
             acc *= (0.9f + u.Exp * 0.3f);
             acc *= own.Prof.CrewQuality * famil;
             if (u.Posture is P_ADVANCE or P_ASSAULT or P_FLANK) acc *= 0.80f;
-        if (!own.IsAttacker && u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) acc *= DUGIN_ACC;   // آتش از سنگر آماده
+            if (!own.IsAttacker && u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) acc *= DUGIN_ACC;
             if (field.ElevAt(u.X, u.Y) > field.ElevAt(t.X, t.Y) + 0.1f) acc *= 1.18f;
 
             float cover = TerCover[tt] * (t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.25f : 0.8f);
-            float ammoR = (u.CAmmo + u.MAmmo) / Math.Max(0.01f, u.Size0 * 2f);
-            float ammoMul = ammoR > 0.5f ? 1f : 0.55f + ammoR * 0.9f;
+            // برجک کند نمی‌تواند به تهدید پهلو سریع جواب بدهد
+            float traverse = Math.Clamp(1.18f - ospec.TurretSec / 90f, 0.72f, 1.15f);
             float morale = 0.55f + u.Morale * 0.45f;
             float reliab = 0.88f + ospec.Reliab * 0.12f;
-
-            float k = acc * ammoMul * morale * ambushMul * combatMul * reliab
-                      * (1f - u.Fatigue * 0.25f) * (TICK_MIN / 6f);
+            float common = acc * morale * ambushMul * combatMul * reliab * traverse * (1f - u.Fatigue * 0.25f);
 
             if (u.Type == 1)
             {
-                float rangeMul = Math.Clamp(1.25f - bestDist * 0.45f, 0.45f, 1.2f);
+                // ── شمار واقعی گلوله در این تیک: آهنگ آتش × زمان ──
+                float minutes = TICK_MIN;
+                float shotsPossible = u.Units * ospec.RoF * minutes * 0.05f;   // ۵٪ زمان درگیر آتش
+
                 if (t.Type == 1)
                 {
-                    if (u.CAmmo > 0.05f)
+                    if (u.CAmmo >= 1f)
                     {
-                        // نفوذ واقعی این مدل در برابر زره واقعی مدل هدف
-                        float effArmor = fspec.Armor * (t.Posture is P_DEFEND or P_AMBUSH ? 1.30f : 1f);
-                        float pen = 1f / (1f + MathF.Exp(-(ospec.Pen * rangeMul - effArmor) / 9f));
-                        float shots = u.Units * 1.6f * k;
-                        float kills = shots * 0.32f * pen * (0.9f + rng.NextF() * 0.25f);
+                        float shots = MathF.Min(shotsPossible, u.CAmmo);
+                        float hits = shots * common;
+
+                        // زاویه‌ی برخورد → کدام صفحه‌ی زره و چه ضخامت مؤثری
+                        float cos = FacingCos(u.X, u.Y, t);
+                        bool sideShot = cos < 0.45f;
+                        float plate = sideShot ? fspec.ArmorSide : fspec.ArmorFront;
+                        float impactCos = sideShot ? Math.Max(0.45f, MathF.Abs(cos)) : Math.Max(0.55f, cos);
+                        float effArmor = EffectiveArmor(plate, fspec.Slope, impactCos);
+                        if (t.Posture is P_DEFEND or P_AMBUSH) effArmor *= 1.18f;   // بدنه در سنگر
+
+                        float pen = PenetrationAt(ospec, rangeM);
+                        float pk = PenChance(pen, effArmor);
+                        float kills = hits * 0.30f * pk * (0.9f + rng.NextF() * 0.25f);
+
                         ApplyDamage(foe, best, kills, own, u.Model, true);
-                        u.CAmmo = Math.Max(0f, u.CAmmo - shots * 0.05f);
+                        u.CAmmo = MathF.Max(0f, u.CAmmo - shots);
                         u.Signature = Math.Min(1f, u.Signature + 0.55f);
                         duel += kills;
                         t.Supp = Math.Min(1f, t.Supp + 0.12f);
                     }
                 }
-                else if (u.MAmmo > 0.05f)
+                else
                 {
-                    float mgKill = u.Units * ospec.Mg * 1.05f * k * (1f - cover * 0.85f);
-                    float heKill = 0f;
-                    if (u.CAmmo > 0.05f)
+                    // ضدپیاده: گلوله‌ی انفجاری + مسلسل، هر کدام از انبار خودش
+                    float kills = 0f;
+                    if (u.CAmmo >= 1f)
                     {
-                        heKill = u.Units * ospec.He * 4.5f * k * (1f - cover * 0.55f);
-                        u.CAmmo = Math.Max(0f, u.CAmmo - u.Units * 0.04f);
+                        float heShots = MathF.Min(shotsPossible * 0.6f, u.CAmmo);
+                        // اثر انفجار ∝ ریشه‌ی سوم وزن ماده‌ی منفجره (شعاع کشندگی)
+                        float blast = MathF.Pow(MathF.Max(0.01f, ospec.HeFiller), 0.333f) * 2.6f;
+                        kills += heShots * common * blast * (1f - cover * 0.55f);
+                        u.CAmmo = MathF.Max(0f, u.CAmmo - heShots);
                         u.Signature = Math.Min(1f, u.Signature + 0.5f);
                     }
-                    ApplyDamage(foe, best, mgKill + heKill, own, u.Model, false);
-                    u.MAmmo = Math.Max(0f, u.MAmmo - u.Units * 0.06f);
-                    u.Signature = Math.Min(1f, u.Signature + 0.22f);
-                    t.Supp = Math.Min(1f, t.Supp + 0.3f);
+                    if (u.MAmmo >= 20f)
+                    {
+                        float burst = u.Units * ospec.MgCount * 220f * (minutes / 60f);
+                        burst = MathF.Min(burst, u.MAmmo);
+                        kills += burst * 0.00042f * common * (1f - cover * 0.85f);
+                        u.MAmmo = MathF.Max(0f, u.MAmmo - burst);
+                        u.Signature = Math.Min(1f, u.Signature + 0.22f);
+                    }
+                    if (kills > 0f)
+                    {
+                        ApplyDamage(foe, best, kills, own, u.Model, false);
+                        t.Supp = Math.Min(1f, t.Supp + 0.3f);
+                    }
                 }
             }
             else
             {
                 if (t.Type == 0)
                 {
-                    if (u.MAmmo > 0.05f)
+                    if (u.MAmmo >= 20f)
                     {
-                        float kills = u.Units * 0.045f * k * (1f - cover * 0.8f);
+                        float rounds = u.Units * 9f * (TICK_MIN / 60f);   // شلیک انفرادی
+                        rounds = MathF.Min(rounds, u.MAmmo);
+                        float kills = rounds * 0.0022f * common * (1f - cover * 0.8f);
                         ApplyDamage(foe, best, kills, own, u.Model, false);
-                        u.MAmmo = Math.Max(0f, u.MAmmo - u.Units * 0.045f);
+                        u.MAmmo = MathF.Max(0f, u.MAmmo - rounds);
                         u.Signature = Math.Min(1f, u.Signature + 0.16f);
                         t.Supp = Math.Min(1f, t.Supp + 0.15f);
                     }
                 }
                 else if (bestDist < 0.45f)
                 {
-                    // پیاده در برابر زره: فقط در فاصله‌ی خیلی نزدیک و در برابر زره نازک مؤثر
-                    float armorResist = 1f / (1f + fspec.Armor / 45f);
-                    float kills = u.Units * 0.0055f * k * armorResist;
+                    // پیاده در برابر زره: نارنجک و مین چسبان، فقط در فاصله‌ی نزدیک.
+                    //  زره پهلو و عقب هدف اصل است، نه سینه.
+                    float cos = FacingCos(u.X, u.Y, t);
+                    float plate = cos < 0.45f ? fspec.ArmorSide : fspec.ArmorFront;
+                    float resist = 1f / (1f + plate / 40f);
+                    float kills = u.Units * 0.0060f * common * resist;
                     ApplyDamage(foe, best, kills, own, u.Model, true);
-                    u.MAmmo = Math.Max(0f, u.MAmmo - u.Units * 0.02f);
+                    u.MAmmo = MathF.Max(0f, u.MAmmo - u.Units * 2f);
                     duel += kills * 0.5f;
                 }
             }
@@ -1542,12 +1786,12 @@ static class WarEngine
         for (int i = 0; i < f.N; i++)
         {
             if (!f.G[i].Alive) continue;
-            float ammoR = (f.G[i].CAmmo + f.G[i].MAmmo) / Math.Max(0.01f, f.G[i].Size0 * 2f);
+            float ammoR = 0.5f * (f.G[i].CAmmo / Math.Max(1f, f.G[i].CAmmo0) + f.G[i].MAmmo / Math.Max(1f, f.G[i].MAmmo0));
             float am = 0.45f + 0.55f * Math.Clamp(ammoR * 1.6f, 0f, 1f);
             if (f.G[i].Type == 1)
             {
                 var s = f.Specs[f.G[i].Model];
-                p += f.G[i].Units * (8f + s.Armor * 0.04f + s.Pen * 0.04f) * am;
+                p += f.G[i].Units * (8f + s.ArmorFront * 0.04f + s.PenAt500 * 0.04f) * am;
             }
             else p += f.G[i].Units * 0.85f * am;
         }
@@ -1561,6 +1805,45 @@ static class WarEngine
     }
 
     // ═════════════════════════ فاز هوایی ════════════════════════════════════
+    // ═══════════════════ نبرد هوایی: شبیه‌سازی زمان‌گام ══════════════════════
+    //  برخلاف زمین که شبکه‌ی دوبعدی دارد، هوا در «ارتفاع» و «فاصله تا هدف» مدل
+    //  می‌شود. ارتباط رادیویی در هوا ضعیف است، پس فرمانده‌ی هوایی فقط چند تصمیم
+    //  کلان می‌گیرد و بعد هر دسته تقریباً مستقل می‌جنگد — دقیقاً مثل واقعیت ۱۹۴۰.
+
+    const int AIR_TICKS = 20;          // ۲۰ گام × ۳ دقیقه = یک ماموریت ۶۰ دقیقه‌ای
+    const float AIR_TICK_MIN = 3f;
+
+    struct AirGroup
+    {
+        public float Alt;          // ارتفاع (متر) — سرمایه‌ی انرژی
+        public float DistKm;       // فاصله تا هدف
+        public float Count;        // تعداد هواپیمای زنده
+        public float Count0;
+        public float AmmoSec;      // ثانیه آتش باقی‌مانده
+        public float Fuel;         // دقیقه پرواز باقی‌مانده
+        public byte  Role;         // 0=جنگنده اسکورت، 1=جنگنده آزاد، 2=بمب‌افکن، 3=رهگیر
+        public byte  Model;
+        public bool  Alive;
+        public bool  Engaged;
+        public bool  DroppedBombs;
+    }
+
+    // شانس دیدن هدف در هوا: تابع اختلاف ارتفاع، فاصله، ابر و خورشید.
+    //  در ۱۹۴۰ رادار هوابرد نبود؛ همه‌چیز چشمی است.
+    static float AirSpot(float myAlt, float foeAlt, float sepKm, byte weather, byte time)
+    {
+        float baseSpot = 1f - Math.Clamp(sepKm / 12f, 0f, 0.95f);
+        // هواپیمای بالاتر، پایینی را روی زمینه‌ی زمین راحت‌تر می‌بیند
+        float altEdge = Math.Clamp((myAlt - foeAlt) / 3000f, -0.35f, 0.35f);
+        float cloud = WxAir[weather];
+        float light = TimeAir[time];
+        return Math.Clamp((baseSpot + altEdge) * cloud * light, 0.02f, 0.98f);
+    }
+
+    // مزیت انرژی: هواپیمای بالاتر می‌تواند شیرجه بزند و ابتکار عمل را بگیرد.
+    static float EnergyEdge(float myAlt, float foeAlt)
+        => Math.Clamp(1f + (myAlt - foeAlt) / 4000f, 0.62f, 1.45f);
+
     static AirOutcome RunAirPhase(Country atk, Country def, Field field,
         long aFight, long aBomb, int aAirStrat, int aAirTac,
         long dFight, long dAA, int dAirStrat, int dAirTac,
@@ -1572,99 +1855,259 @@ static class WarEngine
         o.DefHadAir = (dFight + dAA) > 0;
         if (!o.AtkHadAir && !o.DefHadAir) return o;
 
-        float wxAir = WxAir[field.Weather] * TimeAir[field.StartTime];
-
         float aFamil = Familiarity(atk.Faction, aFs.Origin, aProf);
         float dFamil = Familiarity(def.Faction, dFs.Origin, dProf);
-        float aQ = (aFs.Maneuver * 0.55f + aFs.Firepower * 0.45f) * aProf.CrewQuality * aFamil;
-        float dQ = (dFs.Maneuver * 0.55f + dFs.Firepower * 0.45f) * dProf.CrewQuality * dFamil;
+        byte wx = field.Weather, tm = field.StartTime;
 
-        float capBonus = (dAirStrat == 1 && dAirTac == 1) ? 1.25f : 1f;
-        float flakBonus = (dAirStrat == 2 && dAirTac == 1) ? 1.35f : 1f;
-        if (dAirStrat == 2 && dAirTac == 2) capBonus *= 1.1f;
-
-        float aPow = aFight * aQ * wxAir * rng.Range(0.9f, 1.1f);
-        float dPow = dFight * dQ * capBonus * rng.Range(0.9f, 1.1f);
-
-        long aFightLost = 0, dFightLost = 0;
-        if (aFight > 0 && dFight > 0)
-        {
-            o.HadAirCombat = true;
-            float total = aPow + dPow;
-            float aLossFrac = Math.Clamp(dPow / Math.Max(1f, total) * rng.Range(0.7f, 1.1f), 0f, 0.95f);
-            float dLossFrac = Math.Clamp(aPow / Math.Max(1f, total) * rng.Range(0.7f, 1.1f), 0f, 0.95f);
-            aFightLost = (long)Math.Round(aFight * aLossFrac);
-            dFightLost = (long)Math.Round(dFight * dLossFrac);
-        }
-
-        long aBombLost = 0, dAALost = 0;
-        if (aBomb > 0 && dFight > 0 && aFight == 0)
-        {
-            o.HadAirCombat = true;
-            float intercept = dFight * dQ * capBonus * rng.Range(0.8f, 1.1f);
-            long got = (long)Math.Round(Math.Min(aBomb, intercept * 0.015f / (1f + aBs.Armor * 0.3f)));
-            aBombLost += Math.Min(aBomb, got);
-        }
-
-        long aFightLeft = aFight - aFightLost;
-        long dFightLeft = dFight - dFightLost;
-
-        if (dAA > 0 && (aFightLeft > 0 || aBomb > 0))
-        {
-            float aaPower = dAA * flakBonus * rng.Range(0.85f, 1.15f);
-            float bomberResist = 1f / (1f + aBs.Armor * 0.25f);
-            long bombHit = (long)Math.Round(Math.Min(Math.Max(0, aBomb - aBombLost), aaPower * 0.015f * bomberResist));
-            aBombLost = Math.Min(aBomb, aBombLost + bombHit);
-            long fightHit = (long)Math.Round(Math.Min(aFightLeft, aaPower * 0.02f));
-            aFightLost += fightHit; aFightLeft -= fightHit;
-            float incoming = aFightLeft + (aBomb - aBombLost) * 1.3f;
-            dAALost = (long)Math.Round(Math.Min(dAA, incoming * rng.Range(0.03f, 0.07f)));
-        }
-
-        long aBombLeft = aBomb - aBombLost;
-        float atkRemain = aFightLeft * aQ + aBombLeft * 1.0f;
-        float defRemain = dFightLeft * dQ + dAA * 0.5f;
-        o.Superiority = Math.Clamp((atkRemain - defRemain) / Math.Max(1f, atkRemain + defRemain), -1f, 1f);
-
+        // ── ارتفاع ورود: تصمیم کلان فرمانده‌ی هوایی ──
+        //  شکار آزاد = بالا برای مزیت انرژی. حمله به پایگاه = پایین برای غافلگیری.
+        //  بمباران دقیق = بالا برای امنیت. بمباران منطقه‌ای = متوسط.
+        float escortAlt, bomberAlt;
         if (aAirStrat == 1)
         {
-            if (aAirTac == 2 && aBombLeft > 0 && dFightLeft > 0)
-            {
-                float raid = aBombLeft * (aBs.Bombload / 3600f) * wxAir * (0.5f + 0.5f * Math.Clamp(o.Superiority + 0.5f, 0f, 1f));
-                long grounded = (long)Math.Round(Math.Min(dFightLeft, raid * rng.Range(0.6f, 1.0f)));
-                if (grounded > 0) { dFightLost += grounded; dFightLeft -= grounded; }
-            }
-            float casPower = (aFightLeft * aFs.Cas + aBombLeft * 1.5f) * wxAir;
-            o.CasAtk = 1f + Math.Clamp(casPower / Math.Max(50f, (atk.Soldiers + 1) * 0.02f), 0f, 0.6f);
-            if (o.Superiority < -0.1f)
-                o.CasDef = 1f + Math.Clamp(dFightLeft * dFs.Cas / Math.Max(50f, (def.Soldiers + 1) * 0.02f), 0f, 0.4f);
+            escortAlt = aAirTac == 1 ? MathF.Min(aFs.CeilingM * 0.85f, 7000f) : 1200f;
+            bomberAlt = aAirTac == 1 ? 4000f : 1500f;
         }
-        else if (aAirStrat == 2)
+        else
         {
-            float effBomb = aBombLeft * (0.55f + 0.45f * Math.Clamp(o.Superiority + 0.5f, 0f, 1f)) * wxAir;
-            float perBomber = aBs.Bombload / 3600f;
-            float intensity = effBomb * perBomber;
-            float moneyFrac = Math.Clamp(intensity * 0.02f, 0f, aAirTac == 1 ? 0.35f : 0.30f);
-            float ironFrac = Math.Clamp(intensity * 0.02f, 0f, aAirTac == 1 ? 0.40f : 0.18f);
-            if (aAirTac == 1)
-            {
-                o.StratMoney = (long)(def.Money * moneyFrac * 0.9f);
-                o.StratIron = (long)(def.Iron * ironFrac);
-                o.StratWelfare = Math.Clamp(effBomb * 0.02f, 0f, 4f);
-            }
-            else
-            {
-                o.StratMoney = (long)(def.Money * moneyFrac);
-                o.StratIron = (long)(def.Iron * ironFrac * 0.5f);
-                o.StratWelfare = Math.Clamp(effBomb * 0.02f, 0f, 2f);
-            }
-            o.CasAtk = 1f + Math.Clamp(aFightLeft * aFs.Cas / Math.Max(80f, (atk.Soldiers + 1) * 0.03f), 0f, 0.3f);
+            bomberAlt = aAirTac == 1 ? MathF.Min(aBs.CeilingM * 0.80f, 7500f) : 4200f;
+            escortAlt = bomberAlt + 800f;   // اسکورت همیشه کمی بالاتر
+        }
+        // مدافع: CAP بالا می‌ایستد، دفاع نقطه‌ای پایین می‌ماند
+        float capAlt = (dAirStrat == 1 && dAirTac == 1) ? MathF.Min(dFs.CeilingM * 0.80f, 6500f) : 2500f;
+
+        // ── تشکیل دسته‌ها ──
+        var A = new List<AirGroup>();
+        var D = new List<AirGroup>();
+        int perGroup = 12;
+
+        long left = aFight;
+        bool escortDuty = aBomb > 0 && aAirStrat == 2;   // در بمباران، جنگنده اسکورت است
+        while (left > 0)
+        {
+            float n = Math.Min(left, perGroup);
+            A.Add(new AirGroup { Alt = escortAlt, DistKm = 60f, Count = n, Count0 = n,
+                AmmoSec = aFs.AmmoSec, Fuel = aFs.RangeKm / MathF.Max(1f, aFs.SpeedKmh) * 60f,
+                Role = (byte)(escortDuty ? 0 : 1), Alive = true });
+            left -= (long)n;
+        }
+        left = aBomb;
+        while (left > 0)
+        {
+            float n = Math.Min(left, perGroup);
+            A.Add(new AirGroup { Alt = bomberAlt, DistKm = 60f, Count = n, Count0 = n,
+                AmmoSec = 999f, Fuel = aBs.RangeKm / MathF.Max(1f, aBs.SpeedKmh) * 60f,
+                Role = 2, Alive = true });
+            left -= (long)n;
+        }
+        left = dFight;
+        while (left > 0)
+        {
+            float n = Math.Min(left, perGroup);
+            D.Add(new AirGroup { Alt = capAlt, DistKm = 0f, Count = n, Count0 = n,
+                AmmoSec = dFs.AmmoSec, Fuel = dFs.RangeKm / MathF.Max(1f, dFs.SpeedKmh) * 60f,
+                Role = 3, Alive = true });
+            left -= (long)n;
         }
 
-        o.AtkFightersLost = Math.Min(aFight, Math.Max(0, aFightLost));
-        o.AtkBombersLost = Math.Min(aBomb, Math.Max(0, aBombLost));
-        o.DefFightersLost = Math.Min(dFight, Math.Max(0, dFightLost));
-        o.DefAntiAirLost = Math.Min(dAA, Math.Max(0, dAALost));
+        float aLostF = 0f, aLostB = 0f, dLostF = 0f, dLostAA = 0f;
+        float bombsOnTarget = 0f, bombsOnTroops = 0f;
+        float aaStrength = dAA;
+        bool anyCombat = false;
+        float capBonus = (dAirStrat == 1 && dAirTac == 1) ? 1.20f : 1f;
+        float flakBonus = (dAirStrat == 2 && dAirTac == 1) ? 1.35f : 1f;
+
+        // ── حلقه‌ی زمانی ماموریت ──
+        for (int t = 0; t < AIR_TICKS; t++)
+        {
+            byte timeNow = (byte)((tm + t / 12) & 3);
+
+            // ۱) نزدیک شدن مهاجم به هدف
+            for (int i = 0; i < A.Count; i++)
+            {
+                var g = A[i];
+                if (!g.Alive) continue;
+                float spd = g.Role == 2 ? aBs.SpeedKmh : aFs.SpeedKmh;
+                g.DistKm = MathF.Max(0f, g.DistKm - spd * (AIR_TICK_MIN / 60f));
+                g.Fuel -= AIR_TICK_MIN;
+                if (g.Fuel <= 0f) { g.Alive = false; }      // سوخت تمام → بازگشت
+                A[i] = g;
+            }
+
+            // ۲) رهگیری: مدافع باید اول ببیند
+            for (int di = 0; di < D.Count; di++)
+            {
+                var d = D[di];
+                if (!d.Alive || d.AmmoSec <= 0f) continue;
+                int target = -1; float bestVal = 0f;
+                for (int ai = 0; ai < A.Count; ai++)
+                {
+                    var a = A[ai];
+                    if (!a.Alive) continue;
+                    float spot = AirSpot(d.Alt, a.Alt, a.DistKm, wx, timeNow);
+                    if (rng.NextF() > spot) continue;
+                    // اولویت: بمب‌افکن مهم‌تر از جنگنده
+                    float val = (a.Role == 2 ? 3.2f : 1f) * a.Count / (1f + a.DistKm * 0.05f);
+                    if (val > bestVal) { bestVal = val; target = ai; }
+                }
+                if (target < 0) continue;
+
+                var tg = A[target];
+                anyCombat = true;
+                float edge = EnergyEdge(d.Alt, tg.Alt) * capBonus * dProf.CrewQuality * dFamil;
+
+                if (tg.Role == 2)
+                {
+                    // رهگیری بمب‌افکن: آتش دفاعی متقابل
+                    float pass = MathF.Min(d.AmmoSec, AIR_TICK_MIN * 6f);
+                    float killed = pass * dFs.GunKgMin / 60f * 0.030f * edge / MathF.Max(0.4f, aBs.Durability);
+                    killed = MathF.Min(killed, tg.Count);
+                    tg.Count -= killed; aLostB += killed;
+
+                    // تیراندازهای بمب‌افکن جواب می‌دهند — پوشش کروی مهم است
+                    float defFire = tg.Count * aBs.DefGunKgMin / 60f * (aBs.DefPositions / 8f) * 0.016f * AIR_TICK_MIN;
+                    float dk = MathF.Min(defFire, d.Count);
+                    d.Count -= dk; dLostF += dk;
+                    d.AmmoSec -= pass;
+                }
+                else
+                {
+                    // سگ‌جنگی: چابکی و انرژی و وزن آتش
+                    float aTurn = 1f / MathF.Max(1f, aFs.TurnSec);
+                    float dTurn = 1f / MathF.Max(1f, dFs.TurnSec);
+                    float aEdge = EnergyEdge(tg.Alt, d.Alt) * aProf.CrewQuality * aFamil;
+
+                    float dScore = dTurn * dFs.GunKgMin * edge;
+                    float aScore = aTurn * aFs.GunKgMin * aEdge;
+                    float total = dScore + aScore;
+
+                    float burn = MathF.Min(AIR_TICK_MIN * 4f, MathF.Min(d.AmmoSec, tg.AmmoSec));
+                    float intensity = burn * 0.055f;
+                    float aKilled = MathF.Min(tg.Count, intensity * dScore / MathF.Max(1f, total) / MathF.Max(0.4f, aFs.Durability));
+                    float dKilled = MathF.Min(d.Count, intensity * aScore / MathF.Max(1f, total) / MathF.Max(0.4f, dFs.Durability));
+
+                    tg.Count -= aKilled; aLostF += aKilled;
+                    d.Count -= dKilled; dLostF += dKilled;
+                    d.AmmoSec -= burn; tg.AmmoSec -= burn;
+
+                    // در سگ‌جنگی ارتفاع خرج می‌شود و با نرخ صعود هر هواپیما جبران
+                    float aRegain = aFs.ClimbMs * AIR_TICK_MIN * 60f * 0.20f;
+                    float dRegain = dFs.ClimbMs * AIR_TICK_MIN * 60f * 0.20f;
+                    tg.Alt = Math.Clamp(tg.Alt - 400f + aRegain, 500f, aFs.CeilingM);
+                    d.Alt  = Math.Clamp(d.Alt  - 300f + dRegain, 500f, dFs.CeilingM);
+                    tg.Engaged = true;
+                }
+                if (tg.Count < 0.5f) tg.Alive = false;
+                if (d.Count < 0.5f) d.Alive = false;
+                A[target] = tg; D[di] = d;
+            }
+
+            // ۳) پدافند: فقط وقتی مهاجم به برد رسیده
+            if (aaStrength > 0f)
+            {
+                for (int ai = 0; ai < A.Count; ai++)
+                {
+                    var a = A[ai];
+                    if (!a.Alive || a.DistKm > 6f) continue;
+                    // آتش ضدهوایی با ارتفاع سخت‌تر می‌شود؛ توپ ۸۸ هم سقفی دارد
+                    float altFactor = Math.Clamp(1f - (a.Alt - 3000f) / 9000f, 0.30f, 1f);
+                    float exposure = a.Role == 2 ? 1f : 0.55f;   // بمب‌افکن مسیر مستقیم می‌رود
+                    float dur = a.Role == 2 ? aBs.Durability : aFs.Durability;
+                    float hit = aaStrength * flakBonus * 0.00055f * altFactor * exposure
+                                * AIR_TICK_MIN / MathF.Max(0.4f, dur) * rng.Range(0.7f, 1.3f);
+                    hit = MathF.Min(hit, a.Count);
+                    a.Count -= hit;
+                    if (a.Role == 2) aLostB += hit; else aLostF += hit;
+                    if (a.Count < 0.5f) a.Alive = false;
+                    A[ai] = a;
+                    anyCombat = true;
+                }
+                // پدافند هم زیر بمب و رگبار تلفات می‌دهد
+                float overhead = 0f;
+                foreach (var a in A) if (a.Alive && a.DistKm < 3f) overhead += a.Count;
+                if (overhead > 0f)
+                {
+                    float suppressed = MathF.Min(aaStrength, overhead * rng.Range(0.004f, 0.012f) * AIR_TICK_MIN);
+                    aaStrength -= suppressed; dLostAA += suppressed;
+                }
+            }
+
+            // ۴) رهاسازی بمب
+            for (int ai = 0; ai < A.Count; ai++)
+            {
+                var a = A[ai];
+                if (!a.Alive || a.Role != 2 || a.DroppedBombs || a.DistKm > 0.5f) continue;
+                // دقت: CEP پایه، بدتر با ارتفاع و ابر، بهتر با نشانه‌روی خوب
+                float cep = aBs.AccuracyCep * (1f + a.Alt / 9000f) / MathF.Max(0.35f, WxAir[wx]);
+                float hitFrac = Math.Clamp(220f / MathF.Max(60f, cep), 0.06f, 0.85f);
+                float tons = a.Count * aBs.BombKg / 1000f;
+                if (aAirStrat == 2) bombsOnTarget += tons * hitFrac;
+                else bombsOnTroops += tons * hitFrac;
+                a.DroppedBombs = true;
+                a.Alt = MathF.Max(800f, a.Alt);
+                A[ai] = a;
+            }
+
+            // ۵) پشتیبانی نزدیک جنگنده‌ها روی نیروی زمینی
+            if (aAirStrat == 1)
+            {
+                foreach (var a in A)
+                {
+                    if (!a.Alive || a.Role == 2 || a.DistKm > 1.5f || a.AmmoSec <= 0f) continue;
+                    bombsOnTroops += a.Count * (aFs.BombKg / 1000f) * 0.12f;
+                }
+            }
+        }
+
+        long aFightLost = (long)MathF.Round(MathF.Min(aFight, aLostF));
+        long aBombLost  = (long)MathF.Round(MathF.Min(aBomb, aLostB));
+        // خدمه‌ی از دست رفته: B-17 ده نفره سنگین‌تر از DB-3 چهار نفره است
+        o.AircrewLost = (long)MathF.Round(aBombLost * aBs.Crew + aFightLost);
+        long dFightLost = (long)MathF.Round(MathF.Min(dFight, dLostF));
+        long dAALost    = (long)MathF.Round(MathF.Min(dAA, dLostAA));
+
+        long aFightLeft = aFight - aFightLost;
+        long aBombLeft  = aBomb - aBombLost;
+        long dFightLeft = dFight - dFightLost;
+
+        // ── برتری هوایی از توان باقی‌مانده‌ی واقعی ──
+        float atkRemain = aFightLeft * (aFs.GunKgMin / MathF.Max(1f, aFs.TurnSec)) + aBombLeft * 1.2f;
+        float defRemain = dFightLeft * (dFs.GunKgMin / MathF.Max(1f, dFs.TurnSec)) + (aaStrength) * 0.05f;
+        o.Superiority = Math.Clamp((atkRemain - defRemain) / MathF.Max(1f, atkRemain + defRemain), -1f, 1f);
+        o.HadAirCombat = anyCombat;
+
+        // ── اثر روی زمین و اقتصاد ──
+        if (bombsOnTroops > 0f)
+            o.CasAtk = 1f + Math.Clamp(bombsOnTroops / MathF.Max(6f, (atk.Soldiers + 1) * 0.0018f), 0f, 0.6f);
+        if (o.Superiority < -0.1f && dFightLeft > 0)
+            o.CasDef = 1f + Math.Clamp(dFightLeft * dFs.BombKg / 1000f / MathF.Max(6f, (def.Soldiers + 1) * 0.002f), 0f, 0.4f);
+
+        if (aAirStrat == 2 && bombsOnTarget > 0f)
+        {
+            // تناژ روی هدف → درصد خسارت اقتصادی
+            float moneyFrac = Math.Clamp(bombsOnTarget * 0.0075f, 0f, aAirTac == 1 ? 0.35f : 0.30f);
+            float ironFrac  = Math.Clamp(bombsOnTarget * 0.0075f, 0f, aAirTac == 1 ? 0.40f : 0.18f);
+            if (aAirTac == 1)   // بمباران دقیق صنایع
+            {
+                o.StratMoney = (long)(def.Money * moneyFrac * 0.9f);
+                o.StratIron  = (long)(def.Iron * ironFrac);
+                o.StratWelfare = Math.Clamp(bombsOnTarget * 0.010f, 0f, 4f);
+            }
+            else                // بمباران منطقه‌ای شهرها
+            {
+                o.StratMoney = (long)(def.Money * moneyFrac);
+                o.StratIron  = (long)(def.Iron * ironFrac * 0.5f);
+                o.StratWelfare = Math.Clamp(bombsOnTarget * 0.014f, 0f, 2f);
+            }
+        }
+
+        o.AtkFightersLost = Math.Max(0, aFightLost);
+        o.AtkBombersLost  = Math.Max(0, aBombLost);
+        o.DefFightersLost = Math.Max(0, dFightLost);
+        o.DefAntiAirLost  = Math.Max(0, dAALost);
+        o.BombTonsOnTarget = bombsOnTarget;
+        o.EscortAltM = escortAlt;
+        o.CapAltM = capAlt;
         o.Narrative = BuildAirNarrative(o, aFight, aBomb, dFight, dAA, aAirStrat, aAirTac, aFs, aBs, dFs, field);
         return o;
     }
@@ -1674,23 +2117,43 @@ static class WarEngine
     {
         if (aFight == 0 && aBomb == 0 && dFight == 0 && dAA == 0) return null;
         var s = new StringBuilder();
-        if (WxAir[field.Weather] < 0.7f)
-            s.Append($"هوای {WeatherName[field.Weather]} پرواز را سخت کرد؛ ");
 
-        if (air.HadAirCombat)
-            s.Append($"{aFs.Name}های مهاجم با {dFs.Name}های مدافع درگیر شدند و {air.AtkFightersLost} در برابر {air.DefFightersLost} جنگنده سرنگون شد. ");
+        if (WxAir[field.Weather] < 0.7f)
+            s.Append($"هوای {WeatherName[field.Weather]} دید خلبان‌ها را برید؛ ");
+
+        if (aFight > 0 || aBomb > 0)
+            s.Append($"سازند مهاجم در ارتفاع {air.EscortAltM:F0} متری وارد شد");
+        if (dFight > 0)
+            s.Append($" و گشت مدافع از {air.CapAltM:F0} متری روی سرش نشسته بود");
+        s.Append(". ");
+
+        if (air.HadAirCombat && aFight > 0 && dFight > 0)
+        {
+            string edge = air.EscortAltM > air.CapAltM + 500f
+                ? $"{aFs.Name}ها با مزیت ارتفاع شیرجه زدند"
+                : air.CapAltM > air.EscortAltM + 500f
+                ? $"{dFs.Name}ها از بالا شیرجه زدند و ابتکار را گرفتند"
+                : "دو طرف تقریباً هم‌ارتفاع درگیر شدند";
+            s.Append($"{edge}؛ {air.AtkFightersLost} در برابر {air.DefFightersLost} جنگنده سرنگون شد. ");
+        }
         else if (aFight > 0 && dFight == 0)
             s.Append($"{aFs.Name}ها بدون مقاومت هوایی آسمان را در اختیار گرفتند. ");
 
-        if (dAA > 0 && (aBomb > 0 || aFight > 0))
-            s.Append($"آتش پدافند {air.AtkBombersLost} بمب‌افکن را زد و خودش {air.DefAntiAirLost} قبضه از دست داد. ");
+        if (aBomb > 0 && dFight > 0 && air.AtkBombersLost > 0)
+            s.Append($"تیراندازهای {aBs.Name} ({aBs.DefPositions} جایگاه) جواب رهگیرها را دادند ولی {air.AtkBombersLost} فروند از دست رفت. ");
+
+        if (dAA > 0 && air.AtkBombersLost + air.AtkFightersLost > 0)
+            s.Append($"آتش پدافند از پایین می‌جوشید و {air.DefAntiAirLost} قبضه هم زیر رگبار خرد شد. ");
+
+        if (air.BombTonsOnTarget > 0.05f)
+            s.Append($"{air.BombTonsOnTarget:F1} تن بمب روی هدف نشست. ");
 
         if (aAirStrat == 2 && (air.StratMoney > 0 || air.StratIron > 0))
             s.Append(aAirTac == 1
-                ? $"بمباران دقیق صنایع، {air.StratMoney / 1000.0:F1}K پول و {air.StratIron / 1000.0:F1}K آهن از اقتصاد دشمن را نابود کرد. "
-                : $"بمباران منطقه‌ای شهرها {air.StratMoney / 1000.0:F1}K پول خسارت زد و روحیه‌ی عمومی را کوبید. ");
+                ? $"بمباران دقیق صنایع {air.StratMoney / 1000.0:F1}K پول و {air.StratIron / 1000.0:F1}K آهن را نابود کرد. "
+                : $"بمباران منطقه‌ای {air.StratMoney / 1000.0:F1}K پول خسارت زد و روحیه‌ی شهرها را شکست. ");
         else if (aAirStrat == 1 && air.Superiority > 0.15)
-            s.Append("با برتری در آسمان، پشتیبانی نزدیک هوایی مستقیم روی سر مدافع کار کرد. ");
+            s.Append("با برتری در آسمان، پشتیبانی نزدیک مستقیم روی سر مدافع کار کرد. ");
         else if (air.Superiority < -0.15)
             s.Append("آسمان دست مدافع افتاد و ستون‌های مهاجم زیر فشار هوایی حرکت کردند. ");
 
@@ -1854,6 +2317,7 @@ static class WarEngine
         res.DefenderFightersLost = air.DefFightersLost;
         res.DefenderAntiAirLost = air.DefAntiAirLost;
         res.AirSuperiority = Math.Round(air.Superiority, 2);
+        res.AttackerCrewLost += air.AircrewLost;
         if (air.Narrative != null) log.Add(2, 2, LG_AIR, air.Narrative);
 
         DistributeLoss(res.AttackerPlaneLossByModel, aFighterList, air.AtkFightersLost);
@@ -2227,18 +2691,19 @@ static class WarEngine
         if (own.ModelSent[oi] <= 0 || foe.ModelSent[fi] <= 0) return null;
 
         var os = own.Specs[oi]; var fs = foe.Specs[fi];
-        float penGap = os.Pen - fs.Armor;
-        float defGap = fs.Pen - os.Armor;
+        float penOwn = PenetrationAt(os, 800f), penFoe = PenetrationAt(fs, 800f);
+        float penGap = penOwn - fs.ArmorFront;
+        float defGap = penFoe - os.ArmorFront;
 
         string verdict;
         if (penGap > 12f && defGap < 0f)
-            verdict = $"{os.Name} با نفوذ {os.Pen:F0} میلی‌متری، زره {fs.Armor:F0} میلی‌متری {fs.Name} را از فاصله‌ی معمول می‌درید، ولی گلوله‌ی {fs.Name} روی زره‌ی {os.Armor:F0} میلی‌متری آن کمانه می‌کرد.";
+            verdict = $"{os.Name} با توپ {os.Caliber:F0}mm در ۸۰۰ متری {penOwn:F0}mm فولاد می‌درید و زره {fs.ArmorFront:F0}mm جلوی {fs.Name} جلودارش نبود؛ در مقابل گلوله‌ی {fs.Name} ({penFoe:F0}mm) روی زره {os.ArmorFront:F0}mm آن کمانه می‌کرد.";
         else if (penGap < 0f && defGap > 12f)
-            verdict = $"زره {fs.Armor:F0} میلی‌متری {fs.Name} در برابر نفوذ {os.Pen:F0} میلی‌متری {os.Name} تقریباً مصون بود؛ ولی توپ {fs.Name} زره‌ی نازک‌تر {os.Name} را راحت می‌شکافت.";
+            verdict = $"زره {fs.ArmorFront:F0}mm جلوی {fs.Name} در برابر {penOwn:F0}mm نفوذ {os.Name} در ۸۰۰ متری تقریباً مصون بود؛ ولی توپ {fs.Caliber:F0}mm آن با {penFoe:F0}mm زره {os.ArmorFront:F0}mm را راحت می‌شکافت.";
         else if (penGap > 0f && defGap > 0f)
-            verdict = $"{os.Name} و {fs.Name} هر دو زره‌ی هم را می‌زدند؛ برنده هر تک‌درگیری، آن‌که زودتر شلیک می‌کرد.";
+            verdict = $"{os.Name} ({penOwn:F0}mm) و {fs.Name} ({penFoe:F0}mm) هر دو زره‌ی هم را می‌زدند؛ برنده‌ی هر تک‌درگیری آن‌که زودتر شلیک می‌کرد — و {(os.RoF > fs.RoF ? os.Name : fs.Name)} آهنگ آتش بالاتری داشت.";
         else
-            verdict = $"نه {os.Name} و نه {fs.Name} نمی‌توانستند به‌راحتی زره‌ی هم را بشکافند؛ نبرد زرهی به فرسایش و مانور کشید.";
+            verdict = $"نه {os.Name} ({penOwn:F0}mm) و نه {fs.Name} ({penFoe:F0}mm) نمی‌توانستند زره‌ی هم را از روبه‌رو بشکافند؛ نبرد به دور زدن و شلیک از پهلو کشید.";
 
         sb.Append(verdict);
 
@@ -2391,7 +2856,10 @@ static class WarEngine
         sb.Append($"   🛡 تانک: {Num(r.AttackerTanksLost)} از {Num(aTanks)} | 🪖 سرباز: {Num(r.AttackerSoldiersLost)} از {Num(aSold)}\n");
         if (aModels != null) sb.Append(aModels).Append('\n');
         if (aFight > 0 || aBomb > 0)
+        {
             sb.Append($"   ✈️ جنگنده: {Num(r.AttackerFightersLost)} از {Num(aFight)} | 🛩 بمب‌افکن: {Num(r.AttackerBombersLost)} از {Num(aBomb)}\n");
+            if (r.AttackerCrewLost > 0) sb.Append($"   ⚰️ خدمه‌ی پرواز: {Num(r.AttackerCrewLost)} نفر\n");
+        }
 
         sb.Append("\n<b>💀 تلفات دشمن</b>\n");
         sb.Append($"   🛡 تانک: {Num(r.DefenderTanksLost)} از {Num(dTanks)} | 🪖 سرباز: {Num(r.DefenderSoldiersLost)} از {Num(dSold)}\n");
@@ -2551,6 +3019,76 @@ static class WarEngine
     // آیا این ترکیب ناوگان اصلاً می‌تواند حمله کند؟ (قایق تنها = خیر)
     public static bool CanNavalAttack(long subs, long battleships) => (subs + battleships) > 0;
 
+    // ══════════════ فیزیک دریایی: زاویه، نفوذ، منطقه‌ی مصونیت ═══════════════
+
+    // نفوذ گلوله‌ی توپ دریایی (فرمول تجربی De Marre ساده‌شده).
+    //  زره کمربند در برخورد افقی و زره عرشه در برخورد شیب‌دار مهم است.
+    static float NavalPenetration(float shellKg, float velocityMs, float caliberMm)
+    {
+        float d = caliberMm / 25.4f;                       // اینچ
+        float w = shellKg * 2.20462f;                      // پوند
+        float v = velocityMs * 3.28084f;                   // فوت بر ثانیه
+        // ضریب واسنجی‌شده با جدول‌های زره واقعی:
+        //  Iowa 406mm در ۲۰km ≈ ۴۴۰mm، در ۳۰km ≈ ۳۲۰mm؛ Bismarck 380mm در ۲۰km ≈ ۳۹۰mm
+        float pen = 0.00047f * MathF.Pow(w, 0.55f) * MathF.Pow(v, 1.1f) / MathF.Pow(MathF.Max(1f, d), 0.65f);
+        return pen * 25.4f;                                 // به میلی‌متر
+    }
+
+    // سرعت گلوله در برد معین — افت با فاصله
+    static float NavalVelocityAt(float muzzleMs, float rangeKm)
+        => muzzleMs * MathF.Exp(-0.029f * rangeKm);
+
+    // زاویه‌ی سقوط گلوله: در برد کم تقریباً افقی، در برد زیاد شیب‌دار.
+    //  این تعیین می‌کند که به کمربند بخورد یا به عرشه.
+    static float FallAngleDeg(float rangeKm, float muzzleMs)
+    {
+        // واسنجی: در ۲۰km حدود ۱۴°، در ۳۰km حدود ۲۹° — بالای ۲۶° گلوله به عرشه می‌خورد
+        float refMv = 780f / MathF.Max(300f, muzzleMs);
+        return Math.Clamp(2.0f + 0.030f * rangeKm * rangeKm * refMv, 2f, 70f);
+    }
+
+    // ═══════════ زاویه‌ی رخ کشتی — قلب نبرد دریایی ═══════════
+    //  angleOnBow = زاویه‌ی بین محور طولی هدف و خط دید تیرانداز.
+    //    ۹۰ درجه  = پهلوی کامل (broadside): بیشترین سطح هدف، همه‌ی توپ‌ها شلیک می‌کنند
+    //     ۰ درجه  = سینه یا پاشنه: کمترین سطح، نصف توپ‌ها، ولی زره مؤثر بیشتر
+    static float AngleOnBowDeg(float shooterX, float shooterY, float tgtX, float tgtY, float tgtHeadingRad)
+    {
+        float bx = shooterX - tgtX, by = shooterY - tgtY;
+        float b = MathF.Atan2(by, bx);
+        float rel = b - tgtHeadingRad;
+        while (rel > MathF.PI) rel -= 2f * MathF.PI;
+        while (rel < -MathF.PI) rel += 2f * MathF.PI;
+        float deg = MathF.Abs(rel) * 180f / MathF.PI;
+        if (deg > 90f) deg = 180f - deg;      // پاشنه هم مثل سینه باریک است
+        return deg;                            // ۰..۹۰
+    }
+
+    static float WrapPi(float a)
+    {
+        while (a > MathF.PI) a -= 2f * MathF.PI;
+        while (a < -MathF.PI) a += 2f * MathF.PI;
+        return a;
+    }
+
+    // سطح مقطع هدف بر پایه‌ی زاویه: sin برای طول، cos برای عرض
+    static float TargetProfile(float lengthM, float beamM, float angleDeg)
+    {
+        float r = angleDeg * MathF.PI / 180f;
+        return lengthM * MathF.Sin(r) + beamM * MathF.Cos(r);
+    }
+
+    // چند درصد توپ‌های اصلی می‌توانند شلیک کنند؟ در سینه فقط برجک‌های جلو.
+    static float GunsBearing(float angleDeg)
+        => Math.Clamp(0.42f + 0.58f * MathF.Sin(angleDeg * MathF.PI / 180f), 0.42f, 1f);
+
+    // زره مؤثر کمربند با زاویه: کج ایستادن ضخامت مؤثر را زیاد می‌کند.
+    static float BeltEffective(float beltMm, float angleDeg, float fallDeg)
+    {
+        float obliq = MathF.Max(0.25f, MathF.Sin(angleDeg * MathF.PI / 180f));
+        float vert = MathF.Max(0.35f, MathF.Cos(fallDeg * MathF.PI / 180f));
+        return beltMm / (obliq * vert);
+    }
+
     sealed class NavalSide
     {
         public Faction Owner;
@@ -2567,6 +3105,7 @@ static class WarEngine
         public long[] BoatLost = Array.Empty<long>();
         public long[] SubLost = Array.Empty<long>();
         public long[] BSLost = Array.Empty<long>();
+        public float[] BSDamage = Array.Empty<float>();   // درصد آسیب هر ناو
 
         public long Boats => BoatCount.Sum();
         public long Subs => SubCount.Sum();
@@ -2574,19 +3113,6 @@ static class WarEngine
         public long BoatsLost => BoatLost.Sum();
         public long SubsLost => SubLost.Sum();
         public long BSLostTotal => BSLost.Sum();
-
-        public float StrikePower(bool attacking)
-        {
-            // قدرت ضربه: نبردناو + زیردریایی. قایق فقط در دفاع می‌شمارد.
-            float p = 0f;
-            for (int i = 0; i < BSCount.Length; i++) p += BSCount[i] * BSSpecs[i].Power;
-            for (int i = 0; i < SubCount.Length; i++) p += SubCount[i] * SubSpecs[i].Power;
-            if (!attacking)
-                for (int i = 0; i < BoatCount.Length; i++) p += BoatCount[i] * BoatSpecs[i].Power;
-            else
-                for (int i = 0; i < BoatCount.Length; i++) p += BoatCount[i] * BoatSpecs[i].Power * 0.15f; // فقط اسکورت
-            return p * Prof.CrewQuality;
-        }
 
         public float Familiar(Faction origin) => Familiarity(Owner, origin, Prof);
     }
@@ -2629,8 +3155,28 @@ static class WarEngine
         s.BSCount = w.Select(x => x.C).ToArray();
         s.BSSpecs = w.Select(x => GetBattleshipSpecByModel(x.M)).ToArray();
         s.BSLost = new long[w.Count];
+        s.BSDamage = new float[w.Count];
 
         return s;
+    }
+
+    // ───────────────── واحد شناور در میدان دریا ─────────────────
+    struct Ship
+    {
+        public float X, Y;          // کیلومتر
+        public float Heading;       // رادیان
+        public float Count;         // چند فروند در این دسته
+        public float Count0;
+        public float Hp;            // ۰..۱ سلامت دسته (برای نبردناو)
+        public float Ammo;          // گلوله‌ی توپ اصلی
+        public int   Torps;         // اژدر باقی‌مانده
+        public float Depth;         // ۰ = سطح، ۱ = غواصی کامل
+        public float Detect;        // چقدر دشمن او را دیده ۰..۱
+        public byte  Kind;          // 0=قایق، 1=زیردریایی، 2=نبردناو
+        public byte  Model;
+        public byte  Side;          // 0=مهاجم، 1=مدافع
+        public bool  Alive;
+        public bool  Firing;
     }
 
     public static BattleResult RunNavalBattleAdvanced(
@@ -2677,99 +3223,577 @@ static class WarEngine
             return res;
         }
 
-        float aPower = A.StrikePower(true);
-        float dPower = Math.Max(1f, D.StrikePower(false) + defender.PortLevel * 14f);
+        // ══════════════ شبیه‌سازی زمان‌گام نبرد دریایی ══════════════
+        //  میدان: ۶۰×۴۰ کیلومتر دریا. مدافع نزدیک ساحل (پایین)، مهاجم از بالا می‌آید.
+        //  هر گام ۲ دقیقه. زاویه‌ی رخ کشتی‌ها هر گام تازه محاسبه می‌شود.
+        const float SEA_W = 60f, SEA_H = 40f;
+        const int   SEA_TICKS = 45;
+        const float SEA_TICK_MIN = 2f;
 
         float stratAdv = NavalDoctrine(A, D, attStrategy, attTactic, defStrategy, defTactic, defender.PortLevel, log, ref rng);
-        float ratio = aPower / dPower;
-        float eff = ratio * stratAdv;
 
-        int success;
-        if (eff > 2.0f) success = 92 + rng.Next(9);
-        else if (eff > 1.5f) success = 72 + rng.Next(21);
-        else if (eff > 1.0f) success = 52 + rng.Next(21);
-        else if (eff > 0.7f) success = 28 + rng.Next(25);
-        else success = rng.Next(28);
+        // ── هوا و دریا ──
+        byte navWeather;
+        float wr = rng.NextF();
+        navWeather = wr < 0.42f ? W_CLEAR : wr < 0.64f ? W_CLOUD : wr < 0.82f ? W_RAIN : wr < 0.93f ? W_FOG : W_SNOW;
+        var field = new Field { Weather = navWeather, StartTime = (byte)rng.Next(4) };
+        // دریای متلاطم قایق سبک را از کار می‌اندازد
+        float seaState = rng.Range(0f, 0.5f);
+        if (navWeather is W_RAIN or W_SNOW) seaState = MathF.Min(1f, seaState + 0.40f);
+        log.Add(0, 2, LG_ENV, $"نبرد دریایی در هوای {WeatherName[navWeather]} و {TimeName[field.StartTime]} درگرفت.");
 
-        bool attackerWon = success >= 88 || (eff > 1.25f && success >= 70);
-        bool attackerFailed = success < 15 || eff < 0.42f;
+        var ships = new List<Ship>();
 
-        // ── ضرایب تلفات ──────────────────────────────────────────────────────
-        double attLoss = 0.15 + (1.0 - Math.Clamp(eff, 0, 2) / 2.0) * 0.35;
-        double defLoss = 0.15 + Math.Clamp(eff, 0, 2) / 2.0 * 0.45;
-
-        if (attStrategy == 1 && attTactic == 1) { defLoss += 0.10; attLoss -= 0.05; }
-        else if (attStrategy == 1 && attTactic == 2) { if (A.BS >= D.BS) { defLoss += 0.08; attLoss -= 0.03; } }
-        else if (attStrategy == 2 && attTactic == 1) { attLoss = Math.Max(0.08, attLoss - 0.07); defLoss += 0.12; }
-        else if (attStrategy == 2 && attTactic == 2) { attLoss *= 0.85; defLoss *= 0.95; }
-
-        if (defStrategy == 1) { attLoss += 0.07; defLoss -= 0.05; }
-        else if (defStrategy == 2 && defTactic == 2 && D.Subs > 0) attLoss += 0.10;
-        // قایق‌های مدافع در آب‌های خودی بسیار مؤثرند
-        if (D.Boats > 0 && defStrategy == 2 && defTactic == 1) attLoss += 0.06;
-
-        // بازیابی: کشتی آسیب‌دیده در آب‌های خودی راحت‌تر نجات پیدا می‌کند
-        attLoss *= 1f - Math.Clamp(A.Prof.Recovery * 0.25f, 0f, 0.2f);
-        defLoss *= 1f - Math.Clamp(D.Prof.Recovery * 0.35f, 0f, 0.28f);
-
-        // ── اعمال تلفات به تفکیک مدل ─────────────────────────────────────────
-        void ApplyBoat(NavalSide s, double lf, float capMax)
+        void AddGroup(NavalSide side, byte sideId, byte kind, int modelIdx, long total)
         {
-            for (int i = 0; i < s.BoatCount.Length; i++)
+            if (total <= 0) return;
+            int per = kind == 2 ? 1 : (kind == 1 ? 2 : 6);
+            long leftN = total;
+            while (leftN > 0)
             {
-                float durability = 1f / (1f + s.BoatSpecs[i].Armor * 0.05f + s.BoatSpecs[i].Speed * 0.006f);
-                double p = Math.Clamp(lf * (0.8 + rng.Range(0f, 0.4f)) * durability * 1.6, 0.02, capMax);
-                s.BoatLost[i] = (long)Math.Round(s.BoatCount[i] * p);
-                s.BoatLost[i] = Math.Min(s.BoatLost[i], s.BoatCount[i]);
+                float n = Math.Min(leftN, per);
+                var sh = new Ship
+                {
+                    Count = n, Count0 = n, Hp = 1f, Kind = kind, Model = (byte)modelIdx,
+                    Side = sideId, Alive = true, Depth = 0f
+                };
+                if (sideId == 0)
+                {
+                    sh.X = rng.Range(6f, SEA_W - 6f);
+                    sh.Y = SEA_H - rng.Range(1f, 5f);
+                    sh.Heading = -MathF.PI / 2f;             // رو به ساحل
+                }
+                else
+                {
+                    sh.X = rng.Range(4f, SEA_W - 4f);
+                    sh.Y = rng.Range(1.5f, 9f);              // نزدیک ساحل
+                    sh.Heading = MathF.PI / 2f;
+                }
+                if (kind == 2)
+                {
+                    var sp = side.BSSpecs[modelIdx];
+                    sh.Ammo = sp.MainGuns * 110f;            // ذخیره‌ی معمول هر لوله
+                }
+                else if (kind == 1)
+                {
+                    var sp = side.SubSpecs[modelIdx];
+                    sh.Torps = (int)(sp.TorpLoad * n);
+                    sh.Depth = 1f;                            // زیردریایی غواصی‌شده وارد می‌شود
+                }
+                else
+                {
+                    var sp = side.BoatSpecs[modelIdx];
+                    sh.Torps = (int)(sp.TorpTubes * n);
+                }
+                ships.Add(sh);
+                leftN -= (long)n;
             }
         }
-        void ApplySub(NavalSide s, double lf, float capMax)
+
+        for (int i = 0; i < A.BSCount.Length; i++) AddGroup(A, 0, 2, i, A.BSCount[i]);
+        for (int i = 0; i < A.SubCount.Length; i++) AddGroup(A, 0, 1, i, A.SubCount[i]);
+        for (int i = 0; i < A.BoatCount.Length; i++) AddGroup(A, 0, 0, i, A.BoatCount[i]);
+        for (int i = 0; i < D.BSCount.Length; i++) AddGroup(D, 1, 2, i, D.BSCount[i]);
+        for (int i = 0; i < D.SubCount.Length; i++) AddGroup(D, 1, 1, i, D.SubCount[i]);
+        for (int i = 0; i < D.BoatCount.Length; i++) AddGroup(D, 1, 0, i, D.BoatCount[i]);
+
+        NavalSide SideOf(byte id) => id == 0 ? A : D;
+
+        // توان پدافند ناوگان (برای گزارش و دفاع در برابر حمله‌ی هوایی آینده)
+        float fleetAaA = 0f, fleetAaD = 0f;
+        for (int i = 0; i < A.BSCount.Length; i++) fleetAaA += A.BSCount[i] * A.BSSpecs[i].AaKgMin;
+        for (int i = 0; i < D.BSCount.Length; i++) fleetAaD += D.BSCount[i] * D.BSSpecs[i].AaKgMin;
+
+        // تلفات انباشته به تفکیک مدل
+        var boatKill = new float[2][]; boatKill[0] = new float[A.BoatCount.Length]; boatKill[1] = new float[D.BoatCount.Length];
+        var subKill  = new float[2][]; subKill[0]  = new float[A.SubCount.Length];  subKill[1]  = new float[D.SubCount.Length];
+        var bsKill   = new float[2][]; bsKill[0]   = new float[A.BSCount.Length];   bsKill[1]   = new float[D.BSCount.Length];
+        var bsDmg    = new float[2][]; bsDmg[0]    = new float[A.BSCount.Length];   bsDmg[1]    = new float[D.BSCount.Length];
+
+        float shoreProgress = 0f;      // پیشرفت به سمت ساحل ۰..۱
+        bool loggedFirstBlood = false, loggedTorp = false, loggedCross = false, loggedBrace = false;
+        float closestRange = 99f;
+
+        for (int t = 0; t < SEA_TICKS; t++)
         {
-            for (int i = 0; i < s.SubCount.Length; i++)
+            // ── ۱) حرکت و مانور ──
+            for (int i = 0; i < ships.Count; i++)
             {
-                float survive = 1f - Math.Clamp((s.SubSpecs[i].Stealth - 60f) / 120f, 0f, 0.35f);
-                double p = Math.Clamp(lf * (0.8 + rng.Range(0f, 0.4f)) * survive, 0.02, capMax);
-                s.SubLost[i] = Math.Min(s.SubCount[i], (long)Math.Round(s.SubCount[i] * p));
+                var sh = ships[i];
+                if (!sh.Alive) continue;
+                var side = SideOf(sh.Side);
+
+                float knots = sh.Kind == 2 ? side.BSSpecs[sh.Model].SpeedKn
+                            : sh.Kind == 1 ? (sh.Depth > 0.5f ? side.SubSpecs[sh.Model].SubKn : side.SubSpecs[sh.Model].SurfKn)
+                            : side.BoatSpecs[sh.Model].SpeedKn;
+
+                // دریای متلاطم قایق سبک را کند می‌کند
+                if (sh.Kind == 0)
+                {
+                    float keep = side.BoatSpecs[sh.Model].SeaKeeping;
+                    knots *= Math.Clamp(1f - seaState * (1f - keep) * 1.1f, 0.25f, 1f);
+                }
+                float kmPerTick = knots * 1.852f * (SEA_TICK_MIN / 60f);
+
+                // نزدیک‌ترین دشمن را پیدا کن
+                int tgt = -1; float bestD = 999f;
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    if (!ships[j].Alive || ships[j].Side == sh.Side) continue;
+                    float dd = MathF.Sqrt((ships[j].X - sh.X) * (ships[j].X - sh.X) + (ships[j].Y - sh.Y) * (ships[j].Y - sh.Y));
+                    if (dd < bestD) { bestD = dd; tgt = j; }
+                }
+                if (tgt < 0) { ships[i] = sh; continue; }
+                if (bestD < closestRange) closestRange = bestD;
+
+                var en = ships[tgt];
+                float desired;
+                if (sh.Kind == 2)
+                {
+                    // نبردناو: در برد بهینه پهلو می‌دهد تا همه‌ی برجک‌ها شلیک کنند («کراسینگ»).
+                    //  ولی اگر خیلی نزدیک شد باید فاصله بگیرد، وگرنه در حلقه گیر می‌کند و
+                    //  رخِ خودش را به دشمن می‌دهد. جهت چرخش هم به سمتی است که کمترین
+                    //  رخ را به دشمن نشان دهد — این همان مانور واقعی ناوبری است.
+                    var sp = side.BSSpecs[sh.Model];
+                    float optimal = sp.MainRangeKm * 0.55f;
+                    float tooClose = sp.MainRangeKm * 0.28f;
+                    float toEnemy = MathF.Atan2(en.Y - sh.Y, en.X - sh.X);
+                    if (bestD > optimal) desired = toEnemy;                       // نزدیک شو
+                    else if (bestD < tooClose) desired = toEnemy + MathF.PI;      // فاصله بگیر
+                    else
+                    {
+                        // پهلو بده، ولی به سمتی بچرخ که چرخش کمتری لازم دارد
+                        float optA = toEnemy + MathF.PI / 2f;
+                        float optB = toEnemy - MathF.PI / 2f;
+                        float dA = MathF.Abs(WrapPi(optA - sh.Heading));
+                        float dB = MathF.Abs(WrapPi(optB - sh.Heading));
+                        desired = dA <= dB ? optA : optB;
+                    }
+                }
+                else if (sh.Kind == 1)
+                {
+                    // زیردریایی: آرام به موقعیت شلیک اژدر می‌رود
+                    var sp = side.SubSpecs[sh.Model];
+                    float toEnemy = MathF.Atan2(en.Y - sh.Y, en.X - sh.X);
+                    desired = bestD > sp.TorpRangeKm * 0.7f ? toEnemy : toEnemy + MathF.PI / 3f;
+                }
+                else
+                {
+                    // قایق: حمله‌ی مستقیم و سریع، بعد از شلیک اژدر فرار
+                    float toEnemy = MathF.Atan2(en.Y - sh.Y, en.X - sh.X);
+                    desired = sh.Torps > 0 ? toEnemy : toEnemy + MathF.PI;
+                }
+
+                // نرخ چرخش واقعی: کشتی بزرگ کند می‌چرخد
+                float maxTurn = sh.Kind == 2 ? 0.16f : sh.Kind == 1 ? 0.22f : 0.40f;
+                float turn = Math.Clamp(WrapPi(desired - sh.Heading), -maxTurn, maxTurn);
+                sh.Heading += turn;
+                sh.X = Math.Clamp(sh.X + MathF.Cos(sh.Heading) * kmPerTick, 0.5f, SEA_W - 0.5f);
+                sh.Y = Math.Clamp(sh.Y + MathF.Sin(sh.Heading) * kmPerTick, 0.5f, SEA_H - 0.5f);
+                ships[i] = sh;
             }
+
+            // ── ۲) شناسایی ──
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sh = ships[i];
+                if (!sh.Alive) continue;
+                float best = 0f;
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    if (!ships[j].Alive || ships[j].Side == sh.Side) continue;
+                    var o = ships[j];
+                    float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
+                    float horizon = sh.Kind == 2 ? 28f : sh.Kind == 1 ? (sh.Depth > 0.5f ? 8f : 14f) : 12f;
+                    // رادار کنترل آتش دید را بسیار زیاد می‌کند
+                    if (sh.Kind == 2) horizon *= 0.75f + SideOf(sh.Side).BSSpecs[sh.Model].FireControl * 0.6f;
+                    float vis = Math.Clamp(1f - dd / horizon, 0f, 1f) * WxVision[field.Weather];
+                    // زیردریایی غواصی‌شده تقریباً نامرئی است
+                    if (o.Kind == 1 && o.Depth > 0.5f)
+                        vis *= 0.12f * (0.6f + SideOf(o.Side).SubSpecs[o.Model].NoiseLevel);
+                    if (vis > best) best = vis;
+                }
+                sh.Detect = best;
+                ships[i] = sh;
+            }
+
+            // ── ۳) آتش توپخانه‌ی سنگین ──
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sh = ships[i];
+                if (!sh.Alive || sh.Kind != 2 || sh.Ammo <= 0f) continue;
+                var side = SideOf(sh.Side);
+                var sp = side.BSSpecs[sh.Model];
+
+                int tgt = -1; float bestScore = 0f, tgtRange = 0f;
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    var o = ships[j];
+                    if (!o.Alive || o.Side == sh.Side) continue;
+                    if (o.Kind == 1 && o.Depth > 0.5f) continue;      // زیر آب را با توپ نمی‌زنند
+                    float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
+                    if (dd > sp.MainRangeKm) continue;
+                    if (o.Detect < 0.12f) continue;
+                    float pri = o.Kind == 2 ? 3f : o.Kind == 0 ? 0.8f : 1.2f;
+                    float sc = pri / (0.5f + dd * 0.08f);
+                    if (sc > bestScore) { bestScore = sc; tgt = j; tgtRange = dd; }
+                }
+                // توپ‌های فرعی جداگانه روی شناور سبکِ نزدیک کار می‌کنند
+                if (sp.SecGuns > 0)
+                {
+                    for (int j = 0; j < ships.Count; j++)
+                    {
+                        var o = ships[j];
+                        if (!o.Alive || o.Side == sh.Side || o.Kind == 2) continue;
+                        if (o.Kind == 1 && o.Depth > 0.5f) continue;
+                        float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
+                        if (dd > sp.SecMm / 18f) continue;          // برد مؤثر توپ فرعی
+                        float sec = sh.Count * sp.SecGuns * (sp.SecMm / 130f) * 0.020f * SEA_TICK_MIN
+                                    * sp.FireControl * rng.Range(0.6f, 1.4f);
+                        sec = MathF.Min(sec, o.Count);
+                        o.Count -= sec;
+                        if (o.Kind == 0) boatKill[o.Side][o.Model] += sec; else subKill[o.Side][o.Model] += sec;
+                        if (o.Count < 0.5f) o.Alive = false;
+                        ships[j] = o;
+                        break;
+                    }
+                }
+
+                if (tgt < 0) continue;
+
+                var en2 = ships[tgt];
+                var eSide = SideOf(en2.Side);
+                sh.Firing = true;
+
+                // زاویه‌ی رخِ هدف — تعیین‌کننده‌ی همه‌چیز
+                float aob = AngleOnBowDeg(sh.X, sh.Y, en2.X, en2.Y, en2.Heading);
+                float myAob = AngleOnBowDeg(en2.X, en2.Y, sh.X, sh.Y, sh.Heading);
+
+                float enLen, enBeam;
+                if (en2.Kind == 2) { enLen = eSide.BSSpecs[en2.Model].LengthM; enBeam = eSide.BSSpecs[en2.Model].BeamM; }
+                else if (en2.Kind == 0) { enLen = eSide.BoatSpecs[en2.Model].LengthM; enBeam = eSide.BoatSpecs[en2.Model].BeamM; }
+                else { enLen = 67f; enBeam = 6.2f; }
+
+                float profile = TargetProfile(enLen, enBeam, aob);
+                float bearing = GunsBearing(myAob);              // چند درصد توپ‌های من شلیک می‌کنند
+
+                float shots = sp.MainGuns * bearing * sp.MainRpm * SEA_TICK_MIN;
+                shots = MathF.Min(shots, sh.Ammo);
+                sh.Ammo -= shots;
+
+                // احتمال اصابت: کنترل آتش، فاصله، سطح هدف، دریا
+                float fc = sp.FireControl * side.Prof.CrewQuality * side.Familiar(sp.Origin);
+                float hitP = Math.Clamp(0.34f * fc * (profile / 200f) / (1f + tgtRange / 11f)
+                                        * WxVision[field.Weather] * (1f - seaState * 0.28f), 0.002f, 0.42f);
+                float hits = shots * hitP * sh.Count;
+                if (hits <= 0f) { ships[i] = sh; continue; }
+
+                float vel = NavalVelocityAt(sp.MainMuzzleMs, tgtRange);
+                float pen = NavalPenetration(sp.MainShellKg, vel, sp.MainMm);
+                float fall = FallAngleDeg(tgtRange, sp.MainMuzzleMs);
+
+                float dmg;
+                if (en2.Kind == 2)
+                {
+                    var es = eSide.BSSpecs[en2.Model];
+                    // در برد کم گلوله به کمربند، در برد زیاد به عرشه می‌خورد
+                    bool deckHit = fall > 26f;
+                    float armor = deckHit
+                        ? es.DeckMm / MathF.Max(0.30f, MathF.Sin(fall * MathF.PI / 180f))
+                        : BeltEffective(es.BeltMm, aob, fall);
+                    // گاهی گلوله به برجک یا برج فرماندهی می‌خورد — نقطه‌ی حیاتی
+                    if (rng.NextF() < 0.14f)
+                        armor = rng.NextF() < 0.6f ? es.TurretMm : es.ConningMm;
+                    float ratio2 = pen / MathF.Max(1f, armor);
+                    // منطقه‌ی مصونیت: اگر نفوذ کمتر از زره باشد، گلوله کمانه می‌کند
+                    float through = Math.Clamp((ratio2 - 0.85f) / 0.5f, 0f, 1f);
+                    dmg = hits * (0.0016f + through * 0.0125f);
+                    if (!loggedBrace && through < 0.15f && hits > 3f)
+                    {
+                        loggedBrace = true;
+                        log.Add(t * 2, 2, LG_COMBAT,
+                            $"گلوله‌های {sp.MainMm:F0}mm در برد {tgtRange:F0} کیلومتری روی زره {(deckHit ? "عرشه" : "کمربند")} {es.Name} کمانه کردند — منطقه‌ی مصونیت.");
+                    }
+                }
+                else
+                {
+                    // کشتی سبک: تنها محافظت، ورقه‌ی نازک ضدترکش است
+                    float splinter = en2.Kind == 0 ? eSide.BoatSpecs[en2.Model].HullArmorMm : 12f;
+                    dmg = hits * 0.16f / (1f + splinter / 22f);
+                }
+
+                // اعمال آسیب
+                if (en2.Kind == 2)
+                {
+                    en2.Hp -= dmg;
+                    bsDmg[en2.Side][en2.Model] += dmg * 100f;
+                    if (en2.Hp <= 0f)
+                    {
+                        bsKill[en2.Side][en2.Model] += en2.Count;
+                        en2.Count = 0f; en2.Alive = false;
+                        log.Add(t * 2, (byte)(en2.Side == 0 ? 1 : 0), LG_BREAK,
+                            $"{eSide.BSSpecs[en2.Model].Name} زیر آتش {sp.MainMm:F0}mm منفجر شد و به قعر رفت.");
+                    }
+                }
+                else
+                {
+                    float killed = MathF.Min(en2.Count, dmg);
+                    en2.Count -= killed;
+                    if (en2.Kind == 0) boatKill[en2.Side][en2.Model] += killed;
+                    else subKill[en2.Side][en2.Model] += killed;
+                    if (en2.Count < 0.5f) { en2.Alive = false; }
+                }
+
+                if (!loggedFirstBlood && hits > 1f)
+                {
+                    loggedFirstBlood = true;
+                    log.Add(t * 2, 2, LG_COMBAT,
+                        $"نخستین سالوی مؤثر در برد {tgtRange:F0} کیلومتری؛ هدف با زاویه‌ی رخ {aob:F0} درجه در تیررس بود.");
+                }
+                if (!loggedCross && myAob > 72f && aob > 72f)
+                {
+                    loggedCross = true;
+                    log.Add(t * 2, (byte)sh.Side, LG_DECISION,
+                        "هر دو ناوگان پهلو به پهلو شدند و همه‌ی برجک‌ها وارد آتش شدند.");
+                }
+                ships[tgt] = en2; ships[i] = sh;
+            }
+
+            // ── ۳.۵) آتش سبک قایق‌ها و توپ عرشه‌ی زیردریایی ──
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sh = ships[i];
+                if (!sh.Alive || sh.Kind == 2) continue;
+                var side = SideOf(sh.Side);
+                float gunMm, gunKg;
+                if (sh.Kind == 0) { gunMm = side.BoatSpecs[sh.Model].GunMm; gunKg = side.BoatSpecs[sh.Model].GunKgMin; }
+                else { if (sh.Depth > 0.5f) continue; gunMm = side.SubSpecs[sh.Model].DeckGunMm; gunKg = gunMm * 0.35f; }
+                if (gunMm < 10f) continue;
+
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    var o = ships[j];
+                    if (!o.Alive || o.Side == sh.Side || o.Kind == 2) continue;
+                    if (o.Kind == 1 && o.Depth > 0.5f) continue;
+                    float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
+                    if (dd > 3.2f) continue;
+                    float splinter = o.Kind == 0 ? SideOf(o.Side).BoatSpecs[o.Model].HullArmorMm : 14f;
+                    float k = sh.Count * gunKg * 0.0016f * SEA_TICK_MIN / (1f + splinter / 20f);
+                    k = MathF.Min(k, o.Count);
+                    o.Count -= k;
+                    if (o.Kind == 0) boatKill[o.Side][o.Model] += k; else subKill[o.Side][o.Model] += k;
+                    if (o.Count < 0.5f) o.Alive = false;
+                    ships[j] = o;
+                    break;
+                }
+            }
+
+            // ── ۴) حمله‌ی اژدر (زیردریایی و قایق) ──
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sh = ships[i];
+                if (!sh.Alive || sh.Kind == 2 || sh.Torps <= 0) continue;
+                var side = SideOf(sh.Side);
+                float trng = sh.Kind == 1 ? side.SubSpecs[sh.Model].TorpRangeKm : side.BoatSpecs[sh.Model].TorpRangeKm;
+                float twh  = sh.Kind == 1 ? side.SubSpecs[sh.Model].TorpWarheadKg : side.BoatSpecs[sh.Model].TorpWarheadKg;
+
+                int tgt = -1; float bestV = 0f; float tr = 0f;
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    var o = ships[j];
+                    if (!o.Alive || o.Side == sh.Side) continue;
+                    float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
+                    if (dd > trng) continue;
+                    float v = (o.Kind == 2 ? 4f : 1f) / (0.4f + dd);
+                    if (v > bestV) { bestV = v; tgt = j; tr = dd; }
+                }
+                if (tgt < 0) continue;
+
+                var en3 = ships[tgt];
+                var eS = SideOf(en3.Side);
+                // زاویه‌ی رخ هدف: اژدر به پهلو بیشترین شانس اصابت را دارد
+                float aob2 = AngleOnBowDeg(sh.X, sh.Y, en3.X, en3.Y, en3.Heading);
+                float aspect = MathF.Sin(aob2 * MathF.PI / 180f);      // ۱ = پهلوی کامل
+
+                int fired = Math.Min(sh.Torps, sh.Kind == 1 ? 4 : 2);
+                sh.Torps -= fired;
+
+                float pHit = Math.Clamp(0.32f * aspect / (1f + tr / 4f), 0.01f, 0.60f);
+                // کشتی هدف اگر دیده باشد، مانور فرار می‌کند
+                if (en3.Detect > 0.4f) pHit *= 0.55f;
+                float hitsT = fired * pHit * sh.Count;
+
+                if (hitsT > 0.15f)
+                {
+                    if (en3.Kind == 2)
+                    {
+                        var es = eS.BSSpecs[en3.Model];
+                        // اژدر زیر خط آب می‌خورد — زره کمربند اثر کمی دارد
+                        float tpd = twh / MathF.Max(400f, es.DisplacementT / 55f);
+                        en3.Hp -= hitsT * tpd * 0.55f;
+                        bsDmg[en3.Side][en3.Model] += hitsT * tpd * 55f;
+                        if (en3.Hp <= 0f)
+                        {
+                            bsKill[en3.Side][en3.Model] += en3.Count;
+                            en3.Count = 0f; en3.Alive = false;
+                            log.Add(t * 2, (byte)(en3.Side == 0 ? 1 : 0), LG_BREAK,
+                                $"اژدر زیر خط آب {es.Name} را شکافت و ناو غرق شد.");
+                        }
+                        else if (!loggedTorp)
+                        {
+                            loggedTorp = true;
+                            log.Add(t * 2, (byte)sh.Side, LG_COMBAT,
+                                $"اژدرها از زاویه‌ی {aob2:F0} درجه شلیک شدند و {es.Name} را زیر خط آب زدند.");
+                        }
+                    }
+                    else
+                    {
+                        float killed = MathF.Min(en3.Count, hitsT * 1.4f);
+                        en3.Count -= killed;
+                        if (en3.Kind == 0) boatKill[en3.Side][en3.Model] += killed;
+                        else subKill[en3.Side][en3.Model] += killed;
+                        if (en3.Count < 0.5f) en3.Alive = false;
+                    }
+                    ships[tgt] = en3;
+                }
+
+                // زیردریایی بعد از شلیک غواصی می‌کند — تا وقتی باتری اجازه بدهد
+                if (sh.Kind == 1)
+                {
+                    float batteryMin = side.SubSpecs[sh.Model].SubEnduranceH * 60f;
+                    float submergedMin = t * SEA_TICK_MIN;
+                    sh.Depth = submergedMin < batteryMin ? 1f : 0.25f;   // باتری تمام → مجبور به بالا آمدن
+                }
+                ships[i] = sh;
+            }
+
+            // ── ۵) ضدزیردریایی: کشتی سطحی زیردریایی کشف‌شده را می‌کوبد ──
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sub = ships[i];
+                if (!sub.Alive || sub.Kind != 1) continue;
+                var sSide = SideOf(sub.Side);
+                var ssp = sSide.SubSpecs[sub.Model];
+                float exposure = (1f - sub.Depth) + ssp.NoiseLevel * 0.5f;
+                if (exposure < 0.25f) continue;
+
+                float hunters = 0f;
+                for (int j = 0; j < ships.Count; j++)
+                {
+                    var o = ships[j];
+                    if (!o.Alive || o.Side == sub.Side || o.Kind == 1) continue;
+                    float dd = MathF.Sqrt((o.X - sub.X) * (o.X - sub.X) + (o.Y - sub.Y) * (o.Y - sub.Y));
+                    if (dd < 4.5f) hunters += o.Count * (o.Kind == 0 ? 1.3f : 0.7f);
+                }
+                if (hunters <= 0f) continue;
+                // عمق غواصی زیاد و غواصی سریع، شانس بقا را بالا می‌برد
+                float depthEdge = 1f / (1f + ssp.TestDepthM / 150f);
+                float dive = 1f / (1f + ssp.DiveSec / 40f);
+                float loss = hunters * 0.010f * exposure * depthEdge * dive * SEA_TICK_MIN * rng.Range(0.5f, 1.5f);
+                loss = MathF.Min(loss, sub.Count);
+                sub.Count -= loss;
+                subKill[sub.Side][sub.Model] += loss;
+                if (sub.Count < 0.5f) sub.Alive = false;
+                ships[i] = sub;
+            }
+
+            // ── ۶) توپخانه‌ی ساحلی و پیشروی به ساحل ──
+            float atkNear = 0f, defAlive = 0f;
+            foreach (var sh in ships)
+            {
+                if (!sh.Alive) continue;
+                if (sh.Side == 0 && sh.Y < 12f) atkNear += sh.Count * (sh.Kind == 2 ? 6f : 1f);
+                if (sh.Side == 1) defAlive += sh.Count * (sh.Kind == 2 ? 6f : 1f);
+            }
+            if (atkNear > 0f)
+            {
+                float coastal = defender.PortLevel * 1.6f;
+                for (int i = 0; i < ships.Count; i++)
+                {
+                    var sh = ships[i];
+                    if (!sh.Alive || sh.Side != 0 || sh.Y > 10f) continue;
+                    float armorFactor = sh.Kind == 2 ? 0.12f : 1f;
+                    float hurt = coastal * 0.0035f * armorFactor * SEA_TICK_MIN * rng.Range(0.6f, 1.4f);
+                    if (sh.Kind == 2)
+                    {
+                        sh.Hp -= hurt * 0.05f;
+                        bsDmg[0][sh.Model] += hurt * 5f;
+                        if (sh.Hp <= 0f) { bsKill[0][sh.Model] += sh.Count; sh.Count = 0; sh.Alive = false; }
+                    }
+                    else
+                    {
+                        float k = MathF.Min(sh.Count, hurt);
+                        sh.Count -= k;
+                        if (sh.Kind == 0) boatKill[0][sh.Model] += k; else subKill[0][sh.Model] += k;
+                        if (sh.Count < 0.5f) sh.Alive = false;
+                    }
+                    ships[i] = sh;
+                }
+                float push = atkNear / MathF.Max(1f, atkNear + defAlive + defender.PortLevel * 3f);
+                shoreProgress = MathF.Min(1f, shoreProgress + push * 0.030f * stratAdv);
+            }
+
+            bool anyA = ships.Any(x => x.Alive && x.Side == 0);
+            bool anyD = ships.Any(x => x.Alive && x.Side == 1);
+            if (!anyA || !anyD) break;
         }
 
-        ApplyBoat(A, attLoss, 0.90f);
-        ApplyBoat(D, defLoss, 0.95f);
-        ApplySub(A, attLoss, 0.85f);
-        ApplySub(D, defLoss, 0.90f);
+        // ── نتیجه‌گیری از وضعیت واقعی میدان ──
+        // ناوِ آسیب‌دیده نصفه می‌ارزد — سلامت در ارزش‌گذاری لحاظ می‌شود
+        float aliveA = ships.Where(x => x.Alive && x.Side == 0)
+                            .Sum(x => x.Count * (x.Kind == 2 ? 6f : 1f) * Math.Clamp(x.Hp, 0.15f, 1f));
+        float aliveD = ships.Where(x => x.Alive && x.Side == 1)
+                            .Sum(x => x.Count * (x.Kind == 2 ? 6f : 1f) * Math.Clamp(x.Hp, 0.15f, 1f));
+        float startA = A.Boats + A.Subs + A.BS * 6f;
+        float startD = D.Boats + D.Subs + D.BS * 6f + defender.PortLevel * 2f;
 
-        bool oneSided = eff > 2.5f || eff < 0.40f;
-        long attBSDamage = 0, defBSDamage = 0;
+        float attrition = aliveA / MathF.Max(1f, aliveA + aliveD);
+        float survivalA = aliveA / MathF.Max(1f, startA);
 
-        for (int i = 0; i < A.BSCount.Length; i++)
-        {
-            if (A.BSCount[i] <= 0) continue;
-            double dmgPer = attLoss * 60.0 * (1f - Math.Clamp((A.BSSpecs[i].Belt - 200f) / 700f, 0f, 0.25f));
-            if (attStrategy == 2 && attTactic == 1) dmgPer *= 1.2;
-            long total = (long)(A.BSCount[i] * dmgPer);
-            if (oneSided && eff < 0.5f)
-            {
-                A.BSLost[i] = Math.Min(A.BSCount[i], (long)Math.Ceiling(total / 100.0 * 0.5));
-                attBSDamage += Math.Max(0, total - A.BSLost[i] * 100);
-            }
-            else attBSDamage += total;
-        }
-        for (int i = 0; i < D.BSCount.Length; i++)
-        {
-            if (D.BSCount[i] <= 0) continue;
-            double dmgPer = defLoss * 65.0 * (1f - Math.Clamp((D.BSSpecs[i].Belt - 200f) / 700f, 0f, 0.25f));
-            long total = (long)(D.BSCount[i] * dmgPer);
-            if (oneSided && eff > 2.5f)
-            {
-                D.BSLost[i] = Math.Min(D.BSCount[i], (long)Math.Ceiling(total / 100.0 * 0.6));
-                defBSDamage += Math.Max(0, total - D.BSLost[i] * 100);
-            }
-            else defBSDamage += total;
-        }
+        int success = (int)Math.Clamp(
+            (attStrategy == 2 ? shoreProgress * 70f + attrition * 30f      // آبی‌خاکی: رسیدن به ساحل مهم است
+                              : (1f - aliveD / MathF.Max(1f, startD)) * 80f + attrition * 20f),
+            0f, 100f);
 
+        bool attackerWon = success >= 82 && survivalA > 0.30f;
+        bool attackerFailed = success < 20 || survivalA < 0.22f;
+
+        float ratio = startA / MathF.Max(1f, startD);
+        float eff = attrition * 2f;
+
+        // انتقال تلفات از شبیه‌سازی به ساختار خروجی
+        for (int i = 0; i < A.BoatCount.Length; i++) A.BoatLost[i] = Math.Min(A.BoatCount[i], (long)MathF.Round(boatKill[0][i]));
+        for (int i = 0; i < D.BoatCount.Length; i++) D.BoatLost[i] = Math.Min(D.BoatCount[i], (long)MathF.Round(boatKill[1][i]));
+        for (int i = 0; i < A.SubCount.Length; i++)  A.SubLost[i]  = Math.Min(A.SubCount[i],  (long)MathF.Round(subKill[0][i]));
+        for (int i = 0; i < D.SubCount.Length; i++)  D.SubLost[i]  = Math.Min(D.SubCount[i],  (long)MathF.Round(subKill[1][i]));
+        for (int i = 0; i < A.BSCount.Length; i++)   A.BSLost[i]   = Math.Min(A.BSCount[i],   (long)MathF.Round(bsKill[0][i]));
+        for (int i = 0; i < D.BSCount.Length; i++)   D.BSLost[i]   = Math.Min(D.BSCount[i],   (long)MathF.Round(bsKill[1][i]));
+
+        // ملوانان از دست رفته بر پایه‌ی خدمه‌ی واقعی هر کلاس
+        float sailorsA = 0f, sailorsD = 0f;
+        for (int i = 0; i < A.BSCount.Length; i++) sailorsA += A.BSLost[i] * A.BSSpecs[i].Crew;
+        for (int i = 0; i < A.SubCount.Length; i++) sailorsA += A.SubLost[i] * A.SubSpecs[i].Crew;
+        for (int i = 0; i < A.BoatCount.Length; i++) sailorsA += A.BoatLost[i] * A.BoatSpecs[i].Crew;
+        for (int i = 0; i < D.BSCount.Length; i++) sailorsD += D.BSLost[i] * D.BSSpecs[i].Crew;
+        for (int i = 0; i < D.SubCount.Length; i++) sailorsD += D.SubLost[i] * D.SubSpecs[i].Crew;
+        for (int i = 0; i < D.BoatCount.Length; i++) sailorsD += D.BoatLost[i] * D.BoatSpecs[i].Crew;
+        res.AttackerCrewLost = (long)sailorsA;
+        res.DefenderCrewLost = (long)sailorsD;
+        if (fleetAaA + fleetAaD > 0f)
+            log.Add(0, 2, LG_ENV, $"توان پدافند ناوگان‌ها: مهاجم {fleetAaA:F0} در برابر مدافع {fleetAaD:F0} کیلوگرم آتش در دقیقه.");
+
+        long attBSDamage = (long)MathF.Round(bsDmg[0].Sum());
+        long defBSDamage = (long)MathF.Round(bsDmg[1].Sum());
+        for (int i = 0; i < A.BSDamage.Length; i++) A.BSDamage[i] = bsDmg[0][i];
+        for (int i = 0; i < D.BSDamage.Length; i++) D.BSDamage[i] = bsDmg[1][i];
+
+        bool oneSided = attrition > 0.85f || attrition < 0.15f;
         float frac = success / 100f;
         long lootMoney = Math.Min(defender.Money, (long)(defender.Money * 0.15 * frac * 1.5));
         long lootIron = Math.Min(defender.Iron, (long)(defender.Iron * 0.10 * frac * 1.5));
+
+        if (closestRange < 90f)
+            log.Add(0, 2, LG_ENV, $"نزدیک‌ترین برد درگیری {closestRange:F1} کیلومتر بود؛ دریا {(seaState > 0.6f ? "متلاطم" : seaState > 0.3f ? "نیمه‌موّاج" : "آرام")} بود.");
 
         BuildNavalReports(res, attacker, defender, A, D, log,
             attStrategy, attTactic, defStrategy, defTactic,
@@ -2853,7 +3877,8 @@ static class WarEngine
         else
         {
             if (D.Subs > A.Subs) adv -= 0.09f;
-            adv -= D.SubSpecs.Length > 0 ? (D.SubSpecs.Max(x => x.Stealth) - 70f) / 800f : 0f;
+            // زیردریایی ساکت‌تر و عمیق‌تر، کمین خطرناک‌تری می‌سازد
+            adv -= D.SubSpecs.Length > 0 ? (1f - D.SubSpecs.Min(x => x.NoiseLevel)) * 0.06f : 0f;
             log.Add(1, 1, LG_PLAN, "زیردریایی‌های مدافع در تنگه‌های کم‌عمق کمین کردند.");
         }
 
@@ -2870,13 +3895,25 @@ static class WarEngine
         var sb = new StringBuilder();
         for (int i = 0; i < s.BoatModels.Length; i++)
             if (s.BoatCount[i] > 0)
-                sb.Append($"{indent}🚤 {s.BoatModels[i]}: {Num(s.BoatLost[i])} از {Num(s.BoatCount[i])} غرق\n");
+            {
+                var sp = s.BoatSpecs[i];
+                sb.Append($"{indent}🚤 {s.BoatModels[i]} ({sp.SpeedKn:F0} گره، {sp.TorpTubes} لوله اژدر): {Num(s.BoatLost[i])} از {Num(s.BoatCount[i])} غرق\n");
+            }
         for (int i = 0; i < s.SubModels.Length; i++)
             if (s.SubCount[i] > 0)
-                sb.Append($"{indent}⚓ {s.SubModels[i]}: {Num(s.SubLost[i])} از {Num(s.SubCount[i])} غرق\n");
+            {
+                var sp = s.SubSpecs[i];
+                sb.Append($"{indent}⚓ {s.SubModels[i]} (عمق مجاز {sp.TestDepthM:F0}m، غواصی {sp.DiveSec:F0}s): {Num(s.SubLost[i])} از {Num(s.SubCount[i])} غرق\n");
+            }
         for (int i = 0; i < s.BSModels.Length; i++)
             if (s.BSCount[i] > 0)
-                sb.Append($"{indent}🚢 {s.BSModels[i]}: {Num(s.BSLost[i])} از {Num(s.BSCount[i])} منهدم\n");
+            {
+                var sp = s.BSSpecs[i];
+                float dmg = i < s.BSDamage.Length ? s.BSDamage[i] : 0f;
+                sb.Append($"{indent}🚢 {s.BSModels[i]} ({sp.MainGuns}×{sp.MainMm:F0}mm، کمربند {sp.BeltMm:F0}mm): {Num(s.BSLost[i])} از {Num(s.BSCount[i])} منهدم");
+                if (dmg > 1f) sb.Append($"، {dmg:F0}٪ آسیب");
+                sb.Append('\n');
+            }
         return sb.Length > 0 ? sb.ToString().TrimEnd('\n') : null;
     }
 
@@ -2927,7 +3964,15 @@ static class WarEngine
         sb.Append("\n<b>🎯 طرح عملیات</b>\n");
         sb.Append($"• طرح شما: {Esc(aStratName)} / {Esc(aTacName)}\n");
         sb.Append($"• طرح دشمن: {Esc(dStratName)} / {Esc(dTacName)}\n");
-        sb.Append($"• {Esc(advText)} | نسبت قدرت ضربه: {ratio:F2}\n");
+        sb.Append($"• {Esc(advText)} | نسبت ناوگان: {ratio:F2}\n");
+        if (A.BSCount.Length > 0 && D.BSCount.Length > 0)
+        {
+            var abs_ = A.BSSpecs[0]; var dbs_ = D.BSSpecs[0];
+            float pAtk = NavalPenetration(abs_.MainShellKg, NavalVelocityAt(abs_.MainMuzzleMs, 18f), abs_.MainMm);
+            float pDef = NavalPenetration(dbs_.MainShellKg, NavalVelocityAt(dbs_.MainMuzzleMs, 18f), dbs_.MainMm);
+            sb.Append($"• در برد ۱۸ کیلومتری توپ {abs_.MainMm:F0}mm شما {pAtk:F0}mm فولاد می‌درد و کمربند {dbs_.Name} {dbs_.BeltMm:F0}mm است؛ توپ او {pDef:F0}mm در برابر کمربند {abs_.BeltMm:F0}mm شما.\n");
+            sb.Append($"• کنترل آتش: شما {abs_.FireControl:P0} در برابر {dbs_.FireControl:P0} دشمن{(abs_.FireControl > dbs_.FireControl + 0.1f ? " — برتری رادار با شماست" : dbs_.FireControl > abs_.FireControl + 0.1f ? " — رادار دشمن بهتر است" : "")}\n");
+        }
         sb.Append($"• ترکیب شما: {Num(A.BS)}🚢 نبردناو، {Num(A.Subs)}⚓ زیردریایی، {Num(A.Boats)}🚤 اسکورت\n");
         sb.Append($"• ترکیب دشمن: {Num(D.BS)}🚢، {Num(D.Subs)}⚓، {Num(D.Boats)}🚤 (بندر سطح {portLevel})\n");
         if (A.Boats > 0)
@@ -2943,7 +3988,9 @@ static class WarEngine
         if (dModels != null) sb.Append(dModels).Append('\n');
         if (defBSDamage > 0) sb.Append($"   🔧 آسیب مجموع نبردناوهای دشمن: {defBSDamage}٪\n");
 
-        sb.Append($"\n💰 غنیمت دریایی: {K(lootMoney)} پول، {K(lootIron)} آهن\n");
+        if (r.AttackerCrewLost > 0 || r.DefenderCrewLost > 0)
+            sb.Append($"\n⚰️ ملوانان: شما {Num(r.AttackerCrewLost)} نفر، دشمن {Num(r.DefenderCrewLost)} نفر\n");
+        sb.Append($"💰 غنیمت دریایی: {K(lootMoney)} پول، {K(lootIron)} آهن\n");
         if (success >= 90) sb.Append($"⚠️ بندر {Esc(def.Name)} یک سطح سقوط می‌کند!\n");
         sb.Append(oneSided && won
             ? "🧠 نبرد یک‌طرفه بود؛ نبردناوهای دشمن نه‌فقط آسیب دیدند، بلکه به قعر رفتند."
@@ -2963,7 +4010,9 @@ static class WarEngine
         if (defBSDamage > 0) sb.Append($"   🔧 آسیب نبردناوها: {defBSDamage}٪\n");
         sb.Append("\n<b>💀 تلفات دشمن</b>\n");
         if (aModels != null) sb.Append(aModels).Append('\n');
-        sb.Append($"\n💸 خسارت: {K(lootMoney)} پول، {K(lootIron)} آهن\n");
+        if (r.DefenderCrewLost > 0 || r.AttackerCrewLost > 0)
+            sb.Append($"\n⚰️ ملوانان: شما {Num(r.DefenderCrewLost)} نفر، دشمن {Num(r.AttackerCrewLost)} نفر\n");
+        sb.Append($"💸 خسارت: {K(lootMoney)} پول، {K(lootIron)} آهن\n");
         if (success >= 90) sb.Append("🆘 بندر شما به دلیل شکست سنگین یک سطح سقوط کرد!\n");
         sb.Append("🚤 قایق‌های بازمانده‌ی شما در گشت ساحلی باقی ماندند.");
         r.DefenderReport = sb.ToString();
