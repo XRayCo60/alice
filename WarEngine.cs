@@ -317,7 +317,7 @@ static class WarEngine
         public readonly float SecMm;
         public readonly int   SecGuns;
         public readonly float AaKgMin;       // وزن آتش ضدهوایی
-        public readonly float FireControl;   // کیفیت کنترل آتش ۰..۱ (رادار!)
+        public readonly float FireControl;   // کنترل آتش ۰..۱ — در ۱۹۳۹ عمدتاً اپتیکی (فاصله‌یاب استریوسکوپی)
         public readonly int   Crew;
         public BattleshipSpec(string n, Faction o, float sp, float len, float beam, float disp,
             float belt, float deck, float turret, float conning, float mainMm, int mainN,
@@ -331,15 +331,15 @@ static class WarEngine
     // Bismarck — ۸×۳۸cm، کمربند ۳۲۰، عرشه ضعیف ۱۲۰، کنترل آتش عالی ولی رادار ابتدایی
     static readonly BattleshipSpec BSGermany = new("Bismarck", Faction.Reich,
         30.1f, 251f, 36f, 50300f, 320f, 120f, 360f, 350f,
-        380f, 8, 800f, 820f, 36.5f, 2.3f, 150f, 12, 190f, 0.82f, 2092);
+        380f, 8, 800f, 820f, 36.5f, 2.3f, 150f, 12, 190f, 0.88f, 2092);   // فاصله‌یاب Zeiss — بهترین اپتیک ۱۹۳۹
     // Iowa — ۹×۴۰۶cm، سریع‌ترین، عرشه ۱۵۲، رادار Mk8 → بهترین کنترل آتش جنگ
     static readonly BattleshipSpec BSUSA = new("Iowa", Faction.USA,
         32.5f, 270f, 33f, 57540f, 307f, 152f, 495f, 440f,
-        406f, 9, 1225f, 762f, 38.7f, 2.0f, 127f, 20, 900f, 0.98f, 2700);
+        406f, 9, 1225f, 762f, 38.7f, 2.0f, 127f, 20, 900f, 0.80f, 2700);   // ۱۹۳۹: هنوز رادار Mk8 نیامده
     // Sovetsky Soyuz — هرگز کامل نشد؛ زره متوسط، ضدهوایی ضعیف، بدون رادار
     static readonly BattleshipSpec BSUSSR = new("Sovetsky Soyuz", Faction.USSR,
         28f, 269f, 38.9f, 59150f, 375f, 155f, 495f, 425f,
-        406f, 9, 1108f, 830f, 45.6f, 2.0f, 152f, 12, 120f, 0.55f, 1664);
+        406f, 9, 1108f, 830f, 45.6f, 2.0f, 152f, 12, 120f, 0.58f, 1664);   // اپتیک ضعیف‌تر، آموزش کمتر
     static BattleshipSpec BattleshipOf(Faction f) => f == Faction.USA ? BSUSA : f == Faction.USSR ? BSUSSR : BSGermany;
 
     // ─────────────────────── نگاشت نام مدل → مشخصات ─────────────────────────
@@ -568,6 +568,10 @@ static class WarEngine
         public float[] Elev = new float[GRID_W * GRID_H];
         public byte Weather;
         public byte StartTime;
+        public byte MapType;            // ۳۱: تیپ نقشه
+        public int  WeatherShiftTick;   // ۳۲: تیک تغییر آب‌وهوا
+        public byte WeatherNext;        // ۳۲: آب‌وهوای بعدی
+        public float CloudBaseM;        // ۵۸: کف لایه‌ی ابر
         public byte TimeAt(int tick) => (byte)((StartTime + (tick / 30)) & 3);
 
         public byte TerrAt(float x, float y)
@@ -630,30 +634,124 @@ static class WarEngine
         return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
     }
 
+    // ── ۳۱: تیپ‌های نقشه ──
+    //  هر تیپ ساختار زمینی کاملاً متفاوتی می‌سازد، پس دکترین‌ها در نقشه‌های
+    //  مختلف نتیجه‌ی متفاوت می‌دهند: محاصره در دشت عالی است و در گذرگاه فاجعه.
+    const byte MAP_PLAINS = 0, MAP_HILLS = 1, MAP_FOREST = 2, MAP_INDUSTRIAL = 3,
+               MAP_MARSH = 4, MAP_PASS = 5, MAP_RIVER = 6, MAP_STEPPE = 7;
+    static readonly string[] MapName =
+    { "دشت باز", "تپه‌ماهور", "جنگل انبوه", "منطقه‌ی صنعتی", "مرداب", "گذرگاه کوهستانی", "خط رودخانه", "استپ وسیع" };
+    static readonly string[] MapNote =
+    {
+        "زمین باز و بی‌پناه — بهشت زره و جهنم پیاده‌ی بی‌سنگر",
+        "برجستگی‌های پیاپی؛ هر تپه یک موضع دید و آتش است",
+        "دید کوتاه، کمین آسان، هماهنگی سخت",
+        "خرابه و کارخانه؛ تانک کور می‌شود و پیاده حاکم است",
+        "زمین نرم؛ زره در گِل می‌ماند و مسیرها محدودند",
+        "فقط چند دهانه‌ی عبور — مدافع با نیروی کم هم می‌تواند ببندد",
+        "خط آبی که فقط از چند گدار عبور دارد",
+        "پهنه‌ی بی‌انتها؛ جناح‌ها باز و مانور آزاد است"
+    };
+
     static Field GenField(ref XorRng rng)
     {
         var f = new Field();
         uint s1 = (uint)rng.NextU(), s2 = (uint)rng.NextU(), s3 = (uint)rng.NextU();
+
+        // انتخاب تیپ نقشه
+        float mr = rng.NextF();
+        f.MapType = mr < 0.20f ? MAP_PLAINS : mr < 0.36f ? MAP_HILLS : mr < 0.50f ? MAP_FOREST
+                  : mr < 0.62f ? MAP_INDUSTRIAL : mr < 0.71f ? MAP_MARSH : mr < 0.81f ? MAP_PASS
+                  : mr < 0.91f ? MAP_RIVER : MAP_STEPPE;
+
         for (int gy = 0; gy < GRID_H; gy++)
             for (int gx = 0; gx < GRID_W; gx++)
             {
                 float e = Noise(gx * 0.09f, gy * 0.09f, s1) * 0.65f + Noise(gx * 0.23f, gy * 0.23f, s2) * 0.35f;
                 float v = Noise(gx * 0.13f + 50, gy * 0.13f, s3);
                 int idx = gy * GRID_W + gx;
-                f.Elev[idx] = e;
                 byte t;
-                if (e > 0.78f) t = T_RIDGE;
-                else if (e > 0.62f) t = T_HILL;
-                else if (v > 0.72f && e > 0.3f) t = T_FOREST;
-                else if (v < 0.12f && e < 0.35f) t = T_MARSH;
-                else if (v > 0.62f && v <= 0.72f && e < 0.5f) t = T_URBAN;
-                else t = T_PLAIN;
+
+                switch (f.MapType)
+                {
+                    case MAP_PLAINS:
+                        e *= 0.55f;
+                        t = e > 0.52f ? T_HILL : v > 0.86f ? T_FOREST : T_PLAIN;
+                        break;
+
+                    case MAP_HILLS:
+                        e = 0.30f + e * 0.70f;
+                        t = e > 0.74f ? T_RIDGE : e > 0.55f ? T_HILL : v > 0.78f ? T_FOREST : T_PLAIN;
+                        break;
+
+                    case MAP_FOREST:
+                        t = v > 0.30f ? T_FOREST : e > 0.70f ? T_HILL : v < 0.10f ? T_MARSH : T_PLAIN;
+                        break;
+
+                    case MAP_INDUSTRIAL:
+                        // خوشه‌های شهری در میانه‌ی نقشه
+                        t = (v > 0.42f && v < 0.72f) ? T_URBAN : e > 0.72f ? T_HILL : v > 0.88f ? T_FOREST : T_PLAIN;
+                        break;
+
+                    case MAP_MARSH:
+                        t = v < 0.46f ? T_MARSH : v > 0.84f ? T_FOREST : T_PLAIN;
+                        break;
+
+                    case MAP_PASS:
+                    {
+                        // دیواره‌ی کوه در دو طرف، فقط چند دهانه در میانه
+                        float cx = gx / (float)GRID_W;
+                        float wall = MathF.Abs(cx - 0.5f) * 2f;                 // ۰ در مرکز، ۱ در لبه
+                        float gate = Noise(gy * 0.35f, 11f, s3);                // دهانه‌های پراکنده
+                        if (wall > 0.42f && gate < 0.72f) { t = T_RIDGE; e = 0.85f; }
+                        else if (wall > 0.30f) { t = T_HILL; e = 0.66f; }
+                        else t = v > 0.75f ? T_FOREST : T_PLAIN;
+                        break;
+                    }
+
+                    case MAP_RIVER:
+                    {
+                        // نوار مرداب افقی به‌جای رودخانه، با چند گدار
+                        float band = MathF.Abs(gy / (float)GRID_H - 0.45f);
+                        float ford = Noise(gx * 0.30f, 5f, s2);
+                        if (band < 0.055f && ford < 0.70f) { t = T_MARSH; e = 0.18f; }
+                        else t = e > 0.70f ? T_HILL : v > 0.80f ? T_FOREST : T_PLAIN;
+                        break;
+                    }
+
+                    default: // MAP_STEPPE
+                        e *= 0.42f;
+                        t = v > 0.93f ? T_FOREST : T_PLAIN;
+                        break;
+                }
+
+                f.Elev[idx] = e;
                 f.Terr[idx] = t;
             }
 
+        // ── آب‌وهوای وابسته به نقشه ──
         float r = rng.NextF();
+        if (f.MapType == MAP_MARSH) r *= 0.80f;              // مرداب مه‌آلودتر
         f.Weather = r < 0.45f ? W_CLEAR : r < 0.68f ? W_CLOUD : r < 0.84f ? W_RAIN : r < 0.94f ? W_FOG : W_SNOW;
         f.StartTime = (byte)rng.Next(4);
+
+        // ── ۳۲: آب‌وهوا در طول نبرد عوض می‌شود ──
+        //  یک زمان تغییر و یک وضعیت بعدی از قبل قرعه می‌خورد.
+        f.WeatherShiftTick = 40 + rng.Next(120);
+        float r2 = rng.NextF();
+        byte next = r2 < 0.40f ? W_CLEAR : r2 < 0.62f ? W_CLOUD : r2 < 0.82f ? W_RAIN : r2 < 0.93f ? W_FOG : W_SNOW;
+        f.WeatherNext = next;
+
+        // ── ۵۸: لایه‌ی ابر ──
+        //  بالای لایه آفتابی است، زیرش کور. بمب‌افکن بالای ابر امن ولی نابیناست.
+        f.CloudBaseM = f.Weather switch
+        {
+            W_CLEAR => 9999f,
+            W_CLOUD => 2200f + rng.Range(0f, 1800f),
+            W_RAIN  => 1200f + rng.Range(0f, 1200f),
+            W_FOG   => 300f + rng.Range(0f, 500f),
+            _       => 900f + rng.Range(0f, 1400f),
+        };
         return f;
     }
 
@@ -1689,9 +1787,12 @@ static class WarEngine
 
             float lossR = 1f - u.Units / Math.Max(1f, u.Size0);
 
-            // مدافع تحت فشار، به‌جای مردن سر جا، کمی عقب می‌کشد و دوباره سنگر می‌گیرد
+            //  – ۳۷: عقب‌نشینی تصمیم فرماندهی است، نه فرار خودسر
+            float fallbackP = FALLBACK_P * (0.45f + f.Cmd.Caution * 1.6f);
+            if (f.Cmd.Doctrine == 22) fallbackP *= 1.7f;      // دکترین تله ذاتاً کشسان است
+            if (f.Cmd.Doctrine == 11) fallbackP *= 0.5f;      // خط ثابت زمین نمی‌دهد
             if (!f.IsAttacker && lossR > 0.35f && u.Morale < 0.55f && u.Posture != P_RETREAT
-                && rng.NextF() < FALLBACK_P)
+                && rng.NextF() < fallbackP)
             {
                 u.Y = Math.Min(DEPTH_KM - 1f, u.Y + rng.Range(1.5f, 3.5f));
                 u.TgtY = u.Y;
@@ -1831,13 +1932,17 @@ static class WarEngine
 
     // شانس دیدن هدف در هوا: تابع اختلاف ارتفاع، فاصله، ابر و خورشید.
     //  در ۱۹۴۰ رادار هوابرد نبود؛ همه‌چیز چشمی است.
-    static float AirSpot(float myAlt, float foeAlt, float sepKm, byte weather, byte time)
+    static float AirSpot(float myAlt, float foeAlt, float sepKm, byte weather, byte time, float cloudBase = 9999f)
     {
         float baseSpot = 1f - Math.Clamp(sepKm / 12f, 0f, 0.95f);
         // هواپیمای بالاتر، پایینی را روی زمینه‌ی زمین راحت‌تر می‌بیند
         float altEdge = Math.Clamp((myAlt - foeAlt) / 3000f, -0.35f, 0.35f);
         float cloud = WxAir[weather];
         float light = TimeAir[time];
+        //  – ۵۸: اگر ابر بین دو هواپیما باشد، همدیگر را گم می‌کنند
+        bool across = (myAlt - cloudBase) * (foeAlt - cloudBase) < 0f;
+        if (across) cloud *= 0.28f;
+        else if (myAlt > cloudBase && foeAlt > cloudBase) cloud = MathF.Min(1f, cloud * 1.35f);  // بالای ابر آفتابی
         return Math.Clamp((baseSpot + altEdge) * cloud * light, 0.02f, 0.98f);
     }
 
@@ -1888,7 +1993,7 @@ static class WarEngine
         {
             float n = Math.Min(left, perGroup);
             A.Add(new AirGroup { Alt = escortAlt, DistKm = 60f, Count = n, Count0 = n,
-                AmmoSec = aFs.AmmoSec, Fuel = aFs.RangeKm / MathF.Max(1f, aFs.SpeedKmh) * 60f,
+                AmmoSec = aFs.AmmoSec, Fuel = aFs.RangeKm / MathF.Max(1f, aFs.SpeedKmh) * 60f * fuelMul,
                 Role = (byte)(escortDuty ? 0 : 1), Alive = true });
             left -= (long)n;
         }
@@ -1945,7 +2050,7 @@ static class WarEngine
                 {
                     var a = A[ai];
                     if (!a.Alive) continue;
-                    float spot = AirSpot(d.Alt, a.Alt, a.DistKm, wx, timeNow);
+                    float spot = AirSpot(d.Alt, a.Alt, a.DistKm, wx, timeNow, field.CloudBaseM);
                     if (rng.NextF() > spot) continue;
                     // اولویت: بمب‌افکن مهم‌تر از جنگنده
                     float val = (a.Role == 2 ? 3.2f : 1f) * a.Count / (1f + a.DistKm * 0.05f);
@@ -1974,7 +2079,7 @@ static class WarEngine
                 else
                 {
                     // سگ‌جنگی: چابکی و انرژی و وزن آتش
-                    float aTurn = 1f / MathF.Max(1f, aFs.TurnSec);
+                    float aTurn = 1f / MathF.Max(1f, aFs.TurnSec * agilityPenalty);   // ۵۵: بال پر = چرخش کندتر
                     float dTurn = 1f / MathF.Max(1f, dFs.TurnSec);
                     float aEdge = EnergyEdge(tg.Alt, d.Alt) * aProf.CrewQuality * aFamil;
 
@@ -2040,6 +2145,8 @@ static class WarEngine
                 if (!a.Alive || a.Role != 2 || a.DroppedBombs || a.DistKm > 0.5f) continue;
                 // دقت: CEP پایه، بدتر با ارتفاع و ابر، بهتر با نشانه‌روی خوب
                 float cep = aBs.AccuracyCep * (1f + a.Alt / 9000f) / MathF.Max(0.35f, WxAir[wx]);
+                //  – ۵۸: بمباران از بالای لایه‌ی ابر تقریباً کور است
+                if (a.Alt > field.CloudBaseM) cep *= 2.4f;
                 float hitFrac = Math.Clamp(220f / MathF.Max(60f, cep), 0.06f, 0.85f);
                 float tons = a.Count * aBs.BombKg / 1000f;
                 if (aAirStrat == 2) bombsOnTarget += tons * hitFrac;
@@ -2381,6 +2488,15 @@ static class WarEngine
 
             for (tick = 0; tick < MAX_TICKS; tick++)
             {
+                //  – ۳۲: آب‌وهوا وسط نبرد عوض می‌شود
+                if (tick == field.WeatherShiftTick && field.WeatherNext != field.Weather)
+                {
+                    byte old = field.Weather;
+                    field.Weather = field.WeatherNext;
+                    log.Add(tick, 2, LG_ENV,
+                        $"هوا از {WeatherName[old]} به {WeatherName[field.Weather]} تغییر کرد و شرایط میدان عوض شد.");
+                }
+
                 byte tnow = field.TimeAt(tick);
                 float visEnv = WxVision[field.Weather] * TimeVision[tnow];
                 float accEnv = WxAcc[field.Weather];
@@ -2651,6 +2767,36 @@ static class WarEngine
                 break;
         }
 
+        //  – ۳۱: تیپ نقشه، سرنوشت دکترین را عوض می‌کند
+        switch (field.MapType)
+        {
+            case MAP_PASS:      // گذرگاه: مانور بی‌معنا، هجوم مستقیم تنها راه
+                if (a == 21 || a == 22) adv *= 0.78f;
+                else adv *= 1.04f;
+                break;
+            case MAP_RIVER:     // رودخانه: عبور سخت، مدافع گدارها را می‌بندد
+                adv *= 0.88f;
+                if (a == 12) adv *= 1.08f;   // اکتشاف گدار پیدا می‌کند
+                break;
+            case MAP_STEPPE:    // استپ: جناح‌ها باز، بهشت محاصره
+                if (a == 21 || a == 22) adv *= 1.14f;
+                break;
+            case MAP_PLAINS:
+                if (a == 21 || a == 22) adv *= 1.06f;
+                break;
+            case MAP_INDUSTRIAL: // شهر: زره کور، هجوم پرهزینه
+                adv *= 0.86f;
+                break;
+            case MAP_FOREST:
+                adv *= 0.92f;
+                if (d == 21) adv *= 0.92f;   // کمین در جنگل مرگبارتر
+                break;
+            case MAP_MARSH:
+                adv *= 0.88f;
+                break;
+        }
+        log.Add(0, 2, LG_ENV, $"میدان نبرد: {MapName[field.MapType]} — {MapNote[field.MapType]}.");
+
         // زمین: هر دکترین در زمین متفاوتی جواب می‌دهد
         byte terr = field.DominantTerrainNear(FRONT_KM / 2f);
         if (a == 21 || a == 22) // مانوری
@@ -2764,6 +2910,61 @@ static class WarEngine
         return sb.ToString();
     }
 
+    // ── ۴۰: نقشه‌ی متنی جبهه ──
+    //  یک نمای ۱۰ ستونی از جبهه که نشان می‌دهد رخنه کجا شکل گرفت.
+    //  با سوییچ ادمین روشن/خاموش می‌شود (پیش‌فرض خاموش).
+    public static bool ShowFrontMap = false;
+
+    static string FrontMap(Force fa, Force fd, Field field, float depth)
+    {
+        if (fa == null || fd == null) return null;
+        Span<float> atk = stackalloc float[SECTORS];
+        Span<float> def = stackalloc float[SECTORS];
+        Span<float> adv = stackalloc float[SECTORS];
+        for (int s = 0; s < SECTORS; s++) { atk[s] = 0f; def[s] = 0f; adv[s] = 0f; }
+
+        for (int i = 0; i < fa.N; i++)
+        {
+            ref Group g = ref fa.G[i];
+            if (!g.Alive || g.Posture is P_RETREAT or P_REGROUP) continue;
+            int s = Math.Clamp((int)(g.X / SECTOR_KM), 0, SECTORS - 1);
+            atk[s] += g.Type == 1 ? g.Units * 10f : g.Units;
+            if (g.Y > adv[s]) adv[s] = g.Y;
+        }
+        for (int j = 0; j < fd.N; j++)
+        {
+            ref Group e = ref fd.G[j];
+            if (!e.Alive || e.Posture == P_RETREAT) continue;
+            int s = Math.Clamp((int)(e.X / SECTOR_KM), 0, SECTORS - 1);
+            def[s] += e.Type == 1 ? e.Units * 10f : e.Units;
+        }
+
+        var sb = new StringBuilder(320);
+        sb.Append("<code>");
+        sb.Append("سکتور  ");
+        for (int s = 0; s < SECTORS; s++) sb.Append((s + 1) % 10).Append(' ');
+        sb.Append('\n');
+
+        sb.Append("رخنه   ");
+        for (int s = 0; s < SECTORS; s++)
+        {
+            float f = Math.Clamp(adv[s] / WIN_DEPTH, 0f, 1f);
+            char c = atk[s] < 40f ? '.' : f > 0.85f ? '#' : f > 0.60f ? '+' : f > 0.30f ? '=' : '-';
+            sb.Append(c).Append(' ');
+        }
+        sb.Append('\n');
+
+        sb.Append("دفاع   ");
+        for (int s = 0; s < SECTORS; s++)
+        {
+            char c = def[s] < 40f ? '.' : def[s] > 900f ? 'X' : def[s] > 350f ? 'x' : 'o';
+            sb.Append(c).Append(' ');
+        }
+        sb.Append("</code>\n");
+        sb.Append("<i>#عبور کامل  +رخنه عمیق  =پیشروی  -تماس  .خالی | Xدفاع سنگین  xمتوسط  oسبک</i>");
+        return sb.ToString();
+    }
+
     // ─────────── خط زمانی نبرد ───────────
     static string Timeline(BattleLog log, byte side, int max = 14)
     {
@@ -2825,7 +3026,7 @@ static class WarEngine
 
         int h = r.DurationMinutes / 60, m = r.DurationMinutes % 60;
         byte terr = field.DominantTerrainNear(FRONT_KM / 2f);
-        string env = $"🌦 {WeatherName[field.Weather]} | 🕓 شروع در {TimeName[field.StartTime]} | 🏞 زمین غالب: {TerName[terr]}";
+        string env = $"🗺 {MapName[field.MapType]} | 🌦 {WeatherName[field.Weather]} | 🕓 {TimeName[field.StartTime]} | 🏞 {TerName[terr]}";
 
         string advText = stratAdv > 1.12f ? $"استراتژی مهاجم پادزهر انتخاب مدافع بود (مزیت {stratAdv:F2}×)"
                        : stratAdv < 0.92f ? $"انتخاب مدافع دقیقاً نقطه‌ضعف طرح مهاجم را گرفت (مزیت {stratAdv:F2}× به ضرر مهاجم)"
@@ -2865,6 +3066,12 @@ static class WarEngine
         sb.Append($"• طرح دشمن: {Esc(dDoc)}\n");
         if (anyGround && defHasGround) sb.Append($"• {Esc(advText)}\n");
         if (aFight > 0 || aBomb > 0) sb.Append($"• هوایی: {Esc(aAirName)} / {Esc(aAirTacName)}\n");
+
+        if (ShowFrontMap && anyGround && defHasGround)
+        {
+            string fm = FrontMap(fa, fd, field, depth);
+            if (fm != null) { sb.Append("\n<b>🗺 نمای جبهه</b>\n").Append(fm).Append('\n'); }
+        }
 
         string tlA = Timeline(log, 0);
         if (tlA != null)
@@ -2920,6 +3127,43 @@ static class WarEngine
 
         sb.Append($"\n<b>🧠 جمع‌بندی:</b> {Esc(why)}");
         r.AttackerReport = sb.ToString();
+
+        //  – ۶۰: اگر عملیات کاملاً هوایی بود، گزارش اختصاصی خودش را می‌گیرد
+        if (!anyGround)
+        {
+            var ab = new StringBuilder(1600);
+            ab.Append($"🛫 <b>گزارش عملیات هوایی — {Esc(atk.Name)} علیه {Esc(def.Name)}</b>\n");
+            ab.Append($"{outcome}\n");
+            ab.Append($"🌦 {WeatherName[field.Weather]} | 🕓 {TimeName[field.StartTime]}");
+            if (field.CloudBaseM < 9000f) ab.Append($" | ☁️ کف ابر {field.CloudBaseM:F0} متر");
+            ab.Append('\n');
+            ab.Append($"⏱ مدت ماموریت: {h} ساعت و {m} دقیقه\n");
+
+            ab.Append("\n<b>🎯 طرح عملیات</b>\n");
+            ab.Append($"• {Esc(aAirName)} / {Esc(aAirTacName)}\n");
+            ab.Append($"• ارتفاع ورود سازند: {air.EscortAltM:F0} متر\n");
+            if (dFight > 0) ab.Append($"• گشت مدافع در {air.CapAltM:F0} متری\n");
+            ab.Append($"• دفاع دشمن: {Esc(dAirName)} / {Esc(dAirTacName)}\n");
+
+            string tlAir = Timeline(log, 0);
+            if (tlAir != null) ab.Append("\n<b>📜 روند ماموریت</b>\n").Append(tlAir).Append('\n');
+
+            ab.Append("\n<b>💀 تلفات شما</b>\n");
+            ab.Append($"   ✈️ جنگنده: {Num(r.AttackerFightersLost)} از {Num(aFight)}\n");
+            ab.Append($"   🛩 بمب‌افکن: {Num(r.AttackerBombersLost)} از {Num(aBomb)}\n");
+            if (r.AttackerCrewLost > 0) ab.Append($"   ⚰️ خدمه‌ی پرواز: {Num(r.AttackerCrewLost)} نفر\n");
+
+            ab.Append("\n<b>💀 تلفات دشمن</b>\n");
+            ab.Append($"   ✈️ جنگنده: {Num(r.DefenderFightersLost)} از {Num(dFight)}\n");
+            ab.Append($"   🎯 پدافند: {Num(r.DefenderAntiAirLost)} از {Num(dAA)}\n");
+
+            if (air.BombTonsOnTarget > 0.05f)
+                ab.Append($"\n💣 تناژ روی هدف: {air.BombTonsOnTarget:F1} تن\n");
+            ab.Append($"🛫 برتری هوایی: {AirSupText(air.Superiority)}\n");
+            if (air.StratMoney > 0 || air.StratIron > 0)
+                ab.Append($"🏭 خسارت به اقتصاد دشمن: {K(air.StratMoney)} پول، {K(air.StratIron)} آهن\n");
+            r.AttackerReport = ab.ToString();
+        }
 
         // ═══════════════════ گزارش مدافع ═══════════════════
         sb.Clear();
@@ -3200,9 +3444,42 @@ static class WarEngine
         return s;
     }
 
+    // ═════════════ سیستم آسیب کشتی (پیشنهاد ۱۳) ═════════════
+    //  کشتی «یا سالم یا غرق» نیست. آسیب روی چهار زیرسیستم می‌نشیند و هرکدام
+    //  اثر مکانیکی مشخص خودش را دارد. جای برخورد گلوله تعیین می‌کند کدام
+    //  زیرسیستم آسیب ببیند.
+    const byte DMG_HULL = 0;    // بدنه/شناوری → سرعت و بقا
+    const byte DMG_ENGINE = 1;  // موتور → سرعت
+    const byte DMG_GUNS = 2;    // برجک‌ها → توان آتش
+    const byte DMG_FIRE = 3;    // آتش‌سوزی/کنترل آتش → دقت
+
+    static readonly string[] DmgName = { "بدنه", "موتورخانه", "برجک‌ها", "سامانه‌ی کنترل آتش" };
+
+    // ضریب سرعت باقی‌مانده بر پایه‌ی آسیب بدنه و موتور
+    static float SpeedFactor(in Ship sh)
+    {
+        float loss = sh.DmgEngine * 0.55f + sh.DmgHull * 0.30f;
+        return Math.Clamp(1f - loss, 0.22f, 1f);
+    }
+
+    // چند درصد توپ‌ها هنوز کار می‌کنند
+    static float GunFactor(in Ship sh) => Math.Clamp(1f - sh.DmgGuns * 0.85f, 0.10f, 1f);
+
+    // دقت باقی‌مانده: آتش‌سوزی و از کار افتادن فاصله‌یاب
+    static float AccuracyFactor(in Ship sh) => Math.Clamp(1f - sh.DmgFire * 0.60f, 0.25f, 1f);
+
+    // آیا کشتی باید از نبرد خارج شود؟ ناخدا با بدنه‌ی داغان عقب می‌کشد
+    static bool ShouldWithdraw(in Ship sh) => sh.DmgHull > 0.72f || sh.Hp < 0.18f;
+
     // ───────────────── واحد شناور در میدان دریا ─────────────────
     struct Ship
     {
+        public float DmgHull;      // ۰..۱ آسیب بدنه — نشت، لیست، کاهش شناوری
+        public float DmgEngine;    // ۰..۱ آسیب موتورخانه
+        public float DmgGuns;      // ۰..۱ برجک‌های از کار افتاده
+        public float DmgFire;      // ۰..۱ آتش‌سوزی و آسیب کنترل آتش
+        public float Flooding;     // نرخ نشت — هر تیک بدنه را بدتر می‌کند
+        public bool  Withdrawing;  // در حال خروج از نبرد
         public float X, Y;          // کیلومتر
         public float Heading;       // رادیان
         public float Count;         // چند فروند در این دسته
@@ -3280,7 +3557,23 @@ static class WarEngine
         // دریای متلاطم قایق سبک را از کار می‌اندازد
         float seaState = rng.Range(0f, 0.5f);
         if (navWeather is W_RAIN or W_SNOW) seaState = MathF.Min(1f, seaState + 0.40f);
-        log.Add(0, 2, LG_ENV, $"نبرد دریایی در هوای {WeatherName[navWeather]} و {TimeName[field.StartTime]} درگرفت.");
+
+        //  – ۱۷: شب دریایی. در ۱۹۳۹ رادار جست‌وجو نیست، پس شب یعنی کوری تقریبی.
+        //     برد دید به چند کیلومتر می‌افتد و نبرد به فاصله‌ی نزدیک کشیده می‌شود.
+        bool nightBattle = field.StartTime == TM_NIGHT;
+        float lightFactor = nightBattle ? 0.34f : field.StartTime == TM_DUSK || field.StartTime == TM_DAWN ? 0.72f : 1f;
+
+        //  – ۱۸: عمق آب. آب کم‌عمق یعنی زیردریایی نمی‌تواند فرار عمودی کند.
+        float waterDepthM = rng.Range(45f, 320f);
+        bool shallow = waterDepthM < 110f;
+
+        log.Add(0, 2, LG_ENV,
+            $"نبرد دریایی در هوای {WeatherName[navWeather]} و {TimeName[field.StartTime]} درگرفت؛ " +
+            $"دریا {(seaState > 0.6f ? "متلاطم" : seaState > 0.3f ? "نیمه‌موّاج" : "آرام")} و عمق آب حدود {waterDepthM:F0} متر بود.");
+        if (nightBattle)
+            log.Add(0, 2, LG_ENV, "در تاریکی شب و بدون رادار جست‌وجو، ناوها تا فاصله‌ی نزدیک همدیگر را نمی‌دیدند.");
+        if (shallow)
+            log.Add(0, 2, LG_ENV, "آب کم‌عمق بود؛ زیردریایی‌ها نمی‌توانستند به عمق امن بروند.");
 
         var ships = new List<Ship>();
 
@@ -3351,6 +3644,7 @@ static class WarEngine
         var bsDmg    = new float[2][]; bsDmg[0]    = new float[A.BSCount.Length];   bsDmg[1]    = new float[D.BSCount.Length];
 
         float shoreProgress = 0f;      // پیشرفت به سمت ساحل ۰..۱
+        var fleetWithdraw = new bool[2];   // ۲۰: آیا ناوگان هر طرف دستور عقب‌نشینی گرفته
         bool loggedFirstBlood = false, loggedTorp = false, loggedCross = false, loggedBrace = false;
         float closestRange = 99f;
 
@@ -3373,6 +3667,8 @@ static class WarEngine
                     float keep = side.BoatSpecs[sh.Model].SeaKeeping;
                     knots *= Math.Clamp(1f - seaState * (1f - keep) * 1.1f, 0.25f, 1f);
                 }
+                // آسیب موتورخانه و بدنه سرعت را می‌خورد (پیشنهاد ۱۳)
+                knots *= SpeedFactor(sh);
                 float kmPerTick = knots * 1.852f * (SEA_TICK_MIN / 60f);
 
                 // نزدیک‌ترین دشمن را پیدا کن
@@ -3388,6 +3684,26 @@ static class WarEngine
 
                 var en = ships[tgt];
                 float desired;
+
+                // ناوِ به‌شدت آسیب‌دیده از نبرد خارج می‌شود (پیشنهاد ۱۳ و ۲۰)
+                if (ShouldWithdraw(sh))
+                {
+                    if (!sh.Withdrawing)
+                    {
+                        sh.Withdrawing = true;
+                        if (sh.Kind == 2)
+                            log.Add(t * 2, (byte)sh.Side, LG_CRISIS,
+                                $"{side.BSSpecs[sh.Model].Name} با {sh.DmgHull * 100f:F0}٪ آسیب بدنه از خط خارج شد و به سمت بندر برگشت.");
+                    }
+                    float away = MathF.Atan2(sh.Y - en.Y, sh.X - en.X);
+                    float mt = sh.Kind == 2 ? 0.16f : 0.40f;
+                    sh.Heading += Math.Clamp(WrapPi(away - sh.Heading), -mt, mt);
+                    float esc = knots * 1.852f * (SEA_TICK_MIN / 60f);
+                    sh.X = Math.Clamp(sh.X + MathF.Cos(sh.Heading) * esc, 0.5f, SEA_W - 0.5f);
+                    sh.Y = Math.Clamp(sh.Y + MathF.Sin(sh.Heading) * esc, 0.5f, SEA_H - 0.5f);
+                    ships[i] = sh;
+                    continue;
+                }
                 if (sh.Kind == 2)
                 {
                     // نبردناو: در برد بهینه پهلو می‌دهد تا همه‌ی برجک‌ها شلیک کنند («کراسینگ»).
@@ -3445,8 +3761,15 @@ static class WarEngine
                     var o = ships[j];
                     float dd = MathF.Sqrt((o.X - sh.X) * (o.X - sh.X) + (o.Y - sh.Y) * (o.Y - sh.Y));
                     float horizon = sh.Kind == 2 ? 28f : sh.Kind == 1 ? (sh.Depth > 0.5f ? 8f : 14f) : 12f;
+                    horizon *= lightFactor;                       // ۱۷: شب دید را می‌برد
                     // رادار کنترل آتش دید را بسیار زیاد می‌کند
-                    if (sh.Kind == 2) horizon *= 0.75f + SideOf(sh.Side).BSSpecs[sh.Model].FireControl * 0.6f;
+                    // ۱۹۳۹: دید دریایی چشمی و اپتیکی است — رادار جست‌وجو هنوز فراگیر نیست
+                    if (sh.Kind == 2)
+                    {
+                        horizon *= 0.80f + SideOf(sh.Side).BSSpecs[sh.Model].FireControl * 0.35f;
+                        // ۱۶: هواپیمای شناسایی روی ناو — فقط روز و هوای باز، اثر سبک
+                        if (!nightBattle && WxVision[field.Weather] > 0.75f) horizon *= 1.18f;
+                    }
                     float vis = Math.Clamp(1f - dd / horizon, 0f, 1f) * WxVision[field.Weather];
                     // زیردریایی غواصی‌شده تقریباً نامرئی است
                     if (o.Kind == 1 && o.Depth > 0.5f)
@@ -3461,7 +3784,7 @@ static class WarEngine
             for (int i = 0; i < ships.Count; i++)
             {
                 var sh = ships[i];
-                if (!sh.Alive || sh.Kind != 2 || sh.Ammo <= 0f) continue;
+                if (!sh.Alive || sh.Kind != 2 || sh.Ammo <= 0f || sh.Withdrawing) continue;
                 var side = SideOf(sh.Side);
                 var sp = side.BSSpecs[sh.Model];
 
@@ -3517,12 +3840,12 @@ static class WarEngine
                 float profile = TargetProfile(enLen, enBeam, aob);
                 float bearing = GunsBearing(myAob);              // چند درصد توپ‌های من شلیک می‌کنند
 
-                float shots = sp.MainGuns * bearing * sp.MainRpm * SEA_TICK_MIN;
+                float shots = sp.MainGuns * bearing * sp.MainRpm * SEA_TICK_MIN * GunFactor(sh);
                 shots = MathF.Min(shots, sh.Ammo);
                 sh.Ammo -= shots;
 
                 // احتمال اصابت: کنترل آتش، فاصله، سطح هدف، دریا
-                float fc = sp.FireControl * side.Prof.CrewQuality * side.Familiar(sp.Origin);
+                float fc = sp.FireControl * side.Prof.CrewQuality * side.Familiar(sp.Origin) * AccuracyFactor(sh);
                 float hitP = Math.Clamp(0.34f * fc * (profile / 200f) / (1f + tgtRange / 11f)
                                         * WxVision[field.Weather] * (1f - seaState * 0.28f), 0.002f, 0.42f);
                 float hits = shots * hitP * sh.Count;
@@ -3533,11 +3856,12 @@ static class WarEngine
                 float fall = FallAngleDeg(tgtRange, sp.MainMuzzleMs);
 
                 float dmg;
+                bool deckHitFlag = fall > 26f;
                 if (en2.Kind == 2)
                 {
                     var es = eSide.BSSpecs[en2.Model];
                     // در برد کم گلوله به کمربند، در برد زیاد به عرشه می‌خورد
-                    bool deckHit = fall > 26f;
+                    bool deckHit = deckHitFlag;
                     float armor = deckHit
                         ? es.DeckMm / MathF.Max(0.30f, MathF.Sin(fall * MathF.PI / 180f))
                         : BeltEffective(es.BeltMm, aob, fall);
@@ -3562,11 +3886,32 @@ static class WarEngine
                     dmg = hits * 0.16f / (1f + splinter / 22f);
                 }
 
-                // اعمال آسیب
+                // اعمال آسیب — روی زیرسیستم‌ها پخش می‌شود (پیشنهاد ۱۳)
                 if (en2.Kind == 2)
                 {
                     en2.Hp -= dmg;
                     bsDmg[en2.Side][en2.Model] += dmg * 100f;
+
+                    // جای برخورد تعیین می‌کند چه چیزی خراب شود
+                    float roll = rng.NextF();
+                    if (deckHitFlag)
+                    {
+                        // گلوله از عرشه می‌آید: موتورخانه و انبار مهمات زیرش است
+                        if (roll < 0.42f) en2.DmgEngine = Math.Min(1f, en2.DmgEngine + dmg * 2.6f);
+                        else if (roll < 0.70f) en2.DmgFire = Math.Min(1f, en2.DmgFire + dmg * 3.0f);
+                        else if (roll < 0.88f) en2.DmgGuns = Math.Min(1f, en2.DmgGuns + dmg * 2.2f);
+                        else en2.DmgHull = Math.Min(1f, en2.DmgHull + dmg * 1.8f);
+                    }
+                    else
+                    {
+                        // برخورد به کمربند: بیشتر بدنه و برجک
+                        if (roll < 0.46f) en2.DmgHull = Math.Min(1f, en2.DmgHull + dmg * 2.4f);
+                        else if (roll < 0.72f) en2.DmgGuns = Math.Min(1f, en2.DmgGuns + dmg * 2.4f);
+                        else if (roll < 0.90f) en2.DmgEngine = Math.Min(1f, en2.DmgEngine + dmg * 1.8f);
+                        else en2.DmgFire = Math.Min(1f, en2.DmgFire + dmg * 2.0f);
+                    }
+                    // نفوذ زیر خط آب → نشت
+                    if (!deckHitFlag && dmg > 0.004f) en2.Flooding += dmg * 0.30f;
                     if (en2.Hp <= 0f)
                     {
                         bsKill[en2.Side][en2.Model] += en2.Count;
@@ -3632,7 +3977,7 @@ static class WarEngine
             for (int i = 0; i < ships.Count; i++)
             {
                 var sh = ships[i];
-                if (!sh.Alive || sh.Kind == 2 || sh.Torps <= 0) continue;
+                if (!sh.Alive || sh.Kind == 2 || sh.Torps <= 0 || sh.Withdrawing) continue;
                 var side = SideOf(sh.Side);
                 float trng = sh.Kind == 1 ? side.SubSpecs[sh.Model].TorpRangeKm : side.BoatSpecs[sh.Model].TorpRangeKm;
                 float twh  = sh.Kind == 1 ? side.SubSpecs[sh.Model].TorpWarheadKg : side.BoatSpecs[sh.Model].TorpWarheadKg;
@@ -3672,6 +4017,11 @@ static class WarEngine
                         float tpd = twh / MathF.Max(400f, es.DisplacementT / 55f);
                         en3.Hp -= hitsT * tpd * 0.55f;
                         bsDmg[en3.Side][en3.Model] += hitsT * tpd * 55f;
+                        // اژدر زیر خط آب می‌خورد: نشت شدید و آسیب موتورخانه، نه برجک
+                        en3.DmgHull = Math.Min(1f, en3.DmgHull + hitsT * tpd * 1.6f);
+                        en3.Flooding += hitsT * tpd * 0.9f;
+                        if (rng.NextF() < 0.45f)
+                            en3.DmgEngine = Math.Min(1f, en3.DmgEngine + hitsT * tpd * 1.1f);
                         if (en3.Hp <= 0f)
                         {
                             bsKill[en3.Side][en3.Model] += en3.Count;
@@ -3707,6 +4057,40 @@ static class WarEngine
                 ships[i] = sh;
             }
 
+            // ── ۴.۵) پیشرفت نشت و آتش‌سوزی + مهار خسارت ──
+            //  خدمه‌ی بهتر سریع‌تر مهار می‌کند؛ اگر نتواند، نشت بدنه را می‌خورد
+            //  تا کشتی واژگون شود. این همان مرگ تدریجی واقعی ناوهاست.
+            for (int i = 0; i < ships.Count; i++)
+            {
+                var sh = ships[i];
+                if (!sh.Alive || sh.Kind != 2) continue;
+                var sd2 = SideOf(sh.Side);
+
+                if (sh.Flooding > 0.0001f)
+                {
+                    sh.DmgHull = Math.Min(1f, sh.DmgHull + sh.Flooding * 0.16f);
+                    sh.Hp -= sh.Flooding * 0.055f;
+                    // مهار خسارت: کیفیت خدمه و بازیابی فکشن
+                    float control = 0.10f + sd2.Prof.CrewQuality * 0.10f + sd2.Prof.Recovery * 0.14f;
+                    sh.Flooding = MathF.Max(0f, sh.Flooding * (1f - control));
+                }
+                if (sh.DmgFire > 0.02f)
+                {
+                    // آتش‌سوزی خودش را تغذیه می‌کند تا مهار شود
+                    float fight = 0.12f + sd2.Prof.CrewQuality * 0.12f;
+                    sh.DmgFire = MathF.Max(0f, sh.DmgFire - fight * 0.5f);
+                    sh.Hp -= sh.DmgFire * 0.010f;
+                }
+                if (sh.Hp <= 0f && sh.Alive)
+                {
+                    bsKill[sh.Side][sh.Model] += sh.Count;
+                    sh.Count = 0f; sh.Alive = false;
+                    log.Add(t * 2, (byte)(sh.Side == 0 ? 1 : 0), LG_BREAK,
+                        $"{sd2.BSSpecs[sh.Model].Name} پس از نشت مهارنشده واژگون شد.");
+                }
+                ships[i] = sh;
+            }
+
             // ── ۵) ضدزیردریایی: کشتی سطحی زیردریایی کشف‌شده را می‌کوبد ──
             for (int i = 0; i < ships.Count; i++)
             {
@@ -3727,7 +4111,9 @@ static class WarEngine
                 }
                 if (hunters <= 0f) continue;
                 // عمق غواصی زیاد و غواصی سریع، شانس بقا را بالا می‌برد
-                float depthEdge = 1f / (1f + ssp.TestDepthM / 150f);
+                // ۱۸: در آب کم‌عمق، عمق مجاز زیردریایی بی‌فایده است
+                float usableDepth = shallow ? MathF.Min(ssp.TestDepthM, waterDepthM * 0.6f) : ssp.TestDepthM;
+                float depthEdge = 1f / (1f + usableDepth / 150f);
                 float dive = 1f / (1f + ssp.DiveSec / 40f);
                 float loss = hunters * 0.010f * exposure * depthEdge * dive * SEA_TICK_MIN * rng.Range(0.5f, 1.5f);
                 loss = MathF.Min(loss, sub.Count);
@@ -3773,9 +4159,42 @@ static class WarEngine
                 shoreProgress = MathF.Min(1f, shoreProgress + push * 0.030f * stratAdv);
             }
 
+            // ── ۲۰: تصمیم عقب‌نشینی ناوگان ──
+            if (t > 8 && t % 4 == 0)
+            {
+                float pwA = 0f, pwD = 0f;
+                foreach (var sh in ships)
+                {
+                    if (!sh.Alive) continue;
+                    float w = sh.Count * (sh.Kind == 2 ? 6f : 1f) * Math.Clamp(sh.Hp, 0.1f, 1f);
+                    if (sh.Side == 0) pwA += w; else pwD += w;
+                }
+                byte quitting = 255;
+                if (pwA > 0f && pwD > 0f)
+                {
+                    if (pwA < pwD * 0.34f) quitting = 0;
+                    else if (pwD < pwA * 0.34f) quitting = 1;
+                }
+                if (quitting != 255 && !fleetWithdraw[quitting])
+                {
+                    fleetWithdraw[quitting] = true;
+                    log.Add(t * 2, quitting, LG_DECISION,
+                        quitting == 0
+                        ? "فرمانده‌ی ناوگان مهاجم دید که ادامه یعنی نابودی؛ دستور بازگشت داد."
+                        : "فرمانده‌ی ناوگان مدافع ناوهای باقی‌مانده را از خط بیرون کشید تا حفظشان کند.");
+                    for (int q = 0; q < ships.Count; q++)
+                    {
+                        var sq = ships[q];
+                        if (sq.Alive && sq.Side == quitting) { sq.Withdrawing = true; ships[q] = sq; }
+                    }
+                }
+            }
+
             bool anyA = ships.Any(x => x.Alive && x.Side == 0);
             bool anyD = ships.Any(x => x.Alive && x.Side == 1);
             if (!anyA || !anyD) break;
+            if (fleetWithdraw[0] && ships.Where(x => x.Alive && x.Side == 0).All(x => x.Y > SEA_H - 6f)) break;
+            if (fleetWithdraw[1] && ships.Where(x => x.Alive && x.Side == 1).All(x => x.Y < 5f)) break;
         }
 
         // ── نتیجه‌گیری از وضعیت واقعی میدان ──
@@ -3835,7 +4254,22 @@ static class WarEngine
         if (closestRange < 90f)
             log.Add(0, 2, LG_ENV, $"نزدیک‌ترین برد درگیری {closestRange:F1} کیلومتر بود؛ دریا {(seaState > 0.6f ? "متلاطم" : seaState > 0.3f ? "نیمه‌موّاج" : "آرام")} بود.");
 
-        BuildNavalReports(res, attacker, defender, A, D, log,
+        //  – ۱۳: خلاصه‌ی وضعیت زیرسیستم ناوهای بازمانده‌ی مهاجم
+        var shipStates = new List<string>();
+        foreach (var sh in ships)
+        {
+            if (!sh.Alive || sh.Kind != 2 || sh.Side != 0) continue;
+            var nm = A.BSSpecs[sh.Model].Name;
+            var parts = new List<string>();
+            if (sh.DmgHull > 0.10f) parts.Add($"بدنه {sh.DmgHull * 100f:F0}٪");
+            if (sh.DmgEngine > 0.10f) parts.Add($"موتورخانه {sh.DmgEngine * 100f:F0}٪ (سرعت {SpeedFactor(sh) * 100f:F0}٪)");
+            if (sh.DmgGuns > 0.10f) parts.Add($"برجک {sh.DmgGuns * 100f:F0}٪ (آتش {GunFactor(sh) * 100f:F0}٪)");
+            if (sh.DmgFire > 0.05f) parts.Add("آتش‌سوزی");
+            if (sh.Withdrawing) parts.Add("از خط خارج شد");
+            shipStates.Add(parts.Count == 0 ? $"🚢 {nm}: سالم" : $"🚢 {nm}: {string.Join("، ", parts)}");
+        }
+
+        BuildNavalReports(res, attacker, defender, A, D, log, shipStates,
             attStrategy, attTactic, defStrategy, defTactic,
             ratio, stratAdv, eff, success, attackerWon, attackerFailed, oneSided,
             attBSDamage, defBSDamage, lootMoney, lootIron, defender.PortLevel);
@@ -3857,6 +4291,19 @@ static class WarEngine
         res.AttackerFailed = attackerFailed;
         res.PenetrationKm = success;
         res.DurationMinutes = (int)(15 + eff * 20);
+        //  – ۹: نبرد دریایی روی رفاه اثر می‌گذارد
+        //     غرق شدن ناوگان و از دست دادن ملوان، روحیه‌ی ملی را می‌شکند؛
+        //     شکست بندر و غارت هم به مدافع فشار می‌آورد.
+        double aFleet0 = Math.Max(1, A.Boats + A.Subs + A.BS * 6);
+        double dFleet0 = Math.Max(1, D.Boats + D.Subs + D.BS * 6);
+        double aFleetLoss = (A.BoatsLost + A.SubsLost + A.BSLostTotal * 6) / aFleet0;
+        double dFleetLoss = (D.BoatsLost + D.SubsLost + D.BSLostTotal * 6) / dFleet0;
+
+        res.AttackerWelfareChange = -Math.Clamp(aFleetLoss * 2.2 + (attackerFailed ? 0.8 : 0)
+                                    + res.AttackerCrewLost / 4000.0, 0, 3);
+        res.DefenderWelfareChange = -Math.Clamp(dFleetLoss * 2.2 + (attackerWon ? 1.2 : 0)
+                                    + frac * 0.6 + res.DefenderCrewLost / 4000.0, 0, 4);
+
         res.AttackerBoatsSurvived = A.Boats - A.BoatsLost;
         res.AttackerSubsSurvived = A.Subs - A.SubsLost;
         res.AttackerBattleshipsSurvived = A.BS - A.BSLostTotal;
@@ -3958,6 +4405,7 @@ static class WarEngine
     }
 
     static void BuildNavalReports(BattleResult r, Country atk, Country def, NavalSide A, NavalSide D, BattleLog log,
+        List<string> shipStates,
         int aStrat, int aTac, int dStrat, int dTac,
         float ratio, float stratAdv, float eff, int success,
         bool won, bool failed, bool oneSided,
@@ -4011,7 +4459,7 @@ static class WarEngine
             float pAtk = NavalPenetration(abs_.MainShellKg, NavalVelocityAt(abs_.MainMuzzleMs, 18f), abs_.MainMm);
             float pDef = NavalPenetration(dbs_.MainShellKg, NavalVelocityAt(dbs_.MainMuzzleMs, 18f), dbs_.MainMm);
             sb.Append($"• در برد ۱۸ کیلومتری توپ {abs_.MainMm:F0}mm شما {pAtk:F0}mm فولاد می‌درد و کمربند {dbs_.Name} {dbs_.BeltMm:F0}mm است؛ توپ او {pDef:F0}mm در برابر کمربند {abs_.BeltMm:F0}mm شما.\n");
-            sb.Append($"• کنترل آتش: شما {abs_.FireControl:P0} در برابر {dbs_.FireControl:P0} دشمن{(abs_.FireControl > dbs_.FireControl + 0.1f ? " — برتری رادار با شماست" : dbs_.FireControl > abs_.FireControl + 0.1f ? " — رادار دشمن بهتر است" : "")}\n");
+            sb.Append($"• کنترل آتش (اپتیکی): شما {abs_.FireControl:P0} در برابر {dbs_.FireControl:P0} دشمن{(abs_.FireControl > dbs_.FireControl + 0.06f ? " — فاصله‌یاب شما بهتر است" : dbs_.FireControl > abs_.FireControl + 0.06f ? " — فاصله‌یاب دشمن بهتر است" : "")}\n");
         }
         sb.Append($"• ترکیب شما: {Num(A.BS)}🚢 نبردناو، {Num(A.Subs)}⚓ زیردریایی، {Num(A.Boats)}🚤 اسکورت\n");
         sb.Append($"• ترکیب دشمن: {Num(D.BS)}🚢، {Num(D.Subs)}⚓، {Num(D.Boats)}🚤 (بندر سطح {portLevel})\n");
@@ -4019,6 +4467,13 @@ static class WarEngine
             sb.Append("• یادآوری: قایق‌های تندرو فقط اسکورت‌اند؛ سهم آن‌ها در ضربه‌ی اصلی ناچیز است.\n");
 
         if (tl != null) { sb.Append("\n<b>📜 روند نبرد</b>\n").Append(tl).Append('\n'); }
+
+        //  – ۱۳: وضعیت زیرسیستم ناوهای بازمانده
+        if (shipStates != null && shipStates.Count > 0)
+        {
+            sb.Append("\n<b>🔧 وضعیت ناوهای بازمانده</b>\n");
+            foreach (var st in shipStates) sb.Append("   ").Append(Esc(st)).Append('\n');
+        }
 
         sb.Append("\n<b>💀 تلفات شما</b>\n");
         if (aModels != null) sb.Append(aModels).Append('\n');

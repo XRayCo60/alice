@@ -507,7 +507,9 @@ static partial class Database
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, eqModels, defenseModels, navalInvasions, attackShields, navalBoatCooldowns })
+        //  – شمارش پیروزی دریایی روی هر بندر: هر ۲ پیروزی یک سطح بندر را می‌خورد
+        string navalPortHits = @"CREATE TABLE IF NOT EXISTS NavalPortHits(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Hits INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, eqModels, defenseModels, navalInvasions, attackShields, navalBoatCooldowns, navalPortHits })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -2395,6 +2397,30 @@ static partial class Database
         cmd.ExecuteNonQuery();
     }
 
+    //  – هر ۲ پیروزی دریایی، یک سطح از بندر مدافع کم می‌کند
+    public static int AddNavalPortHit(long ownerId, long chatId)
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"INSERT INTO NavalPortHits(OwnerId,ChatId,Hits) VALUES(@o,@c,1)
+                            ON CONFLICT(OwnerId,ChatId) DO UPDATE SET Hits = Hits + 1
+                            RETURNING Hits";
+        cmd.Parameters.AddWithValue("@o", ownerId);
+        cmd.Parameters.AddWithValue("@c", chatId);
+        var v = cmd.ExecuteScalar();
+        return v == null || v == DBNull.Value ? 1 : Convert.ToInt32(v);
+    }
+
+    public static void ResetNavalPortHits(long ownerId, long chatId)
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "DELETE FROM NavalPortHits WHERE OwnerId=@o AND ChatId=@c";
+        cmd.Parameters.AddWithValue("@o", ownerId);
+        cmd.Parameters.AddWithValue("@c", chatId);
+        cmd.ExecuteNonQuery();
+    }
+
     public static long GetNavalCooldownUntilMs(long ownerId, long chatId)
     {
         using var con = OpenCon();
@@ -2672,6 +2698,8 @@ partial class Program
 
     static void LoadSettings()
     {
+        //  – ۴۰: بازیابی وضعیت سوییچ نقشه‌ی جبهه از دیتابیس
+        try { WarEngine.ShowFrontMap = Database.GetSetting("ShowFrontMap") == "1"; } catch { }
         var mode = Database.GetSetting("UpdateMode");
         var val = Database.GetSetting("UpdateValue");
         var special = Database.GetSetting("SpecialPhotoFileId");
@@ -4150,15 +4178,28 @@ partial class Program
             long ironPer = country.Faction == Faction.USA ? 40000 : country.Faction == Faction.USSR ? 25000 : 30000;
             long totalMoneyCost = moneyPer * totalCount;
             long totalIronCost = ironPer * totalCount;
+            //  – هزینه‌ی تعمیر = درصد آسیب × قیمت ساخت (۲۰٪ آسیب → ۲۰٪ قیمت)
             double dmgFraction = totalDamage / (double)(totalCount * 100);
-            long needMoney = (long)(totalMoneyCost * 0.6 * dmgFraction);
-            long needIron = (long)(totalIronCost * 0.6 * dmgFraction);
+            long needMoney = (long)(totalMoneyCost * dmgFraction);
+            long needIron = (long)(totalIronCost * dmgFraction);
             var repairKb = new InlineKeyboardMarkup(new[]
             {
                 new[] { InlineKeyboardButton.WithCallbackData($"✅ تعمیر کامل ({needMoney/1000}K پول، {needIron/1000}K آهن)", $"battleship_repair_confirm:{uid}:{needMoney}:{needIron}") },
                 new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", "cancel") }
             });
-            await SendTemp(chat.Id, $"🔧 **تعمیر ناو** 🔧\n━━━━━━━━━━━━━━━━━━━\n🚢 تعداد نبردناو: {country.Battleships}\n💥 آسیب مجموع: {totalDamage}% (میانگین {totalDamage / Math.Max(1, totalCount)}% هر ناو)\n💰 هزینه تعمیر کامل (60% قیمت ساخت): {needMoney:N0} پول + {needIron:N0} آهن\n💡 توضیح: نبردناوها در نبردهای دریایی عادی فقط آسیب می‌بینند و منهدم نمی‌شوند، مگر نبرد یک‌طرفه باشد. برای بازگرداندن به 100% از این دستور استفاده کنید.\n━━━━━━━━━━━━━━━━━━━", markup: repairKb, ct: ct);
+            await SendTemp(chat.Id, $"🔧 **تعمیر ناو** 🔧\n━━━━━━━━━━━━━━━━━━━\n🚢 تعداد نبردناو: {country.Battleships}\n💥 آسیب مجموع: {totalDamage}% (میانگین {totalDamage / Math.Max(1, totalCount)}% هر ناو)\n💰 هزینه تعمیر: {needMoney:N0} پول + {needIron:N0} آهن\n💡 هزینه دقیقاً برابر درصد آسیب است: ۲۰٪ آسیب یعنی ۲۰٪ قیمت ساخت.\n🚢 نبردناو به‌سختی غرق می‌شود؛ معمولاً فقط آسیب می‌بیند و با تعمیر به خط برمی‌گردد.\n━━━━━━━━━━━━━━━━━━━", markup: repairKb, ct: ct);
+            return;
+        }
+
+        //  – ۴۰: سوییچ نمایش نقشه‌ی جبهه در گزارش (فقط ادمین)
+        if (txt == "نقشه جبهه" || txt == "نقشه‌ی جبهه" || txt == "نمایش نقشه")
+        {
+            if (!Database.IsAdminActive(uid)) { await SendTemp(chat.Id, "⛔ این دستور فقط برای ادمین است.", ct: ct); return; }
+            WarEngine.ShowFrontMap = !WarEngine.ShowFrontMap;
+            Database.SetSetting("ShowFrontMap", WarEngine.ShowFrontMap ? "1" : "0");
+            await SendTemp(chat.Id, WarEngine.ShowFrontMap
+                ? "🗺 نمایش نقشه‌ی متنی جبهه در گزارش‌ها روشن شد."
+                : "🗺 نمایش نقشه‌ی جبهه خاموش شد.", ct: ct);
             return;
         }
 
@@ -6122,6 +6163,7 @@ partial class Program
         long cid = cb.Message.Chat.Id;
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
+        if (c.PortLevel <= 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — تا بازسازی نمی‌توانید قایق بسازید", showAlert: true, cancellationToken: ct); return; }
 
         // Price per 5
         double moneyPer5 = bid switch { "SBoot" => 2000, "PTBoat" => 3000, "G5" => 2500, _ => 0 };
@@ -6171,6 +6213,7 @@ partial class Program
         long cid = cb.Message.Chat.Id;
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
+        if (c.PortLevel <= 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — تا بازسازی نمی‌توانید زیردریایی بسازید", showAlert: true, cancellationToken: ct); return; }
 
         double moneyPer1 = sid switch { "VIIC" => 10000, "Gato" => 10000, "SClass" => 8000, _ => 0 };
         double ironPer1 = sid switch { "VIIC" => 5000, "Gato" => 5000, "SClass" => 4000, _ => 0 };
@@ -6220,6 +6263,11 @@ partial class Program
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
 
+        if (c.PortLevel <= 0)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — اول بازسازی کنید", showAlert: true, cancellationToken: ct);
+            return;
+        }
         if (c.PortLevel < 4)
         {
             await bot.AnswerCallbackQueryAsync(cb.Id, "⚓ برای ساخت نبردناو بندر سطح ۴ لازم است", showAlert: true, cancellationToken: ct);
@@ -6262,9 +6310,10 @@ partial class Program
         long ironPer = c.Faction == Faction.USA ? 40000 : c.Faction == Faction.USSR ? 25000 : 30000;
         long totalMoney = moneyPer * totalCount;
         long totalIron = ironPer * totalCount;
+        //  – درصد آسیب × قیمت ساخت
         double frac = c.BattleshipDamage / (double)(totalCount * 100);
-        long needMoney = (long)(totalMoney * 0.6 * frac);
-        long needIron = (long)(totalIron * 0.6 * frac);
+        long needMoney = (long)(totalMoney * frac);
+        long needIron = (long)(totalIron * frac);
         var kb = new InlineKeyboardMarkup(new[]
         {
             new[] { InlineKeyboardButton.WithCallbackData($"✅ تعمیر ({needMoney/1000}K پول، {needIron/1000}K آهن)", $"battleship_repair_confirm:{uid}:{needMoney}:{needIron}") },
@@ -7724,11 +7773,34 @@ partial class Program
                 defender.Battleships = Math.Max(0, defender.Battleships - defBSLoss);
                 defender.BattleshipDamage += result.DefenderBattleshipDamage;
 
-                // If success >=90, port level -1
-                if (result.SuccessPercent >= 90)
+                //  – نردبان تخریب بندر: هر ۲ پیروزی دریایی یک سطح بندر را می‌خورد
+                //     سطح ۵ → ۴ → ۳ → ۲ → ۱ → صفر (تخریب کامل)
+                string portNews = null;
+                if (result.AttackerWon)
                 {
-                    defender.PortLevel = Math.Max(1, defender.PortLevel - 1);
+                    int hits = Database.AddNavalPortHit(defender.OwnerId, defender.ChatId);
+                    if (hits >= 2)
+                    {
+                        Database.ResetNavalPortHits(defender.OwnerId, defender.ChatId);
+                        int before = defender.PortLevel;
+                        defender.PortLevel = Math.Max(0, defender.PortLevel - 1);
+                        portNews = defender.PortLevel <= 0
+                            ? $"💥 بندر {defender.Name} به‌کلی ویران شد! تا بازسازی، ناوگان جدید ساخته نمی‌شود."
+                            : $"⚓ بندر {defender.Name} از سطح {before} به سطح {defender.PortLevel} سقوط کرد.";
+                    }
+                    else
+                    {
+                        portNews = $"⚓ یک پیروزی دریایی دیگر روی {defender.Name} ثبت شد؛ با پیروزی بعدی سطح بندرش می‌شکند. (۱ از ۲)";
+                    }
                 }
+
+                //  – ۹ و ۱۱: رفاه و تلفات خدمه‌ی دریایی
+                attacker.Welfare += result.AttackerWelfareChange;
+                defender.Welfare += result.DefenderWelfareChange;
+                if (result.AttackerCrewLost > 0)
+                    attacker.Population = Math.Max(0, attacker.Population - result.AttackerCrewLost);
+                if (result.DefenderCrewLost > 0)
+                    defender.Population = Math.Max(0, defender.Population - result.DefenderCrewLost);
 
                 // Loot
                 defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
@@ -7755,6 +7827,7 @@ partial class Program
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, parseMode: ParseMode.Html, ct: ct); } catch { }
                 try { await SendPermanent(inv.DefenderId, result.DefenderReport, parseMode: ParseMode.Html, ct: ct); } catch { }
                 try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, parseMode: ParseMode.Html, ct: ct); } catch { }
+                if (portNews != null) { try { await SendPermanent(inv.ChatId, portNews, ct: ct); } catch { } }
 
                 Database.MarkNavalInvasionProcessed(inv.Id);
                 Database.DeleteNavalInvasion(inv.Id);
