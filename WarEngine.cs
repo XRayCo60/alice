@@ -12,7 +12,6 @@
 //    WarEngine.RunBattle(...)
 //    WarEngine.RunBattleAdvanced(...)
 //    WarEngine.RunNavalBattleAdvanced(...)
-//    WarEngine.RunBattlesParallel(...)
 // ============================================================================
 
 using System;
@@ -615,7 +614,7 @@ static class WarEngine
         public float BombTonsOnTarget;   // تناژ واقعی بمب روی هدف
         public long AircrewLost;         // خدمه‌ی پرواز از دست رفته
         public float EscortAltM, CapAltM; // ارتفاع نبرد — برای گزارش
-        public string Narrative;
+        public string? Narrative;
     }
 
     // ======================================================================
@@ -1200,7 +1199,7 @@ static class WarEngine
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, true, tick, log, ref rng)) continue;
 
-            if (HoldingInReserve(ref g, c, tick, cx)) continue;
+            if (HoldingInReserve(ref g, c, tick, centerX)) continue;
 
             bool pinning = (i % 4) == 0;         // یک‌چهارم نیرو مرکز را تثبیت می‌کند
             if (pinning && !c.DeepReserveIn)
@@ -2042,7 +2041,6 @@ static class WarEngine
         public float AmmoSec;      // ثانیه آتش باقی‌مانده
         public float Fuel;         // دقیقه پرواز باقی‌مانده
         public byte  Role;         // 0=جنگنده اسکورت، 1=جنگنده آزاد، 2=بمب‌افکن، 3=رهگیر
-        public byte  Model;
         public bool  Alive;
         public bool  Engaged;
         public bool  DroppedBombs;
@@ -2082,6 +2080,13 @@ static class WarEngine
         float aFamil = Familiarity(atk.Faction, aFs.Origin, aProf);
         float dFamil = Familiarity(def.Faction, dFs.Origin, dProf);
         byte wx = field.Weather, tm = field.StartTime;
+
+        // ── ۵۵: تصمیم سوخت فرمانده‌ی هوایی ──
+        //  بمباران راهبردی نیاز به برد دارد → بال پر (زمان پرواز بیشتر، چرخش کندتر).
+        //  برتری هوایی نیاز به چابکی دارد → بال سبک (چابک ولی زمان کمتر روی هدف).
+        bool heavyFuel = aAirStrat == 2;
+        float fuelMul = heavyFuel ? 1.35f : 0.85f;          // ضریب زمان پرواز
+        float agilityPenalty = heavyFuel ? 1.12f : 0.94f;   // ضریب زمان دور زدن (بیشتر = کندتر)
 
         // ── ارتفاع ورود: تصمیم کلان فرمانده‌ی هوایی ──
         //  شکار آزاد = بالا برای مزیت انرژی. حمله به پایگاه = پایین برای غافلگیری.
@@ -2338,7 +2343,7 @@ static class WarEngine
         return o;
     }
 
-    static string BuildAirNarrative(AirOutcome air, long aFight, long aBomb, long dFight, long dAA,
+    static string? BuildAirNarrative(AirOutcome air, long aFight, long aBomb, long dFight, long dAA,
         int aAirStrat, int aAirTac, FighterSpec aFs, BomberSpec aBs, FighterSpec dFs, Field field)
     {
         if (aFight == 0 && aBomb == 0 && dFight == 0 && dAA == 0) return null;
@@ -2409,25 +2414,6 @@ static class WarEngine
             null, 0, null, strategy, tactic, airStrategy, airTactic);
     }
 
-    public struct BattleOrder
-    {
-        public Country Attacker, Defender;
-        public long Tanks, Soldiers, Fighters, Bombers;
-        public int Strategy, Tactic, AirStrategy, AirTactic;
-    }
-
-    public static BattleResult[] RunBattlesParallel(BattleOrder[] orders)
-    {
-        var results = new BattleResult[orders.Length];
-        Parallel.For(0, orders.Length, i =>
-        {
-            var o = orders[i];
-            results[i] = RunBattle(o.Attacker, o.Defender, o.Tanks, o.Soldiers, o.Fighters, o.Bombers,
-                                   o.Strategy, o.Tactic, o.AirStrategy, o.AirTactic);
-        });
-        return results;
-    }
-
     // سازگاری عقب‌رو با امضای قدیمی
     public static BattleResult RunBattleSeeded(Country attacker, Country defender,
         long reqTanks, long reqSoldiers, long reqFighters, long reqBombers,
@@ -2449,10 +2435,10 @@ static class WarEngine
 
     public static BattleResult RunBattleAdvanced(
         Country attacker, Country defender,
-        List<(string Model, long Count)> attTankBreakdown, long attSoldiers,
-        List<(string Model, long Count)> attFighterBreakdown, List<(string Model, long Count)> attBomberBreakdown,
-        List<(string Model, long Count)> defTankBreakdown, long defSoldiers,
-        List<(string Model, long Count)> defFighterBreakdown,
+        List<(string Model, long Count)>? attTankBreakdown, long attSoldiers,
+        List<(string Model, long Count)>? attFighterBreakdown, List<(string Model, long Count)>? attBomberBreakdown,
+        List<(string Model, long Count)>? defTankBreakdown, long defSoldiers,
+        List<(string Model, long Count)>? defFighterBreakdown,
         int strategy, int tactic, int airStrategy, int airTactic)
     {
         ulong seed = (ulong)Interlocked.Increment(ref _seedCounter)
@@ -2466,10 +2452,10 @@ static class WarEngine
     // ═════════════════════════ هسته‌ی نبرد ══════════════════════════════════
     public static BattleResult RunBattleAdvancedSeeded(
         Country attacker, Country defender,
-        List<(string Model, long Count)> attTankBreakdown, long attSoldiers,
-        List<(string Model, long Count)> attFighterBreakdown, List<(string Model, long Count)> attBomberBreakdown,
-        List<(string Model, long Count)> defTankBreakdown, long defSoldiers,
-        List<(string Model, long Count)> defFighterBreakdown,
+        List<(string Model, long Count)>? attTankBreakdown, long attSoldiers,
+        List<(string Model, long Count)>? attFighterBreakdown, List<(string Model, long Count)>? attBomberBreakdown,
+        List<(string Model, long Count)>? defTankBreakdown, long defSoldiers,
+        List<(string Model, long Count)>? defFighterBreakdown,
         int strategy, int tactic, int airStrategy, int airTactic, ulong seed)
     {
         var rng = new XorRng(seed);
@@ -2797,7 +2783,7 @@ static class WarEngine
         return res;
     }
 
-    static List<(string Model, long Count)> Normalize(List<(string Model, long Count)> src, long cap)
+    static List<(string Model, long Count)> Normalize(List<(string Model, long Count)>? src, long cap)
     {
         var outList = new List<(string Model, long Count)>();
         if (src == null) return outList;
@@ -2855,7 +2841,7 @@ static class WarEngine
     {
         int a = fa.Cmd.Doctrine, d = fd.Cmd.Doctrine;
         float adv = 1.0f;
-        string note = null;
+        string? note = null;
 
         switch (a)
         {
@@ -2966,7 +2952,7 @@ static class WarEngine
     }
 
     // ─────────── خط تلفات به تفکیک مدل ───────────
-    static string ModelLossLines(Force f, string indent = "   ")
+    static string? ModelLossLines(Force? f, string indent = "   ")
     {
         if (f == null || f.ModelNames.Length == 0) return null;
         var sb = new StringBuilder();
@@ -2985,7 +2971,7 @@ static class WarEngine
     }
 
     // ─────────── تحلیل تقابل زره: کدام مدل مقابل کدام مدل ───────────
-    static string ArmorMatchupLines(Force own, Force foe)
+    static string? ArmorMatchupLines(Force? own, Force? foe)
     {
         if (own == null || foe == null || own.ModelNames.Length == 0 || foe.ModelNames.Length == 0) return null;
         var sb = new StringBuilder();
@@ -3018,7 +3004,7 @@ static class WarEngine
     }
 
     // ─────────── تحلیل فکشن ───────────
-    static string FactionAnalysis(Force fa, Force fd)
+    static string? FactionAnalysis(Force? fa, Force? fd)
     {
         if (fa == null) return null;
         var sb = new StringBuilder();
@@ -3033,7 +3019,7 @@ static class WarEngine
     //  با سوییچ ادمین روشن/خاموش می‌شود (پیش‌فرض خاموش).
     public static bool ShowFrontMap = false;
 
-    static string FrontMap(Force fa, Force fd, Field field, float depth)
+    static string? FrontMap(Force? fa, Force? fd, Field field, float depth)
     {
         if (fa == null || fd == null) return null;
         Span<float> atk = stackalloc float[SECTORS];
@@ -3084,7 +3070,7 @@ static class WarEngine
     }
 
     // ─────────── خط زمانی نبرد ───────────
-    static string Timeline(BattleLog log, byte side, int max = 14)
+    static string? Timeline(BattleLog log, byte side, int max = 14)
     {
         var items = log.For(side).OrderBy(x => x.Tick).Take(max).ToList();
         if (items.Count == 0) return null;
@@ -3106,11 +3092,11 @@ static class WarEngine
         return sb.ToString().TrimEnd('\n');
     }
 
-    static string Esc(string s) => s == null ? "" : s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+    static string Esc(string? s) => s == null ? "" : s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
     // ═════════════════════════ گزارش‌های زمینی ══════════════════════════════
     static void BuildGroundReports(BattleResult r, Country atk, Country def,
-        Force fa, Force fd, Field field, BattleLog log, AirOutcome air,
+        Force? fa, Force? fd, Field field, BattleLog log, AirOutcome air,
         int aStrat, int aTac, int dStrat, int dTac,
         int aAirStrat, int aAirTac, int dAirStrat, int dAirTac,
         List<(string Model, long Count)> aTankList, List<(string Model, long Count)> dTankList,
@@ -3150,10 +3136,10 @@ static class WarEngine
                        : stratAdv < 0.92f ? $"انتخاب مدافع دقیقاً نقطه‌ضعف طرح مهاجم را گرفت (مزیت {stratAdv:F2}× به ضرر مهاجم)"
                        : $"دو طرح تقریباً هم‌وزن بودند ({stratAdv:F2}×)";
 
-        string armorMatch = ArmorMatchupLines(fa, fd);
-        string aModels = ModelLossLines(fa);
-        string dModels = ModelLossLines(fd);
-        string factionText = FactionAnalysis(fa, fd);
+        string? armorMatch = ArmorMatchupLines(fa, fd);
+        string? aModels = ModelLossLines(fa);
+        string? dModels = ModelLossLines(fd);
+        string? factionText = FactionAnalysis(fa, fd);
 
         string why = r.AttackerWon
             ? "تمرکز به‌موقع قوا روی نازک‌ترین بخش خط و توسعه‌ی سریع رخنه، کار دفاع را تمام کرد."
@@ -3161,7 +3147,7 @@ static class WarEngine
             ? "آتش دفاعی سازمان‌یافته و زمین مساعد، حمله را پیش از شکل‌گیری رخنه خفه کرد."
             : "هیچ طرف نتوانست ضربه‌ی قاطع بزند؛ نبرد به فرسایش کشید و جبهه تقریباً سرجایش ماند.";
 
-        string intelText = fa != null && fd != null
+        string? intelText = fa != null && fd != null
             ? (fa.IntelQuality > fd.IntelQuality + 0.12f ? "برتری شناسایی با مهاجم بود و آتشش دقیق‌تر نشست."
              : fd.IntelQuality > fa.IntelQuality + 0.12f ? "مه جنگ به سود مدافع کار کرد؛ مهاجم بارها کورکورانه شلیک کرد."
              : "هیچ طرفی برتری اطلاعاتی قاطع نداشت.")
@@ -3191,7 +3177,7 @@ static class WarEngine
             if (fm != null) { sb.Append("\n<b>🗺 نمای جبهه</b>\n").Append(fm).Append('\n'); }
         }
 
-        string tlA = Timeline(log, 0);
+        string? tlA = Timeline(log, 0);
         if (tlA != null)
         {
             sb.Append("\n<b>📜 خط زمانی نبرد</b>\n");
@@ -3284,7 +3270,7 @@ static class WarEngine
             if (dFight > 0) ab.Append($"• گشت مدافع در {air.CapAltM:F0} متری\n");
             ab.Append($"• دفاع دشمن: {Esc(dAirName)} / {Esc(dAirTacName)}\n");
 
-            string tlAir = Timeline(log, 0);
+            string? tlAir = Timeline(log, 0);
             if (tlAir != null) ab.Append("\n<b>📜 روند ماموریت</b>\n").Append(tlAir).Append('\n');
 
             ab.Append("\n<b>💀 تلفات شما</b>\n");
@@ -3320,7 +3306,7 @@ static class WarEngine
         sb.Append($"• حمله‌ی دشمن: {Esc(aDoc)}\n");
         if (dFight > 0 || dAA > 0) sb.Append($"• پدافند هوایی شما: {Esc(dAirName)} / {Esc(dAirTacName)}\n");
 
-        string tlD = Timeline(log, 1);
+        string? tlD = Timeline(log, 1);
         if (tlD != null)
         {
             sb.Append("\n<b>📜 خط زمانی نبرد</b>\n");
@@ -3330,7 +3316,7 @@ static class WarEngine
         if (anyGround && defHasGround)
         {
             sb.Append("\n<b>🛡 تقابل زرهی</b>\n");
-            string armorMatchD = ArmorMatchupLines(fd, fa);
+            string? armorMatchD = ArmorMatchupLines(fd, fa);
             if (armorMatchD != null) sb.Append($"• {Esc(armorMatchD)}\n");
             if (intelText != null) sb.Append($"• {Esc(intelText)}\n");
         }
@@ -4516,7 +4502,7 @@ static class WarEngine
         return Math.Clamp(adv, 0.70f, 1.40f);
     }
 
-    static string NavalModelLines(NavalSide s, string indent = "   ")
+    static string? NavalModelLines(NavalSide s, string indent = "   ")
     {
         var sb = new StringBuilder();
         for (int i = 0; i < s.BoatModels.Length; i++)
@@ -4575,10 +4561,10 @@ static class WarEngine
                        : stratAdv < 0.92f ? $"طرح مدافع نقطه‌ضعف حمله را گرفت ({stratAdv:F2}× به ضرر مهاجم)"
                        : $"دو طرح تقریباً هم‌وزن بودند ({stratAdv:F2}×)";
 
-        string aModels = NavalModelLines(A);
-        string dModels = NavalModelLines(D);
-        string tl = Timeline(log, 0);
-        string tlD = Timeline(log, 1);
+        string? aModels = NavalModelLines(A);
+        string? dModels = NavalModelLines(D);
+        string? tl = Timeline(log, 0);
+        string? tlD = Timeline(log, 1);
 
         int dur = (int)(15 + eff * 20);
         float frac = success / 100f;
