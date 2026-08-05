@@ -473,7 +473,9 @@ static class WarEngine
         public byte Model;           // اندیس مدل در Force.Specs
         public byte Posture;
         public byte Sector;
-        public byte Role;            // 0 = خط اول، 1 = ذخیره، 2 = پوشش/فریب
+        public byte Role;            // ۳۶: 0 = خط اول، 1 = ذخیره‌ی تاکتیکی، 2 = ذخیره‌ی عملیاتی
+        public int  ReleaseTick;     // ۳۶: تیکی که این یگان از ذخیره آزاد شده
+        public bool Deployed;        // ۳۶: از ذخیره رسیده و وارد خط شده
         public bool Alive;
         public bool Sprung;
         public bool Committed;
@@ -529,7 +531,10 @@ static class WarEngine
         public int SecondSector;
         public int FeintSector;
         public bool Committed;      // نیروی اصلی وارد شده؟
-        public bool ReserveIn;      // ذخیره وارد شده؟
+        public bool ReserveIn;      // ذخیره‌ی تاکتیکی وارد شده؟
+        public bool DeepReserveIn;  // ۳۶: ذخیره‌ی عملیاتی هم آزاد شده؟
+        public int  TacReserveTick;  // تیک آزادسازی ذخیره‌ی تاکتیکی
+        public int  OpReserveTick;   // تیک آزادسازی ذخیره‌ی عملیاتی
         public bool RingClosed;
         public bool Reorganized;
         public float LastPower;
@@ -809,9 +814,20 @@ static class WarEngine
         }
         fo.N = n;
 
-        // نقش‌ها: خط اول / ذخیره / پوششی — نسبت‌ها بسته به دکترین بعداً تنظیم می‌شود
+        // ── ۳۶: ذخیره‌ی دولایه ──
+        //  خط اول (۶۰٪) از تیک صفر می‌جنگد.
+        //  ذخیره‌ی تاکتیکی (۲۵٪) نزدیک جبهه منتظر است و سریع می‌رسد.
+        //  ذخیره‌ی عملیاتی (۱۵٪) در عمق است؛ دیر آزاد می‌شود و دیرتر می‌رسد،
+        //  ولی وقتی برسد وزن سنگینی به یک نقطه اضافه می‌کند.
         for (int i = 0; i < n; i++)
-            fo.G[i].Role = (byte)(i % 4 == 3 ? 1 : 0);
+        {
+            int m = i % 20;
+            fo.G[i].Role = (byte)(m < 12 ? 0 : m < 17 ? 1 : 2);
+            fo.G[i].ReleaseTick = -1;
+            fo.G[i].Deployed = fo.G[i].Role == 0;   // خط اول از تیک صفر در خط است
+            // ذخیره‌ی عملیاتی از عقب‌تر شروع می‌کند
+            if (fo.G[i].Role == 2 && attacker) fo.G[i].Y -= 4.5f;
+        }
 
         fo.Cmd = InitCommander(attacker, strat, tac, ref rng);
         return fo;
@@ -1053,11 +1069,9 @@ static class WarEngine
         }
         if (depth > c.PeakDepth) { c.PeakDepth = depth; c.PhaseStart = tick; }
 
-        if (!c.ReserveIn && (depth > 6f || tick > 55))
-        {
-            c.ReserveIn = true;
-            log.Add(tick, 0, LG_DECISION, "فرمانده ذخیره‌ی زرهی را برای پهن‌کردن رخنه وارد خط کرد.");
-        }
+        //  – ۳۶: ذخیره‌ی دولایه. بحران = پیشروی قفل شده و تلفات بالا رفته.
+        bool crisis11 = stalled && tick > 60;
+        ReleaseReserves(me, depth, tick, true, crisis11, log);
 
         float mainX = SectorX(c.MainSector);
         for (int i = 0; i < me.N; i++)
@@ -1065,9 +1079,7 @@ static class WarEngine
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, true, tick, log, ref rng)) continue;
-
-            bool reserve = g.Role == 1 && !c.ReserveIn;
-            if (reserve) { g.Posture = P_HOLD; g.TgtX = mainX; g.TgtY = Math.Max(-2f, g.Y); continue; }
+            if (HoldingInReserve(ref g, c, tick, mainX)) continue;
 
             g.Posture = depth > 2f ? P_ASSAULT : P_ADVANCE;
             float spread = 3.5f + (1f - c.Aggression) * 4f;
@@ -1119,11 +1131,16 @@ static class WarEngine
         }
 
         float mainX = SectorX(Math.Max(0, c.MainSector));
+        //  – ۳۶: در این دکترین ذخیره تا شروع یورش اصلی دست‌نخورده می‌ماند
+        ReleaseReserves(me, c.Phase == 1 ? Math.Max(depth, 6.5f) : depth, tick, true,
+                        c.Phase == 1 && tick - c.PhaseStart > 50, log);
+
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, true, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, mainX)) continue;
 
             bool prober = (i % 5) == 0;   // یک‌پنجم نیرو نقش اکتشاف دارد
             if (c.Phase == 0)
@@ -1170,11 +1187,9 @@ static class WarEngine
             c.RingClosed = true; c.PhaseStart = tick;
             log.Add(tick, 0, LG_DECISION, "دو بازو در عمق به هم نزدیک شدند و حلقه‌ی محاصره بسته شد؛ فشار از سه جهت روی مدافع افتاد.");
         }
-        if (c.RingClosed && !c.ReserveIn && tick - c.PhaseStart > 25)
-        {
-            c.ReserveIn = true;
-            log.Add(tick, 0, LG_DECISION, "پس از تثبیت حلقه، فرمانده ضربه‌ی نهایی به مرکز جیب را صادر کرد.");
-        }
+        //  – ۳۶: حلقه که بست، ذخیره برای خرد کردن جیب آزاد می‌شود
+        ReleaseReserves(me, c.RingClosed ? Math.Max(depth, 13f) : depth, tick, true,
+                        tick > 150 && !c.RingClosed, log);
 
         float leftX = SectorX(c.MainSector), rightX = SectorX(c.SecondSector);
         float centerX = SectorX(c.FeintSector < 0 ? SECTORS / 2 : c.FeintSector);
@@ -1185,8 +1200,10 @@ static class WarEngine
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, true, tick, log, ref rng)) continue;
 
+            if (HoldingInReserve(ref g, c, tick, cx)) continue;
+
             bool pinning = (i % 4) == 0;         // یک‌چهارم نیرو مرکز را تثبیت می‌کند
-            if (pinning && !c.ReserveIn)
+            if (pinning && !c.DeepReserveIn)
             {
                 g.Posture = P_SCREEN;
                 g.TgtX = Math.Clamp(centerX + rng.Range(-5f, 5f), 1f, FRONT_KM - 1);
@@ -1235,12 +1252,15 @@ static class WarEngine
 
         float mainX = SectorX(c.MainSector);
         float prevX = SectorX(c.SecondSector < 0 ? c.MainSector : c.SecondSector);
+        //  – ۳۶: چرخش محور نیروی تازه می‌خواهد، پس ذخیره زودتر وارد می‌شود
+        ReleaseReserves(me, depth, tick, true, c.ShiftCount >= 3 && depth < 8f, log);
 
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, true, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, mainX)) continue;
 
             bool holdOld = (i % 3) == 0;   // یک‌سوم نیرو محور قبلی را رها نمی‌کند
             float tx = holdOld ? prevX : mainX;
@@ -1285,21 +1305,19 @@ static class WarEngine
             c.MainSector = hot;
         }
 
-        if (!c.ReserveIn && depth > 4f)
-        {
-            c.ReserveIn = true;
-            log.Add(tick, 1, LG_DECISION, "با عمیق‌شدن رخنه، ذخیره‌ی زرهی مدافع برای بستن شکاف وارد شد.");
-        }
+        //  – ۳۶: خط ثابت ذخیره را برای بستن شکاف نگه می‌دارد
+        ReleaseReserves(me, depth, tick, false, depth > 14f, log);
 
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, false, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, hotX)) continue;
 
-            bool reserve = i % 3 == 2;
-            if (reserve && c.ReserveIn && hv > 0)
+            if (g.Role != 0 && hv > 0)
             {
+                // ذخیره‌ی رسیده به سمت نقطه‌ی داغ پاتک می‌زند
                 g.TgtX = Math.Clamp(hotX + rng.Range(-3f, 3f), 1f, FRONT_KM - 1);
                 g.TgtY = Math.Max(0.8f, depth - 0.8f);
                 g.Posture = P_ADVANCE;
@@ -1327,11 +1345,15 @@ static class WarEngine
             log.Add(tick, 1, LG_DECISION, $"گشت‌ها محور جدید فشار را در سکتور {hot + 1} گزارش کردند و خط پوششی دوباره چید شد.");
         }
 
+        //  – ۳۶: تا محور دشمن کشف نشود، ذخیره خرج نمی‌شود
+        ReleaseReserves(me, c.Phase == 1 ? Math.Max(depth, 5f) : 0f, tick, false, depth > 13f, log);
+
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, false, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, hotX)) continue;
 
             if (c.Phase == 0)
             {
@@ -1370,11 +1392,15 @@ static class WarEngine
             log.Add(tick, 1, LG_DECISION, "بیشتر کمین‌ها فعال شدند؛ مدافع از حالت پنهان بیرون آمد و به ضدحمله‌ی موضعی روی آورد.");
         }
 
+        //  – ۳۶: ذخیره تا فعال‌شدن کمین‌ها پنهان می‌ماند
+        ReleaseReserves(me, c.Committed ? Math.Max(depth, 11f) : 0f, tick, false, depth > 15f, log);
+
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, false, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, hotX)) continue;
 
             if (!g.Sprung && !c.Committed) { g.Posture = P_AMBUSH; continue; }
             if (c.Committed)
@@ -1408,11 +1434,15 @@ static class WarEngine
                 : "مهاجم به تله نیامد؛ مدافع ناچار از پناهگاه بیرون آمد و درگیری مستقیم را پذیرفت.");
         }
 
+        //  – ۳۶: در دکترین تله، ذخیره دقیقاً همان فکِ بسته‌شدن دهانه است
+        ReleaseReserves(me, c.Phase == 2 ? Math.Max(depth, 12f) : 0f, tick, false, c.Phase == 2, log);
+
         for (int i = 0; i < me.N; i++)
         {
             ref Group g = ref me.G[i];
             if (!g.Alive) continue;
             if (!TriageGroup(ref g, me, false, tick, log, ref rng)) continue;
+            if (HoldingInReserve(ref g, c, tick, hotX)) continue;
 
             if (c.Phase == 1)
             {
@@ -1427,6 +1457,91 @@ static class WarEngine
                 g.TgtY = Math.Max(1f, depth - 2f);
             }
         }
+    }
+
+    // ═══════════ ۳۶: مدیریت ذخیره‌ی دولایه ═══════════
+    //  فرمانده دو ورق در آستین دارد و باید بداند کِی کدام را رو کند:
+    //
+    //   ذخیره‌ی تاکتیکی (۲۵٪ نیرو) — نزدیک جبهه، ۴ تیک تا رسیدن.
+    //      برای بستن یک شکاف یا پهن‌کردن رخنه‌ی تازه. ارزان و سریع.
+    //
+    //   ذخیره‌ی عملیاتی (۱۵٪ نیرو) — در عمق، ۱۴ تیک تا رسیدن.
+    //      ضربه‌ی نهایی. اگر زود خرجش کنی، وقتی واقعاً لازم شد چیزی نداری؛
+    //      اگر دیر خرجش کنی، نبرد تمام شده است.
+    //
+    //  شخصیت فرمانده تعیین می‌کند: جسور زود می‌فرستد، صبور نگه می‌دارد.
+    const int TAC_RESERVE_MARCH = 4;    // تیک تا رسیدن ذخیره‌ی تاکتیکی
+    const int OP_RESERVE_MARCH = 14;    // تیک تا رسیدن ذخیره‌ی عملیاتی
+
+    static void ReleaseReserves(Force me, float depth, int tick, bool attacker,
+        bool crisis, BattleLog log)
+    {
+        ref CommanderState c = ref me.Cmd;
+
+        // ── لایه‌ی یک: ذخیره‌ی تاکتیکی ──
+        if (!c.ReserveIn)
+        {
+            //  جسارت بالا → زودتر. صبر بالا → دیرتر.
+            float trigger = attacker ? 6f - c.Aggression * 3f : 4f;
+            int lateLimit = (int)(40 + c.Patience * 40);
+            if (depth > trigger || tick > lateLimit || crisis)
+            {
+                c.ReserveIn = true; c.TacReserveTick = tick;
+                log.Add(tick, (byte)(attacker ? 0 : 1), LG_DECISION, attacker
+                    ? $"ذخیره‌ی تاکتیکی آزاد شد تا رخنه را پهن کند؛ حدود {TAC_RESERVE_MARCH * (int)TICK_MIN} دقیقه تا رسیدنش."
+                    : $"مدافع ذخیره‌ی تاکتیکی را برای بستن شکاف فرستاد؛ {TAC_RESERVE_MARCH * (int)TICK_MIN} دقیقه تا رسیدن.");
+            }
+        }
+
+        // ── لایه‌ی دو: ذخیره‌ی عملیاتی ──
+        //  فقط وقتی که یا رخنه‌ی واقعی هست (ارزش ضربه‌ی نهایی دارد)
+        //  یا بحران است (وگرنه نبرد را می‌بازیم).
+        if (c.ReserveIn && !c.DeepReserveIn)
+        {
+            bool worthIt = attacker ? depth > 12f : depth > 10f;
+            bool tooLate = tick > MAX_TICKS - OP_RESERVE_MARCH - 20;
+            //  فرمانده‌ی صبور منتظر لحظه‌ی درست می‌ماند
+            bool patientReady = tick - c.TacReserveTick > (int)(10 + c.Patience * 25);
+            if ((worthIt && patientReady) || crisis || tooLate)
+            {
+                c.DeepReserveIn = true; c.OpReserveTick = tick;
+                log.Add(tick, (byte)(attacker ? 0 : 1), LG_DECISION,
+                    crisis
+                    ? "بحران در جبهه؛ فرمانده ذخیره‌ی عملیاتی را هم زودتر از موعد وارد کرد."
+                    : tooLate
+                    ? "فرصت داشت تمام می‌شد؛ ذخیره‌ی عملیاتی در آخرین لحظه آزاد شد."
+                    : $"فرمانده ذخیره‌ی عملیاتی را برای ضربه‌ی نهایی آزاد کرد؛ حدود {OP_RESERVE_MARCH * (int)TICK_MIN} دقیقه در راه است.");
+            }
+        }
+    }
+
+    //  آیا این یگان هنوز در ذخیره است و نباید بجنگد؟
+    //  خروجی true یعنی «هنوز نرسیده، دست نگه دار».
+    static bool HoldingInReserve(ref Group g, in CommanderState c, int tick, float rallyX)
+    {
+        if (g.Role == 0) return false;
+
+        bool released = g.Role == 1 ? c.ReserveIn : c.DeepReserveIn;
+        int releaseTick = g.Role == 1 ? c.TacReserveTick : c.OpReserveTick;
+        int march = g.Role == 1 ? TAC_RESERVE_MARCH : OP_RESERVE_MARCH;
+
+        if (!released)
+        {
+            // منتظر دستور: در عمق جمع می‌شود، نمی‌جنگد
+            g.Posture = P_HOLD;
+            g.TgtX = rallyX;
+            return true;
+        }
+        if (tick - releaseTick < march)
+        {
+            // در راه است: به سمت نقطه‌ی تجمع می‌رود ولی هنوز وارد خط نشده
+            g.Posture = P_ADVANCE;
+            g.TgtX = rallyX;
+            g.TgtY = g.Y + 3.2f;
+            return true;
+        }
+        g.Deployed = true;
+        return false;   // رسید، حالا مثل بقیه می‌جنگد
     }
 
     // ── وضعیت اضطراری گروه (مهمات/روحیه) — مشترک بین همه‌ی دکترین‌ها ─────────
@@ -1828,6 +1943,8 @@ static class WarEngine
         {
             ref Group g = ref f.G[i];
             if (!g.Alive || g.Posture is P_RETREAT or P_REGROUP) continue;
+            //  – ۳۶: ذخیره‌ی هنوز نرسیده جزو خط تثبیت‌شده نیست
+            if (!g.Deployed) continue;
             int s = Math.Clamp((int)(g.X / SECTOR_KM), 0, SECTORS - 1);
             atkPow[s] += g.Type == 1 ? g.Units * 10f : g.Units;
         }
@@ -1855,6 +1972,7 @@ static class WarEngine
             {
                 ref Group g = ref f.G[i];
                 if (!g.Alive || g.Posture is P_RETREAT or P_REGROUP) continue;
+                if (!g.Deployed) continue;
                 if (Math.Clamp((int)(g.X / SECTOR_KM), 0, SECTORS - 1) != s) continue;
                 if (g.Y <= d) continue;
                 float massAtOrBeyond = 0f;
@@ -3087,6 +3205,27 @@ static class WarEngine
             if (intelText != null) sb.Append($"• {Esc(intelText)}\n");
             if (routsD > 0) sb.Append($"• {routsD} یگان مدافع در جریان نبرد از هم پاشید.\n");
             if (routsA > 0) sb.Append($"• {routsA} یگان خودی زیر فشار عقب کشید.\n");
+        }
+
+        //  – ۳۶: سرنوشت ذخیره‌ها
+        if (fa != null && anyGround && defHasGround)
+        {
+            int held1 = 0, held2 = 0, in1 = 0, in2 = 0;
+            for (int i = 0; i < fa.N; i++)
+            {
+                if (fa.G[i].Role == 1) { if (fa.G[i].Deployed) in1++; else held1++; }
+                else if (fa.G[i].Role == 2) { if (fa.G[i].Deployed) in2++; else held2++; }
+            }
+            if (in1 + in2 + held1 + held2 > 0)
+            {
+                sb.Append("\n<b>🎖 ذخیره‌ها</b>\n");
+                sb.Append(fa.Cmd.ReserveIn
+                    ? $"• ذخیره‌ی تاکتیکی در ساعت <code>{Clock(fa.Cmd.TacReserveTick)}</code> آزاد شد ({in1} یگان وارد خط شد)\n"
+                    : "• ذخیره‌ی تاکتیکی هرگز لازم نشد و دست‌نخورده ماند\n");
+                sb.Append(fa.Cmd.DeepReserveIn
+                    ? $"• ذخیره‌ی عملیاتی در ساعت <code>{Clock(fa.Cmd.OpReserveTick)}</code> آزاد شد ({in2} یگان رسید" + (held2 > 0 ? $"، {held2} یگان هنوز در راه بود)" : ")") + "\n"
+                    : "• ذخیره‌ی عملیاتی تا پایان نبرد دست‌نخورده ماند\n");
+            }
         }
 
         if (factionText != null)

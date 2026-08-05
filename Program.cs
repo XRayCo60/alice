@@ -5160,9 +5160,19 @@ partial class Program
                     await SendTemp(uid, $"🛡 {defenderCountry.Name} به دلیل 5 حمله اخیر تا {leftH} ساعت دیگر سپر 16 ساعته دارد و قابل حمله نیست!", ct: ct);
                     return;
                 }
-                // Create delayed invasion – fleet arrives after asset update (user-friendly 5 min, processed by both timers)
+                //  – زمان سفر ناوگان: بین ۳ تا ۵ ساعت تصادفی.
+                //     ناوگان واقعاً باید مسافت دریایی را طی کند و مدافع فرصت واکنش دارد.
+                //     در گروهی که «معافیت کامل» دارد، این زمان به ۱ دقیقه می‌افتد.
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                long arriveMs = nowMs + 5 * 60 * 1000; // 5 minutes delay, processed by transfer timer (60s) and asset update
+                bool navalExempt = Database.HasGroupLockExemption(sess.AttackChatId);
+                long travelMs;
+                if (navalExempt) travelMs = 60 * 1000L;
+                else travelMs = (long)(rng.Next(3 * 3600, 5 * 3600 + 1)) * 1000L;
+                long arriveMs = nowMs + travelMs;
+                string etaText = navalExempt
+                    ? "۱ دقیقه (معافیت کامل)"
+                    : $"{travelMs / 3600000L} ساعت و {(travelMs % 3600000L) / 60000L} دقیقه";
+                var arriveLocal = DateTimeOffset.FromUnixTimeMilliseconds(arriveMs).ToOffset(TimeSpan.FromHours(3.5));
 
                 var inv = new NavalInvasion
                 {
@@ -5217,8 +5227,8 @@ partial class Program
                 Database.ReconcileDefense(uid, sess.AttackChatId);
 
                 EndSession(uid);
-                await SendTemp(uid, $"⚓ ناوگان اعزام شد!\n\n🚤 قایق: {totalBoats} | ⚓ زیردریایی: {totalSubs} | 🚢 نبردناو: {totalBS}\n🎯 هدف: {defenderCountry.Name}\n📍 استراتژی: {sess.AttackNavalStrategy} / تاکتیک: {sess.AttackNavalTactic}\n\n⏳ ناوگان پس از آپدیت دارایی به مقصد می‌رسد و به مدافع اطلاع داده می‌شود.\n🚤 قایق‌ها فقط نقش اسکورت دارند؛ ضربه‌ی اصلی با زیردریایی و نبردناو است.", ct: ct);
-                try { await SendTemp(sess.AttackChatId, $"⚓ {attackerCountry.Name} ناوگان دریایی به سمت {defenderCountry.Name} اعزام کرد!\n🚤{totalBoats} ⚓{totalSubs} 🚢{totalBS} – رسیدن پس از آپدیت دارایی", ct: ct); } catch { }
+                await SendTemp(uid, $"⚓ ناوگان اعزام شد!\n\n🚤 قایق: {totalBoats} | ⚓ زیردریایی: {totalSubs} | 🚢 نبردناو: {totalBS}\n🎯 هدف: {defenderCountry.Name}\n📍 استراتژی: {sess.AttackNavalStrategy} / تاکتیک: {sess.AttackNavalTactic}\n\n🧭 زمان سفر دریایی: {etaText}\n🕐 رسیدن حدود {arriveLocal:HH:mm} به وقت تهران\n🚤 قایق‌ها فقط نقش اسکورت دارند؛ ضربه‌ی اصلی با زیردریایی و نبردناو است.", ct: ct);
+                try { await SendTemp(sess.AttackChatId, $"⚓ {attackerCountry.Name} ناوگان دریایی به سمت {defenderCountry.Name} اعزام کرد!\n🚤{totalBoats} ⚓{totalSubs} 🚢{totalBS}\n🧭 زمان تخمینی رسیدن: {etaText}", ct: ct); } catch { }
                 return;
             }
 
