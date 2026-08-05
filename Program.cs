@@ -2629,6 +2629,8 @@ partial class Program
         "• قبل از اولین حمله یا ترنسفر، یک‌بار در پیوی ربات <b>/start</b> بزنید\n" +
         "• گزارش کامل نبرد بعد از هر جنگ به پیوی شما می‌آید\n" +
         "──────────────\n📢 @alice_safe_house1";
+    static readonly TimeSpan TehranOffset = TimeSpan.FromHours(3.5);
+
     static DateTime GetTehranNow()
     {
         return DateTime.UtcNow.AddHours(3.5);
