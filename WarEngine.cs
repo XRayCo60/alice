@@ -162,11 +162,12 @@ static class WarEngine
     static readonly TankSpec SpecUSA = new("M2 Medium", Faction.USA,
         37f, 884f, 0.87f, 46f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f);
 
-    // T-28 — هویتزر 76.2mm KT-28، ۶۹ گلوله، ۴ مسلسل، زره ۳۰ جلو / ۲۰ پهلو، ۳۷ km/h
-    //   نفوذ واقعی فقط ۳۴–۵۰mm در ۵۰۰ متر (سلاح پشتیبانی پیاده، نه ضدزره)
-    //   ولی گلوله‌ی انفجاری ۶۲۱ گرم TNT دارد — بهترین ضدپیاده‌ی این سه
+    // T-28 — توپ 76.2mm L-10 با گلوله‌ی ضدزره BR-350A (APHEBC)
+    //   سرعت پوزه ۵۵۵ m/s، نفوذ واقعی ۶۰mm در ۵۰۰ متر (منبع: جدول زره BR-350A)
+    //   گلوله‌ی انفجاری OF-350M با ۶۲۱ گرم TNT — قوی‌ترین ضدپیاده‌ی این سه
+    //   ولی آهنگ آتش پایین (۵/دقیقه)، فقط ۶۹ گلوله و اپتیک ضعیف
     static readonly TankSpec SpecUSSR = new("T-28", Faction.USSR,
-        76.2f, 381f, 6.23f, 34f, 0.621f, 4f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f);
+        76.2f, 555f, 6.30f, 60f, 0.621f, 5f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f);
 
     // Panzer III — توپ 5cm KwK 38 L/42، ۹۹ گلوله، اپتیک TZF5d عالی، زره ۶۰ (۳۰+۳۰)
     //   نفوذ واقعی: ۴۷mm در ۵۰۰ متر با Pzgr.39 (نه ۶۷ که قبلاً بود)
@@ -973,7 +974,7 @@ static class WarEngine
             g.Posture = depth > 2f ? P_ASSAULT : P_ADVANCE;
             float spread = 3.5f + (1f - c.Aggression) * 4f;
             g.TgtX = Math.Clamp(mainX + rng.Range(-spread, spread), 1f, FRONT_KM - 1);
-            g.TgtY = g.Y + (g.Type == 1 ? 6.5f : 4.5f);
+            g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6.5f : 4.5f));
             g.Committed = true;
         }
     }
@@ -1046,7 +1047,7 @@ static class WarEngine
                 g.Posture = depth > 2f ? P_ASSAULT : P_ADVANCE;
                 float spread = prober ? 9f : 4.5f;
                 g.TgtX = Math.Clamp(mainX + rng.Range(-spread, spread), 1f, FRONT_KM - 1);
-                g.TgtY = g.Y + (g.Type == 1 ? 6f : 4.2f);
+                g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6f : 4.2f));
                 g.Committed = true;
             }
         }
@@ -1100,7 +1101,7 @@ static class WarEngine
             if (c.RingClosed) armX = centerX + (leftArm ? -3f : 3f);
             g.Posture = c.RingClosed ? P_ASSAULT : P_FLANK;
             g.TgtX = Math.Clamp(armX + rng.Range(-3f, 3f), 1f, FRONT_KM - 1);
-            g.TgtY = g.Y + (g.Type == 1 ? 5.5f : 3.8f);
+            g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 5.5f : 3.8f));
             g.Committed = c.RingClosed;
         }
     }
@@ -1148,7 +1149,7 @@ static class WarEngine
             g.Posture = depth > 3f ? P_ASSAULT : P_FLANK;
             float wobble = MathF.Sin((tick + i * 7) * 0.05f) * 3.5f;
             g.TgtX = Math.Clamp(tx + wobble + rng.Range(-2.5f, 2.5f), 1f, FRONT_KM - 1);
-            g.TgtY = g.Y + (g.Type == 1 ? 6.2f : 4.2f);
+            g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6.2f : 4.2f));
             g.Committed = true;
         }
     }
@@ -2452,6 +2453,38 @@ static class WarEngine
                     log.Add(tick, 2, LG_BREAK, "مقاومت سازمان‌یافته‌ی مدافع از هم پاشید و باقی‌مانده‌ی خط تار و مار شد.");
                     tick++; break;
                 }
+                // ── دور زدن جبهه: مدافعی که پشتش بریده شده نمی‌تواند سر جا بماند ──
+                if (tick % 6 == 0 && effDepth > 8f)
+                {
+                    for (int j = 0; j < fd.N; j++)
+                    {
+                        ref Group dg = ref fd.G[j];
+                        if (!dg.Alive || dg.Posture == P_RETREAT) continue;
+                        // اگر ستون مهاجم از این یگان عبور کرده و عمیقاً پشت سرش است
+                        if (dg.Y > effDepth - 4f) continue;
+                        float nearFriend = 0f, nearFoe = 0f;
+                        for (int k = 0; k < fd.N; k++)
+                        {
+                            if (k == j || !fd.G[k].Alive) continue;
+                            float ddx = fd.G[k].X - dg.X, ddy = fd.G[k].Y - dg.Y;
+                            if (ddx * ddx + ddy * ddy < 25f) nearFriend += fd.G[k].Units;
+                        }
+                        for (int k = 0; k < fa.N; k++)
+                        {
+                            if (!fa.G[k].Alive) continue;
+                            float ddx = fa.G[k].X - dg.X, ddy = fa.G[k].Y - dg.Y;
+                            if (ddx * ddx + ddy * ddy < 36f) nearFoe += fa.G[k].Units;
+                        }
+                        if (nearFoe > nearFriend * 1.5f && rng.NextF() < 0.30f)
+                        {
+                            dg.Posture = P_RETREAT;
+                            dg.TgtY = Math.Min(DEPTH_KM, dg.Y + 10f);
+                            dg.Morale = Math.Max(0f, dg.Morale - 0.25f);
+                            routsD++;
+                        }
+                    }
+                }
+
                 if (haltTicks > 85 && contact)
                 {
                     log.Add(tick, 2, LG_CRISIS, $"پیشروی در عمق {effDepth:F1} کیلومتری زمین‌گیر شد و جبهه به بن‌بست رسید.");
@@ -2459,8 +2492,15 @@ static class WarEngine
                 }
             }
 
-            if (effDepth >= 22f && effDepth < WIN_DEPTH)
-                effDepth = Math.Min(WIN_DEPTH, effDepth + (WIN_DEPTH - effDepth) * 0.5f);
+            // ── تثبیت نهایی ──
+            //  اگر مقاومت سازمان‌یافته‌ی مدافع عملاً از بین رفته، عقبه‌ی جبهه باز است
+            //  و ستون مهاجم بقیه‌ی راه را تقریباً بدون درگیری می‌رود.
+            float aEnd = SidePower(fa), dEnd = SidePower(fd);
+            float endDom = aEnd / Math.Max(1f, aEnd + dEnd);
+            if (effDepth >= 18f && endDom > 0.80f)
+                effDepth = WIN_DEPTH;                                   // فروپاشی کامل جبهه
+            else if (effDepth >= 22f && effDepth < WIN_DEPTH)
+                effDepth = Math.Min(WIN_DEPTH, effDepth + (WIN_DEPTH - effDepth) * 0.65f);
             else if (effDepth <= 6f && effDepth > FAIL_DEPTH)
                 effDepth = Math.Max(0f, effDepth - (effDepth - FAIL_DEPTH) * 0.5f);
         }
