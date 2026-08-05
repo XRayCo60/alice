@@ -2593,7 +2593,11 @@ partial class Program
         "• در حمله و دفاع می‌توانید برای هر مدل جداگانه تعداد / درصد تعیین کنید.\n" +
         "• موتور جنگ نسخه ۳: تلفات هر مدل تانک جدا حساب می‌شود (نفوذ توپ شما در برابر زره واقعی مدل دشمن).\n" +
         "• هر استراتژی/تاکتیک مغز فرماندهی مستقل دارد و در طول نبرد تصمیم می‌گیرد؛ گزارش خط زمانی تصمیم‌ها را نشان می‌دهد.\n" +
-        "• فکشن مهم است: کیفیت خدمه، سرعت فرمان، تدارکات، بازیابی تجهیزات و کار با تجهیز خارجی همه اثر دارند.\n\n" +
+        "• فکشن مهم است: کیفیت خدمه، سرعت فرمان، تدارکات، بازیابی تجهیزات و کار با تجهیز خارجی همه اثر دارند.\n" +
+        "• <b>ذخیره‌ی دولایه</b>: ۶۰٪ خط اول، ۲۵٪ ذخیره‌ی تاکتیکی (۲۴ دقیقه تا رسیدن)، ۱۵٪ ذخیره‌ی عملیاتی (۸۴ دقیقه). فرمانده تصمیم می‌گیرد کِی هرکدام را خرج کند.\n" +
+        "• <b>تنوع نقشه</b>: ۸ تیپ زمین (دشت، تپه، جنگل، صنعتی، مرداب، گذرگاه کوهستانی، رودخانه، استپ). محاصره در استپ عالی و در گذرگاه فاجعه است.\n" +
+        "• آب‌وهوا وسط نبرد عوض می‌شود. لایه‌ی ابر ارتفاع دارد: بمباران از بالای ابر تقریباً کور است.\n" +
+        "• زره از زاویه حساب می‌شود: شلیک به پهلو خیلی کاری‌تر از سینه است. مهمات هر مدل محدود است (T-28 فقط ۶۹ گلوله).\n\n" +
 
         "⚓ <b>نیروی دریایی — ناوگان</b>\n" +
         "• دستور: <b>خرید ناو / خرید کشتی / خرید قایق / نیروی دریایی / ناوگان</b>\n" +
@@ -2602,8 +2606,12 @@ partial class Program
         "  ☭ G-5 50–53 گره — هر 5: 2.5K+1.5K\n" +
         "• زیردریایی: Type VIIC 17.7/7.6 — 10K+5K | Gato 21/9 — 10K+5K | S-class 13–14/7–8 — 8K+4K\n" +
         "• نبردناو: Bismarck 30 گره 2092 خدمه 8x380mm — 50K+30K | Iowa 28 گره 1800 خدمه 9x406mm — 50K+40K | Sovetsky Soyuz 23 گره 1220 خدمه 12x305mm — 45K+25K (پورت>=4 max3)\n" +
-        "• <b>قایق تندرو</b>: نیروی دفاع ساحلی است؛ به تنهایی نمی‌تواند حمله کند و فقط اسکورت ناوگان اصلی می‌شود. سوخت حذف شده است.\n" +
-        "• <b>آسیب نبردناو</b>: عادی فقط آسیب نه انهدام مگر یک‌طرفه. تعمیر: <b>تعمیر ناو / تعمیر ناوگان</b> هزینه 60% قیمت × درصد آسیب.\n" +
+        "• <b>قایق تندرو</b>: نیروی دفاع ساحلی است؛ به تنهایی نمی‌تواند حمله کند و فقط اسکورت ناوگان اصلی می‌شود (۱۵٪ توان ضربه). سوخت حذف شده است.\n" +
+        "• <b>دریانوردی</b>: در دریای متلاطم قایق سبک از کار می‌افتد. G-5 با دریانوردی ۰.۳۰ فقط آب آرام، S-Boot با ۰.۸۵ همه‌جا.\n" +
+        "• <b>آسیب نبردناو</b>: چهار زیرسیستم جدا — بدنه، موتورخانه، برجک‌ها، کنترل آتش. بدنه و موتور سرعت را می‌خورند، برجک توان آتش را، آتش‌سوزی دقت را.\n" +
+        "• گلوله‌ی عرشه‌خور بیشتر موتورخانه را می‌زند، کمربندخور بدنه و برجک. اژدر زیر خط آب فقط نشت و آسیب موتور می‌دهد.\n" +
+        "• نشت مهارنشده ناو را واژگون می‌کند؛ سرعت مهار به کیفیت خدمه بستگی دارد. ناوِ داغان خودش از خط خارج می‌شود.\n" +
+        "• <b>تعمیر ناو</b>: هزینه دقیقاً درصد آسیب × قیمت ساخت (۲۰٪ آسیب = ۲۰٪ قیمت).\n" +
         "• انتقال نبردناو: <b>نمیتوانید به این کشور نبردناو ترنسفر کنید، تعداد نبرد ناو: 3</b>\n\n" +
 
         "🗡 <b>حمله — زمینی/هوایی و دریایی</b>\n" +
@@ -2614,8 +2622,11 @@ partial class Program
         "  2️⃣ <b>عملیات آبی‌خاکی</b> — بمباران دریایی / پیاده‌سازی موجی\n" +
         "  دفاع: استحکامات و موانع ساحلی / ضدحمله سریع / حمله و عقب‌نشینی / کمین دریایی\n" +
         "• برای هر مدل قایق/زیر/نبردناو جداگانه تعداد اعزام.\n" +
-        "• <b>تاخیری</b>: ناوگان پس از آپدیت دارایی می‌رسد + اطلاع به مدافع. غنیمت 1.5x زمینی. پیروزی >90% → بندر مدافع -1.\n" +
-        "• قوانین: حمله به <1/4 قدرت شما ممنوع. با نبردناو وقتی دریایی دشمن <3/4 غیرممکن. 5 حمله در 24h → 16h سپر.\n" +
+        "• <b>زمان سفر دریایی</b>: ناوگان ۳ تا ۵ ساعت در راه است و مدافع خبردار می‌شود. با «معافیت کامل» گروه، ۱ دقیقه.\n" +
+        "• <b>نردبان تخریب بندر</b>: هر ۲ پیروزی دریایی یک سطح بندر مدافع (۵→۴→۳→۲→۱→صفر). بندر صفر یعنی هیچ کشتی ساخته نمی‌شود.\n" +
+        "• غنیمت دریایی ۱.۵ برابر زمینی. نبرد دریایی روی رفاه و جمعیت هم اثر دارد (تلفات ملوان).\n" +
+        "• <b>شب و عمق آب</b>: در ۱۹۳۹ رادار جست‌وجو نیست، پس شب دید را می‌برد. آب کم‌عمق فرار عمودی زیردریایی را می‌گیرد.\n" +
+        "• قوانین: حمله به کمتر از ۱/۴ قدرت شما ممنوع. با نبردناو وقتی نیروی دریایی دشمن کمتر از ۳/۴ شماست غیرممکن. 5 حمله در 24h → 16h سپر.\n" +
         "• قفل 30 دقیقه بعد آپدیت + سپر 48h تازه‌ساخت.\n\n" +
 
         "🛡 <b>دفاع — چندمدلی و دریایی</b>\n" +
@@ -2836,6 +2847,80 @@ partial class Program
         }
         ScheduleDelete(chatId, m.MessageId, 30);
         return m;
+    }
+
+    //  – راهنما از سقف ۴۰۹۶ کاراکتری تلگرام بلندتر است.
+    //     روی خط خالی می‌شکنیم تا هیچ تگ HTML نصف نشود.
+    static List<string> SplitForTelegram(string text, int limit = 3500)
+    {
+        var parts = new List<string>();
+        if (string.IsNullOrEmpty(text)) return parts;
+        var blocks = text.Split("\n\n");
+        var cur = new StringBuilder();
+        foreach (var blk in blocks)
+        {
+            if (cur.Length > 0 && cur.Length + blk.Length + 2 > limit)
+            {
+                parts.Add(cur.ToString().TrimEnd());
+                cur.Clear();
+            }
+            if (blk.Length > limit)
+            {
+                if (cur.Length > 0) { parts.Add(cur.ToString().TrimEnd()); cur.Clear(); }
+                foreach (var line in blk.Split('\n'))
+                {
+                    if (cur.Length + line.Length + 1 > limit) { parts.Add(cur.ToString().TrimEnd()); cur.Clear(); }
+                    cur.Append(line).Append('\n');
+                }
+                continue;
+            }
+            cur.Append(blk).Append("\n\n");
+        }
+        if (cur.Length > 0) parts.Add(cur.ToString().TrimEnd());
+        return parts;
+    }
+
+    //  – گزارش نبرد با مدل‌های زیاد می‌تواند از ۴۰۹۶ کاراکتر رد شود.
+    //     این تابع امن می‌فرستد: تکه‌تکه، و اگر HTML شکست، متن ساده.
+    static async Task SendReport(long chatId, string text, bool temporary, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        foreach (var part in SplitForTelegram(text))
+        {
+            try
+            {
+                if (temporary) await SendTemp(chatId, part, parseMode: ParseMode.Html, ct: ct);
+                else await SendPermanent(chatId, part, parseMode: ParseMode.Html, ct: ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[REPORT ERR] {ex.Message}");
+                string plain = System.Text.RegularExpressions.Regex.Replace(part, "<[^>]+>", "");
+                try { if (temporary) await SendTemp(chatId, plain, ct: ct); else await SendPermanent(chatId, plain, ct: ct); } catch { }
+            }
+            await Task.Delay(120, ct);
+        }
+    }
+
+    static async Task SendHelp(long chatId, bool temporary, CancellationToken ct)
+    {
+        var parts = SplitForTelegram(HelpText);
+        foreach (var part in parts)
+        {
+            try
+            {
+                if (temporary) await SendTemp(chatId, part, parseMode: ParseMode.Html, ct: ct);
+                else await SendPermanent(chatId, part, parseMode: ParseMode.Html, ct: ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[HELP ERR] {ex.Message}");
+                // اگر HTML مشکل داشت، دست‌کم متن ساده برسد
+                string plain = System.Text.RegularExpressions.Regex.Replace(part, "<[^>]+>", "");
+                try { if (temporary) await SendTemp(chatId, plain, ct: ct); else await SendPermanent(chatId, plain, ct: ct); } catch { }
+            }
+            await Task.Delay(120, ct);
+        }
     }
 
     static async Task<Message> SendPermanent(long chatId, string text, IReplyMarkup? markup = null,
@@ -3324,7 +3409,7 @@ partial class Program
         }
         if (txt == "راهنما" || txt == "/help" || txt == "help")
         {
-            await SendPermanent(uid, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(uid, temporary: false, ct);
             return;
         }
     }
@@ -4074,7 +4159,7 @@ partial class Program
         if (txt == "راهنما")
         {
             // FIX(4): راهنمای کامل (در گروه)
-            await SendTemp(chat.Id, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(chat.Id, temporary: true, ct);
             return;
         }
 
@@ -5487,7 +5572,7 @@ partial class Program
         }
         if (txt == "راهنما" || txt == "/help" || txt == "help")
         {
-            await SendPermanent(uid, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(uid, temporary: false, ct);
             return;
         }
 
@@ -6472,8 +6557,20 @@ partial class Program
         double incomePower = nonTaxIncome / 20.0;
         double groundPower = (c.Soldiers / 20.0) + (c.Tanks * 15);
         double airPower = (c.Planes * 12) + (c.Bombers * 25);
+        //  – نیروی دریایی هم بخشی از قدرت ملی است.
+        //     وزن‌ها بر پایه‌ی هزینه‌ی ساخت و توان رزمی واقعی:
+        //     قایق ارزان و فقط دفاعی، زیردریایی گران‌تر، نبردناو سنگین‌ترین سرمایه.
+        //     نبردناو آسیب‌دیده به نسبت آسیبش از قدرتش کم می‌شود.
+        long bsCount = c.Battleships + c.BattleshipsAtSea;
+        double bsHealth = bsCount > 0
+            ? Math.Clamp(1.0 - (c.BattleshipDamage / (double)(bsCount * 100)), 0.25, 1.0)
+            : 1.0;
+        double navalPower = ((c.Boats + c.BoatsAtSea) * 6)
+                          + ((c.Submarines + c.SubmarinesAtSea) * 45)
+                          + (bsCount * 400 * bsHealth)
+                          + (c.PortLevel * 60);
         double otherPower = (c.Cities * 50) + (c.AntiAir * 8) + (c.RecruitmentRate * 40) + (c.DefenseWins * 30);
-        return (long)Math.Ceiling(Math.Max(0, popPower + incomePower + groundPower + airPower + otherPower));
+        return (long)Math.Ceiling(Math.Max(0, popPower + incomePower + groundPower + airPower + navalPower + otherPower));
     }
 
     static bool IsSuperpowerCollision(long chatId, long leaderId, long targetId, out string reason)
@@ -7485,10 +7582,10 @@ partial class Program
                     if (!string.IsNullOrEmpty(result.AttackerReport))
                     {
                         var allIds = contribs.Select(x => x.UserId).Distinct().ToList();
-                        foreach (var pid in allIds) { try { await bot.SendTextMessageAsync(pid, result.AttackerReport, parseMode: ParseMode.Html, cancellationToken: ct); } catch { } }
+                        foreach (var pid in allIds) { try { await SendReport(pid, result.AttackerReport, false, ct); } catch { } }
                     }
-                    if (!string.IsNullOrEmpty(result.DefenderReport)) try { await bot.SendTextMessageAsync(d.TargetUserId, result.DefenderReport, parseMode: ParseMode.Html, cancellationToken: ct); } catch { }
-                    if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(d.ChatId, result.GroupAnnouncement, parseMode: ParseMode.Html, ct: ct); } catch { } }
+                    if (!string.IsNullOrEmpty(result.DefenderReport)) try { await SendReport(d.TargetUserId, result.DefenderReport, false, ct); } catch { }
+                    if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendReport(d.ChatId, result.GroupAnnouncement, false, ct); } catch { } }
                     await ProcessSiege(d.InitiatorId, d.TargetUserId, d.ChatId, result, ct);
                     Database.DeleteDeployment(d.Id);
                 }
@@ -7835,9 +7932,9 @@ partial class Program
                 }
 
                 // Notifications – attacker private, defender private, group
-                try { await SendPermanent(inv.AttackerId, result.AttackerReport, parseMode: ParseMode.Html, ct: ct); } catch { }
-                try { await SendPermanent(inv.DefenderId, result.DefenderReport, parseMode: ParseMode.Html, ct: ct); } catch { }
-                try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, parseMode: ParseMode.Html, ct: ct); } catch { }
+                try { await SendReport(inv.AttackerId, result.AttackerReport, false, ct); } catch { }
+                try { await SendReport(inv.DefenderId, result.DefenderReport, false, ct); } catch { }
+                try { await SendReport(inv.ChatId, result.GroupAnnouncement, false, ct); } catch { }
                 if (portNews != null) { try { await SendPermanent(inv.ChatId, portNews, ct: ct); } catch { } }
 
                 Database.MarkNavalInvasionProcessed(inv.Id);
@@ -8583,9 +8680,9 @@ partial class Program
         Database.UpdateCountryFull(defender);
         Database.ReconcileDefense(attacker.OwnerId, attacker.ChatId);
         Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
-        if (!string.IsNullOrEmpty(result.AttackerReport)) { try { await SendPermanent(uid, result.AttackerReport, parseMode: ParseMode.Html, ct: ct); } catch { await SendPermanent(uid, result.AttackerReport, ct: ct); } }
-        if (!string.IsNullOrEmpty(result.DefenderReport)) { try { await SendPermanent(tid, result.DefenderReport, parseMode: ParseMode.Html, ct: ct); } catch { } }
-        if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(cid, result.GroupAnnouncement, parseMode: ParseMode.Html, ct: ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.AttackerReport)) { try { await SendReport(uid, result.AttackerReport, false, ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.DefenderReport)) { try { await SendReport(tid, result.DefenderReport, false, ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendReport(cid, result.GroupAnnouncement, false, ct); } catch { } }
         await ProcessSiege(uid, tid, cid, result, ct);
     }
 
