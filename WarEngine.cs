@@ -473,11 +473,13 @@ static class WarEngine
         public byte Posture;
         public byte Sector;
         public byte Role;            // ۳۶: 0 = خط اول، 1 = ذخیره‌ی تاکتیکی، 2 = ذخیره‌ی عملیاتی
-        public int  ReleaseTick;     // ۳۶: تیکی که این یگان از ذخیره آزاد شده
         public bool Deployed;        // ۳۶: از ذخیره رسیده و وارد خط شده
         public bool Alive;
         public bool Sprung;
-        public bool Committed;
+        //  لِین حرکت: جای ثابت این یگان نسبت به محور، در بازه‌ی ‎-1..+1‎.
+        //   یک بار در آغاز نبرد قرعه می‌خورد و تا پایان عوض نمی‌شود، پس
+        //   یگان یک مسیر پیوسته می‌رود و هر چرخه‌ی فرمان دوباره قرعه نمی‌خورد.
+        public float Lane;
     }
 
     struct Intel { public float Level, LastX, LastY, Stale; }
@@ -535,10 +537,7 @@ static class WarEngine
         public int  TacReserveTick;  // تیک آزادسازی ذخیره‌ی تاکتیکی
         public int  OpReserveTick;   // تیک آزادسازی ذخیره‌ی عملیاتی
         public bool RingClosed;
-        public bool Reorganized;
-        public float LastPower;
-        public float PeakDepth;
-        public int LastDecisionTick;
+        public float PeakDepth;     // عمیق‌ترین پیشرویِ تثبیت‌شده تا کنون
         public int ShiftCount;      // چند بار محور را عوض کرده
     }
 
@@ -576,7 +575,31 @@ static class WarEngine
         public int  WeatherShiftTick;   // ۳۲: تیک تغییر آب‌وهوا
         public byte WeatherNext;        // ۳۲: آب‌وهوای بعدی
         public float CloudBaseM;        // ۵۸: کف لایه‌ی ابر
-        public byte TimeAt(int tick) => (byte)((StartTime + (tick / 30)) & 3);
+
+        // ── چرخه‌ی شبانه‌روز: دقیقاً یک بار در طول نبرد ──
+        //  نبرد حداکثر ۲۴۰ تیک (۲۴ ساعت) طول می‌کشد و شبانه‌روز هم ۲۴۰ تیک است،
+        //  پس هیچ نبردی دو بار شب نمی‌بیند. طول فازها هم واقعی است، نه مساوی:
+        //     سپیده‌دم ۲ ساعت | روز ۱۰ ساعت | غروب ۲ ساعت | شب ۱۰ ساعت
+        const int PH_DAWN = 20, PH_DAY = 100, PH_DUSK = 20;   // بقیه شب است
+        const int DAY_TICKS = 240;
+
+        //  ساعت شروع نبرد از StartTime می‌آید: ابتدای همان فاز
+        static int StartTickOf(byte t) => t switch
+        {
+            TM_DAWN => 0,
+            TM_DAY  => PH_DAWN,
+            TM_DUSK => PH_DAWN + PH_DAY,
+            _       => PH_DAWN + PH_DAY + PH_DUSK,
+        };
+
+        public byte TimeAt(int tick)
+        {
+            int t = (StartTickOf(StartTime) + tick) % DAY_TICKS;
+            if (t < PH_DAWN) return TM_DAWN;
+            if (t < PH_DAWN + PH_DAY) return TM_DAY;
+            if (t < PH_DAWN + PH_DAY + PH_DUSK) return TM_DUSK;
+            return TM_NIGHT;
+        }
 
         public byte TerrAt(float x, float y)
         {
@@ -822,7 +845,6 @@ static class WarEngine
         {
             int m = i % 20;
             fo.G[i].Role = (byte)(m < 12 ? 0 : m < 17 ? 1 : 2);
-            fo.G[i].ReleaseTick = -1;
             fo.G[i].Deployed = fo.G[i].Role == 0;   // خط اول از تیک صفر در خط است
             // ذخیره‌ی عملیاتی از عقب‌تر شروع می‌کند
             if (fo.G[i].Role == 2 && attacker) fo.G[i].Y -= 4.5f;
@@ -854,6 +876,7 @@ static class WarEngine
         gr.MAmmo0 = Math.Max(1f, gr.MAmmo);
         gr.Exp = rng.Range(0f, 0.1f);
         gr.FireTgt = -1;
+        gr.Lane = rng.Range(-1f, 1f);   // جای ثابت این یگان در عرض محور
 
         if (atk)
         {
@@ -960,12 +983,26 @@ static class WarEngine
         }
     }
 
+    //  ضعیف‌ترین سکتور: کل جبهه بررسی می‌شود، از سکتور صفر تا آخر.
+    //   لبه‌ها حذف نمی‌شوند — حمله از لبه‌ی جبهه ممکن است — ولی چون یک طرفشان
+    //   خارج از نقشه است، پشتیبانی جناحی کمتری دارند و فرمانده این را می‌داند.
+    //   پس فقط یک جریمه‌ی وزنی می‌خورند، نه حذف کامل.
     static int WeakestSector(float[] threat, ref XorRng rng, float noise = 8f)
     {
-        int best = 1; float bv = float.MaxValue;
-        for (int s = 1; s < SECTORS - 1; s++)
+        int best = 0; float bv = float.MaxValue;
+        //  میانگین تهدید جبهه، مبنای جریمه‌ی لبه
+        float avg = 0f;
+        for (int s = 0; s < SECTORS; s++) avg += threat[s];
+        avg /= SECTORS;
+
+        for (int s = 0; s < SECTORS; s++)
         {
-            float v = threat[s] + threat[s - 1] * 0.4f + threat[s + 1] * 0.4f + rng.NextF() * noise;
+            //  همسایه‌ی بیرون نقشه = تهدید صفر، ولی جای مانور هم نیست
+            float left  = s > 0 ? threat[s - 1] : threat[s];
+            float right = s < SECTORS - 1 ? threat[s + 1] : threat[s];
+            float v = threat[s] + left * 0.4f + right * 0.4f + rng.NextF() * noise;
+            //  جریمه‌ی لبه: حمله از گوشه‌ی جبهه امکان توسعه‌ی جانبی ندارد
+            if (s == 0 || s == SECTORS - 1) v += avg * 0.35f + noise * 0.5f;
             if (v < bv) { bv = v; best = s; }
         }
         return best;
@@ -1031,7 +1068,6 @@ static class WarEngine
     static void CommandAttacker(Force me, Force foe, Field field, float depth, int tick,
         BattleLog log, ref XorRng rng)
     {
-        me.Cmd.LastDecisionTick = tick;
         switch (me.Cmd.Doctrine)
         {
             case 11: BrainSchwerpunkt(me, foe, field, depth, tick, log, ref rng); break;
@@ -1082,9 +1118,8 @@ static class WarEngine
 
             g.Posture = depth > 2f ? P_ASSAULT : P_ADVANCE;
             float spread = 3.5f + (1f - c.Aggression) * 4f;
-            g.TgtX = Math.Clamp(mainX + rng.Range(-spread, spread), 1f, FRONT_KM - 1);
+            g.TgtX = Math.Clamp(mainX + g.Lane * spread, 1f, FRONT_KM - 1);
             g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6.5f : 4.5f));
-            g.Committed = true;
         }
     }
 
@@ -1147,23 +1182,22 @@ static class WarEngine
                 if (prober)
                 {
                     g.Posture = P_PATROL;
-                    g.TgtX = Math.Clamp(SectorX(i % SECTORS) + rng.Range(-2f, 2f), 1f, FRONT_KM - 1);
+                    g.TgtX = Math.Clamp(SectorX(i % SECTORS) + g.Lane * 2f, 1f, FRONT_KM - 1);
                     g.TgtY = Math.Min(6f, g.Y + 3f);
                 }
                 else
                 {
                     g.Posture = P_HOLD;
-                    g.TgtX = Math.Clamp(g.X + rng.Range(-1f, 1f), 1f, FRONT_KM - 1);
+                    g.TgtX = g.X;
                 }
             }
             else
             {
                 g.Posture = depth > 2f ? P_ASSAULT : P_ADVANCE;
                 float spread = prober ? 9f : 4.5f;
-                g.TgtX = Math.Clamp(mainX + rng.Range(-spread, spread), 1f, FRONT_KM - 1);
+                g.TgtX = Math.Clamp(mainX + g.Lane * spread, 1f, FRONT_KM - 1);
                 g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6f : 4.2f));
-                g.Committed = true;
-            }
+                }
         }
     }
 
@@ -1205,7 +1239,7 @@ static class WarEngine
             if (pinning && !c.DeepReserveIn)
             {
                 g.Posture = P_SCREEN;
-                g.TgtX = Math.Clamp(centerX + rng.Range(-5f, 5f), 1f, FRONT_KM - 1);
+                g.TgtX = Math.Clamp(centerX + g.Lane * 5f, 1f, FRONT_KM - 1);
                 g.TgtY = Math.Min(depth + 1.5f, g.Y + 1.5f);
                 continue;
             }
@@ -1214,9 +1248,8 @@ static class WarEngine
             float armX = leftArm ? leftX : rightX;
             if (c.RingClosed) armX = centerX + (leftArm ? -3f : 3f);
             g.Posture = c.RingClosed ? P_ASSAULT : P_FLANK;
-            g.TgtX = Math.Clamp(armX + rng.Range(-3f, 3f), 1f, FRONT_KM - 1);
+            g.TgtX = Math.Clamp(armX + g.Lane * 3f, 1f, FRONT_KM - 1);
             g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 5.5f : 3.8f));
-            g.Committed = c.RingClosed;
         }
     }
 
@@ -1265,9 +1298,8 @@ static class WarEngine
             float tx = holdOld ? prevX : mainX;
             g.Posture = depth > 3f ? P_ASSAULT : P_FLANK;
             float wobble = MathF.Sin((tick + i * 7) * 0.05f) * 3.5f;
-            g.TgtX = Math.Clamp(tx + wobble + rng.Range(-2.5f, 2.5f), 1f, FRONT_KM - 1);
+            g.TgtX = Math.Clamp(tx + wobble + g.Lane * 2.5f, 1f, FRONT_KM - 1);
             g.TgtY = MathF.Min(WIN_DEPTH + 1f, g.Y + (g.Type == 1 ? 6.2f : 4.2f));
-            g.Committed = true;
         }
     }
 
@@ -1275,7 +1307,6 @@ static class WarEngine
     static void CommandDefender(Force me, Force foe, Field field, float depth, int tick,
         BattleLog log, ref XorRng rng)
     {
-        me.Cmd.LastDecisionTick = tick;
         switch (me.Cmd.Doctrine)
         {
             case 11: BrainStaticLine(me, foe, field, depth, tick, log, ref rng); break;
@@ -1317,7 +1348,7 @@ static class WarEngine
             if (g.Role != 0 && hv > 0)
             {
                 // ذخیره‌ی رسیده به سمت نقطه‌ی داغ پاتک می‌زند
-                g.TgtX = Math.Clamp(hotX + rng.Range(-3f, 3f), 1f, FRONT_KM - 1);
+                g.TgtX = Math.Clamp(hotX + g.Lane * 3f, 1f, FRONT_KM - 1);
                 g.TgtY = Math.Max(0.8f, depth - 0.8f);
                 g.Posture = P_ADVANCE;
             }
@@ -1356,16 +1387,18 @@ static class WarEngine
 
             if (c.Phase == 0)
             {
+                //  گشت: مسیر رفت‌وبرگشتی آرام حول جای اولیه، نه پرش تصادفی
                 g.Posture = P_PATROL;
-                g.TgtX = Math.Clamp(g.X + rng.Range(-6f, 6f), 1f, FRONT_KM - 1);
-                g.TgtY = Math.Clamp(g.Y + rng.Range(-1f, 1.5f), 0.8f, 8f);
+                float beat = MathF.Sin((tick + i * 11) * 0.04f);
+                g.TgtX = Math.Clamp(g.X + beat * 6f, 1f, FRONT_KM - 1);
+                g.TgtY = Math.Clamp(g.Y + g.Lane * 1.2f, 0.8f, 8f);
             }
             else
             {
                 bool screen = i % 3 == 0;
                 g.Posture = screen ? P_SCREEN : P_ADVANCE;
-                g.TgtX = Math.Clamp(hotX + rng.Range(-5f, 5f), 1f, FRONT_KM - 1);
-                g.TgtY = Math.Clamp(depth + rng.Range(-0.5f, 1.5f), 1f, 9f);
+                g.TgtX = Math.Clamp(hotX + g.Lane * 5f, 1f, FRONT_KM - 1);
+                g.TgtY = Math.Clamp(depth + 0.5f + g.Lane * 1f, 1f, 9f);
             }
         }
     }
@@ -1405,7 +1438,7 @@ static class WarEngine
             if (c.Committed)
             {
                 g.Posture = P_ASSAULT;
-                g.TgtX = Math.Clamp(hotX + rng.Range(-4f, 4f), 1f, FRONT_KM - 1);
+                g.TgtX = Math.Clamp(hotX + g.Lane * 4f, 1f, FRONT_KM - 1);
                 g.TgtY = Math.Max(1f, depth - 0.5f);
             }
             else g.Posture = P_DEFEND;
@@ -1452,7 +1485,7 @@ static class WarEngine
             {
                 g.Posture = P_ASSAULT;
                 bool leftJaw = (i & 1) == 0;
-                g.TgtX = Math.Clamp(hotX + (leftJaw ? -4f : 4f) + rng.Range(-2f, 2f), 1f, FRONT_KM - 1);
+                g.TgtX = Math.Clamp(hotX + (leftJaw ? -4f : 4f) + g.Lane * 2f, 1f, FRONT_KM - 1);
                 g.TgtY = Math.Max(1f, depth - 2f);
             }
         }
@@ -1476,6 +1509,21 @@ static class WarEngine
         bool crisis, BattleLog log)
     {
         ref CommanderState c = ref me.Cmd;
+
+        //  یگان ذخیره‌ای که مدت راهش تمام شده، رسیده — حتی اگر همان تیک به دلیل
+        //  روحیه یا مهمات در حالت بازسازی باشد و از HoldingInReserve رد نشود.
+        //  بدون این، یک گروه می‌تواند تا آخر نبرد Deployed نشود و هرگز در
+        //  محاسبه‌ی عمق مؤثر شمرده نشود، حتی وقتی سرِ جای خودش ایستاده.
+        for (int i = 0; i < me.N; i++)
+        {
+            ref Group g = ref me.G[i];
+            if (g.Deployed || g.Role == 0) continue;
+            bool released = g.Role == 1 ? c.ReserveIn : c.DeepReserveIn;
+            if (!released) continue;
+            int rt = g.Role == 1 ? c.TacReserveTick : c.OpReserveTick;
+            int march = g.Role == 1 ? TAC_RESERVE_MARCH : OP_RESERVE_MARCH;
+            if (tick - rt >= march) g.Deployed = true;
+        }
 
         // ── لایه‌ی یک: ذخیره‌ی تاکتیکی ──
         if (!c.ReserveIn)
@@ -2542,7 +2590,6 @@ static class WarEngine
         int tick = 0, routsA = 0, routsD = 0;
         bool contact = false, ambushFired = false;
         Force? fa = null, fd = null;
-        float stratAdv = 1f;
 
         if (!anyGround)
         {
@@ -2566,7 +2613,6 @@ static class WarEngine
         {
             fa = BuildForce(attacker.Faction, true, aTankList, aSold, aStrat, aTac, field, ref rng);
             fd = BuildForce(defender.Faction, false, dTankList, dSold, dStrat, dTac, field, ref rng);
-            fd.Cmd = InitCommander(false, dStrat, dTac, ref rng);
 
             for (int i = 0; i < MAX_GROUPS; i++)
             {
@@ -2574,7 +2620,7 @@ static class WarEngine
                 fd.IntelOnFoe[i] = default; fd.IntelOnFoe[i].Stale = 9999f;
             }
 
-            stratAdv = DoctrineMatchup(fa, fd, field, ref rng, log);
+            AnnounceField(field, log);
 
             float aPow0 = SidePower(fa), dPow0 = SidePower(fd);
             float casA = air.CasAtk, casD = air.CasDef;
@@ -2602,6 +2648,18 @@ static class WarEngine
                 }
 
                 byte tnow = field.TimeAt(tick);
+                //  گذر از یک فاز روز به فاز بعد — حالا که چرخه یک بار اتفاق
+                //  می‌افتد، هر گذر یک رویداد واقعی نبرد است و باید ثبت شود.
+                if (tick > 0 && tnow != field.TimeAt(tick - 1))
+                {
+                    log.Add(tick, 2, LG_ENV, tnow switch
+                    {
+                        TM_DAWN  => "سپیده زد و دید میدان کم‌کم باز شد.",
+                        TM_DAY   => "روز کاملاً روشن شد؛ دید و آتش دقیق به بیشترین حد رسید.",
+                        TM_DUSK  => "آفتاب پایین آمد و سایه‌ها میدان را پوشاند.",
+                        _        => "شب فرا رسید؛ دید به حداقل رسید و درگیری‌ها پراکنده شد.",
+                    });
+                }
                 float visEnv = WxVision[field.Weather] * TimeVision[tnow];
                 float accEnv = WxAcc[field.Weather];
 
@@ -2631,7 +2689,7 @@ static class WarEngine
                 }
 
                 float surprise = tick < surpriseTicks ? 1.12f : 1f;
-                float aMul = casA * stratAdv * supplyA * surprise;
+                float aMul = casA * supplyA * surprise;
                 float dMul = casD * (tick < surpriseTicks ? 0.90f : 1f);
 
                 FireSide(fa, fd, field, true, aMul, accEnv, tick, log, ref rng, ref contact, ref ambushFired);
@@ -2777,7 +2835,7 @@ static class WarEngine
             aStrat, aTac, dStrat, dTac, aAirStrat, aAirTac, dAirStrat, dAirTac,
             aTankList, dTankList, aFighterList, dFighterList, aBomberList,
             aTanks, aSold, dTanks, dSold, aFight, aBomb, dFight, dAA,
-            frac, effDepth, stratAdv, anyGround, defHasGround, aRecover, dRecover, routsA, routsD);
+            frac, effDepth, anyGround, defHasGround, aRecover, dRecover, routsA, routsD);
 
         SaveBattle(attacker, defender, res);
         return res;
@@ -2836,95 +2894,29 @@ static class WarEngine
         f.SoldiersLost = soldLoss;
     }
 
-    // ═══════════ برخورد دکترین‌ها: چه کسی به چه کسی می‌خورد ═════════════════
-    static float DoctrineMatchup(Force fa, Force fd, Field field, ref XorRng rng, BattleLog log)
+    // ═══════════ میدان نبرد: هیچ ضریب انتزاعی روی دکترین وجود ندارد ═════════
+    //  در نسخه‌های قبل یک جدول «سنگ-کاغذ-قیچی» بود که به هر جفت دکترین یک عدد
+    //  می‌داد و آن عدد مستقیم در تلفات ضرب می‌شد. آن جدول حذف شد.
+    //
+    //  دلیل: انتخاب استراتژی و تاکتیک باید از راه *رفتار* اثر بگذارد، نه از راه
+    //  یک ضریب سرجمع. کمین وقتی جواب می‌دهد که واقعاً پنهان مانده باشد و ضریب
+    //  ۲.۶ برابرِ شلیک اول را بگیرد؛ محاصره وقتی جواب می‌دهد که بازوها واقعاً
+    //  به عمق برسند و حلقه ببندد؛ اکتشاف وقتی جواب می‌دهد که IntelQuality واقعاً
+    //  بالا برود و ضعیف‌ترین سکتور درست پیدا شود. اگر یکی از اینها اتفاق نیفتد،
+    //  دکترین هم نباید پاداشی بگیرد — و اگر اتفاق بیفتد، خودِ شبیه‌سازی
+    //  پاداشش را می‌دهد. یک ضریب اضافه فقط همان اثر واقعی را کمرنگ می‌کرد.
+    //
+    //  زمین هم همین‌طور: اثر گذرگاه و مرداب و شهر از قبل در سرعت، پوشش، دید و
+    //  دقتِ خانه‌به‌خانه‌ی نقشه هست. ضرب دوباره‌ی آن در یک عدد کلی، حساب مضاعف بود.
+    //
+    //  این تابع فقط میدان را برای گزارش ثبت می‌کند و هیچ عددی به نبرد نمی‌دهد.
+    static void AnnounceField(Field field, BattleLog log)
     {
-        int a = fa.Cmd.Doctrine, d = fd.Cmd.Doctrine;
-        float adv = 1.0f;
-        string? note = null;
-
-        switch (a)
-        {
-            case 11: // هجوم متمرکز
-                if (d == 11) { adv = 1.10f; note = "توده‌ی متمرکز مهاجم دقیقاً به سنگین‌ترین بخش خط ثابت خورد؛ نبردی رودررو و پرتلفات."; }
-                else if (d == 12) { adv = 1.16f; note = "گشت‌های پراکنده‌ی مدافع در برابر یک مشت متمرکز، فرصت جمع‌شدن پیدا نکردند."; }
-                else if (d == 21) { adv = 0.86f; note = "ستون متمرکز مهاجم، هدف ایده‌آل کمین‌های زرهی مدافع شد."; }
-                else { adv = 1.04f; note = "مهاجم متمرکز سریع جلو رفت و بی‌آنکه بداند، عمقِ تله‌ی مدافع را پر کرد."; }
-                break;
-            case 12: // اکتشاف و یورش
-                if (d == 11) { adv = 1.18f; note = "اکتشاف مهاجم درز خط ثابت را پیدا کرد و یورش دقیقاً روی همان نقطه نشست."; }
-                else if (d == 12) { adv = 1.02f; note = "دو طرف مدام همدیگر را می‌جستند؛ نبرد به بازی شناسایی تبدیل شد."; }
-                else if (d == 21) { adv = 1.08f; note = "گروه‌های سبک اکتشافی، چند کمین را زودتر از موعد فعال کردند و ضربه‌ی اصلی سالم ماند."; }
-                else { adv = 0.94f; note = "دهانه‌ی باز مدافع، به‌ظاهر همان نقطه‌ضعفی بود که شناسایی مهاجم می‌جست."; }
-                break;
-            case 21: // محاصره‌ی گسترده
-                if (d == 11) { adv = 1.20f; note = "خط ثابت مدافع نمی‌توانست جناح‌ها را بپوشاند و دو بازوی مهاجم آزادانه باز شدند."; }
-                else if (d == 12) { adv = 0.96f; note = "گشت‌های متحرک مدافع مدام جلوی بسته‌شدن حلقه را می‌گرفتند."; }
-                else if (d == 21) { adv = 1.06f; note = "بازوهای پهن مهاجم از کنار بیشتر کمین‌ها رد شدند."; }
-                else { adv = 0.90f; note = "عقب‌نشینی حساب‌شده‌ی مدافع، حلقه‌ای که مهاجم می‌بست را مدام خالی می‌کرد."; }
-                break;
-            default: // حلقه‌ی متحرک
-                if (d == 11) { adv = 1.14f; note = "چرخش پیاپی محور، ذخیره‌ی خط ثابت را بین سکتورها دواند و فرسود."; }
-                else if (d == 12) { adv = 1.08f; note = "سرعت چرخش مهاجم از سرعت جابه‌جایی گشت‌های مدافع بیشتر بود."; }
-                else if (d == 21) { adv = 0.92f; note = "ستون‌های پرتحرک مهاجم بارها از دهانه‌ی کمین‌ها گذشتند و ضربه خوردند."; }
-                else { adv = 1.02f; note = "دو فرمانده هر دو دنبال کشیدن دیگری به جیب بودند؛ نبرد سیال شد."; }
-                break;
-        }
-
-        //  – ۳۱: تیپ نقشه، سرنوشت دکترین را عوض می‌کند
-        switch (field.MapType)
-        {
-            case MAP_PASS:      // گذرگاه: مانور بی‌معنا، هجوم مستقیم تنها راه
-                if (a == 21 || a == 22) adv *= 0.78f;
-                else adv *= 1.04f;
-                break;
-            case MAP_RIVER:     // رودخانه: عبور سخت، مدافع گدارها را می‌بندد
-                adv *= 0.88f;
-                if (a == 12) adv *= 1.08f;   // اکتشاف گدار پیدا می‌کند
-                break;
-            case MAP_STEPPE:    // استپ: جناح‌ها باز، بهشت محاصره
-                if (a == 21 || a == 22) adv *= 1.14f;
-                break;
-            case MAP_PLAINS:
-                if (a == 21 || a == 22) adv *= 1.06f;
-                break;
-            case MAP_INDUSTRIAL: // شهر: زره کور، هجوم پرهزینه
-                adv *= 0.86f;
-                break;
-            case MAP_FOREST:
-                adv *= 0.92f;
-                if (d == 21) adv *= 0.92f;   // کمین در جنگل مرگبارتر
-                break;
-            case MAP_MARSH:
-                adv *= 0.88f;
-                break;
-        }
         log.Add(0, 2, LG_ENV, $"میدان نبرد: {MapName[field.MapType]} — {MapNote[field.MapType]}.");
-
-        // زمین: هر دکترین در زمین متفاوتی جواب می‌دهد
         byte terr = field.DominantTerrainNear(FRONT_KM / 2f);
-        if (a == 21 || a == 22) // مانوری
-        {
-            if (terr is T_FOREST or T_URBAN or T_MARSH) adv *= 0.90f;
-            else if (terr == T_PLAIN) adv *= 1.06f;
-        }
-        else // هجومی
-        {
-            if (terr is T_URBAN or T_RIDGE) adv *= 0.92f;
-            else if (terr == T_PLAIN) adv *= 1.03f;
-        }
-
-        // نسبت زره: محاصره بدون زره کافی معنا ندارد
-        long aArmor = fa.ModelSent.Sum(), dArmor = fd.ModelSent.Sum();
-        if ((a == 21 || a == 22) && aArmor < dArmor) adv *= 0.94f;
-        if (a == 11 && aArmor > dArmor * 2) adv *= 1.05f;
-
-        adv *= rng.Range(0.97f, 1.03f);
-        adv = Math.Clamp(adv, 0.80f, 1.30f);
-
-        if (note != null) log.Add(0, 2, LG_PLAN, note);
-        return adv;
+        log.Add(0, 2, LG_ENV, $"زمین غالب محور میانی: {TerName[terr]}.");
     }
+
 
     // ======================================================================
     //  بخش ۴ — ساخت گزارش‌های نبرد (گروه / مهاجم / مدافع)
@@ -3104,7 +3096,7 @@ static class WarEngine
         List<(string Model, long Count)> aBomberList,
         long aTanks, long aSold, long dTanks, long dSold,
         long aFight, long aBomb, long dFight, long dAA,
-        float frac, float depth, float stratAdv,
+        float frac, float depth,
         bool anyGround, bool defHasGround, float aRecover, float dRecover,
         int routsA, int routsD)
     {
@@ -3132,9 +3124,6 @@ static class WarEngine
         byte terr = field.DominantTerrainNear(FRONT_KM / 2f);
         string env = $"🗺 {MapName[field.MapType]} | 🌦 {WeatherName[field.Weather]} | 🕓 {TimeName[field.StartTime]} | 🏞 {TerName[terr]}";
 
-        string advText = stratAdv > 1.12f ? $"استراتژی مهاجم پادزهر انتخاب مدافع بود (مزیت {stratAdv:F2}×)"
-                       : stratAdv < 0.92f ? $"انتخاب مدافع دقیقاً نقطه‌ضعف طرح مهاجم را گرفت (مزیت {stratAdv:F2}× به ضرر مهاجم)"
-                       : $"دو طرح تقریباً هم‌وزن بودند ({stratAdv:F2}×)";
 
         string? armorMatch = ArmorMatchupLines(fa, fd);
         string? aModels = ModelLossLines(fa);
@@ -3168,7 +3157,7 @@ static class WarEngine
         sb.Append("\n<b>🎯 طرح عملیات</b>\n");
         sb.Append($"• طرح شما: {Esc(aDoc)}\n");
         sb.Append($"• طرح دشمن: {Esc(dDoc)}\n");
-        if (anyGround && defHasGround) sb.Append($"• {Esc(advText)}\n");
+        if (anyGround && defHasGround) sb.Append($"• زمین عملیات: {Esc(MapNote[field.MapType])}\n");
         if (aFight > 0 || aBomb > 0) sb.Append($"• هوایی: {Esc(aAirName)} / {Esc(aAirTacName)}\n");
 
         if (ShowFrontMap && anyGround && defHasGround)
