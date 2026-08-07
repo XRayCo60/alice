@@ -82,7 +82,13 @@ static class WarEngine
     const int   GRID_W = 80, GRID_H = 68;
     const float CELL = 0.5f;
     const float TICK_MIN = 6f;
-    const int   MAX_TICKS = 240;
+    //  سقف زمان نبرد: ۴۸۰ تیک × ۶ دقیقه = ۴۸ ساعت.
+    //   یک عملیات تعرضی بزرگ در ۱۹۳۹ چند شبانه‌روز طول می‌کشید، نه یک روز.
+    //   چرخه‌ی شبانه‌روز ۲۴۰ تیک است، پس نبردِ کامل دو شبانه‌روز را می‌بیند.
+    const int   MAX_TICKS = 480;
+    const int   WX_SHIFTS = 3;          // ۳۲: چند بار هوا در طول نبرد عوض می‌شود
+    const int   RESUPPLY_TICKS = 10;    // هر ۱۰ تیک (یک ساعت) یک قافله‌ی مهمات
+    const float RESUPPLY_FRAC = 0.055f; // کسری از بار کامل در هر قافله
     const int   MAX_GROUPS = 224;
     const int   INF_GROUP = 100;
     const int   TANK_GROUP = 10;
@@ -549,7 +555,9 @@ static class WarEngine
         public readonly List<(int Tick, byte Side, byte Kind, string Text)> Items = new();
         public void Add(int tick, byte side, byte kind, string text)
         {
-            if (Items.Count >= 80) return;
+            //  نبرد ۴۸ ساعته رویداد بیشتری تولید می‌کند؛ سقف بالاتر رفت تا
+            //  دفتر وقایع وسط نبرد پر نشود و ساعات پایانی ثبت نشده نماند.
+            if (Items.Count >= 160) return;
             Items.Add((tick, side, kind, text));
         }
         public IEnumerable<(int Tick, byte Side, byte Kind, string Text)> For(byte side)
@@ -572,8 +580,8 @@ static class WarEngine
         public byte Weather;
         public byte StartTime;
         public byte MapType;            // ۳۱: تیپ نقشه
-        public int  WeatherShiftTick;   // ۳۲: تیک تغییر آب‌وهوا
-        public byte WeatherNext;        // ۳۲: آب‌وهوای بعدی
+        public int[]  WeatherShiftTick = new int[WX_SHIFTS];   // ۳۲: تیک‌های تغییر آب‌وهوا
+        public byte[] WeatherAt = new byte[WX_SHIFTS];         // ۳۲: هوای بعد از هر تغییر
         public float CloudBaseM;        // ۵۸: کف لایه‌ی ابر
 
         // ── چرخه‌ی شبانه‌روز: دقیقاً یک بار در طول نبرد ──
@@ -763,11 +771,17 @@ static class WarEngine
         f.StartTime = (byte)rng.Next(4);
 
         // ── ۳۲: آب‌وهوا در طول نبرد عوض می‌شود ──
-        //  یک زمان تغییر و یک وضعیت بعدی از قبل قرعه می‌خورد.
-        f.WeatherShiftTick = 40 + rng.Next(120);
-        float r2 = rng.NextF();
-        byte next = r2 < 0.40f ? W_CLEAR : r2 < 0.62f ? W_CLOUD : r2 < 0.82f ? W_RAIN : r2 < 0.93f ? W_FOG : W_SNOW;
-        f.WeatherNext = next;
+        //  نبرد ۴۸ ساعته یک بار تغییر هوا نمی‌بیند؛ سه بار قرعه می‌خورد،
+        //  با فاصله‌ی معنادار از هم. هر تغییر یک رویداد مستقل نبرد است.
+        for (int i = 0; i < WX_SHIFTS; i++)
+        {
+            //  هر تغییر در یک سوم از طول نبرد، با جای تصادفی داخل همان بازه
+            int slot = MAX_TICKS / WX_SHIFTS;
+            f.WeatherShiftTick[i] = i * slot + 30 + rng.Next(Math.Max(1, slot - 50));
+            float r2 = rng.NextF();
+            f.WeatherAt[i] = r2 < 0.40f ? W_CLEAR : r2 < 0.62f ? W_CLOUD
+                           : r2 < 0.82f ? W_RAIN : r2 < 0.93f ? W_FOG : W_SNOW;
+        }
 
         // ── ۵۸: لایه‌ی ابر ──
         //  بالای لایه آفتابی است، زیرش کور. بمب‌افکن بالای ابر امن ولی نابیناست.
@@ -1105,7 +1119,7 @@ static class WarEngine
         if (depth > c.PeakDepth) { c.PeakDepth = depth; c.PhaseStart = tick; }
 
         //  – ۳۶: ذخیره‌ی دولایه. بحران = پیشروی قفل شده و تلفات بالا رفته.
-        bool crisis11 = stalled && tick > 60;
+        bool crisis11 = stalled && tick > 120;
         ReleaseReserves(me, depth, tick, true, crisis11, log);
 
         float mainX = SectorX(c.MainSector);
@@ -1222,7 +1236,7 @@ static class WarEngine
         }
         //  – ۳۶: حلقه که بست، ذخیره برای خرد کردن جیب آزاد می‌شود
         ReleaseReserves(me, c.RingClosed ? Math.Max(depth, 13f) : depth, tick, true,
-                        tick > 150 && !c.RingClosed, log);
+                        tick > 300 && !c.RingClosed, log);
 
         float leftX = SectorX(c.MainSector), rightX = SectorX(c.SecondSector);
         float centerX = SectorX(c.FeintSector < 0 ? SECTORS / 2 : c.FeintSector);
@@ -1458,7 +1472,7 @@ static class WarEngine
             log.Add(tick, 1, LG_PLAN, $"مدافع بخشی از خط را عمداً باز گذاشت تا مهاجم را تا عمق حدود {trapDepth:F0} کیلومتری بکشاند.");
             c.Phase = 1;
         }
-        if (c.Phase == 1 && (depth > trapDepth || tick > 140))
+        if (c.Phase == 1 && (depth > trapDepth || tick > 280))
         {
             c.Phase = 2; c.PhaseStart = tick; c.Committed = true;
             log.Add(tick, 1, LG_DECISION, depth > trapDepth
@@ -1530,7 +1544,7 @@ static class WarEngine
         {
             //  جسارت بالا → زودتر. صبر بالا → دیرتر.
             float trigger = attacker ? 6f - c.Aggression * 3f : 4f;
-            int lateLimit = (int)(40 + c.Patience * 40);
+            int lateLimit = (int)(80 + c.Patience * 80);
             if (depth > trigger || tick > lateLimit || crisis)
             {
                 c.ReserveIn = true; c.TacReserveTick = tick;
@@ -1931,6 +1945,41 @@ static class WarEngine
         {
             t.Alive = false;
             shooter.IntelOnFoe[idx].Level = 0f;
+        }
+    }
+
+    // ═══════════════ بازرسانی مهمات از عقبه ══════════════════════════════════
+    //  یک نبرد چندروزه بدون قافله‌ی مهمات معنا ندارد. هیچ ارتشی با همان باری که
+    //  صبح روز اول در بارگیر داشت، دو شبانه‌روز نمی‌جنگد.
+    //
+    //  ولی بازرسانی مجانی هم نیست:
+    //   • فقط یگانی که آن لحظه درگیر نیست (نه یورش، نه فرار) بار می‌گیرد —
+    //     کامیون مهمات زیر آتش مستقیم تخلیه نمی‌کند.
+    //   • مهاجم هرچه عمیق‌تر برود، کمتر می‌رسد: همان SupplyFactor خط تدارکات.
+    //   • مدافع روی خاک خودش است و انبارش نزدیک؛ ثابت و مطمئن‌تر بار می‌گیرد.
+    //   • سقفِ بار همان ظرفیت واقعی همان مدل است؛ T-28 باز هم ۶۹ گلوله جا دارد.
+    static void ResupplySide(Force f, float supply, int tick)
+    {
+        //  هر ۱۰ تیک (یک ساعت) یک قافله می‌رسد
+        if (tick == 0 || tick % RESUPPLY_TICKS != 0) return;
+
+        //  کسری از بار کامل که در هر قافله می‌رسد
+        float rate = f.IsAttacker
+            ? RESUPPLY_FRAC * Math.Clamp(supply, 0f, 1f)      // وابسته به کشش خط
+            : RESUPPLY_FRAC * 1.15f;                          // مدافع روی خاک خودش
+
+        for (int i = 0; i < f.N; i++)
+        {
+            ref Group g = ref f.G[i];
+            if (!g.Alive) continue;
+            //  زیر آتش یا در حال یورش، قافله به یگان نمی‌رسد
+            if (g.Posture is P_ASSAULT or P_RETREAT) continue;
+            if (g.Supp > 0.35f) continue;
+
+            //  یگانی که عقب کشیده و خودش را جمع می‌کند، کامل‌تر بار می‌گیرد
+            float mul = g.Posture is P_REGROUP or P_HOLD ? 1.8f : 1f;
+            g.CAmmo = MathF.Min(g.CAmmo0, g.CAmmo + g.CAmmo0 * rate * mul);
+            g.MAmmo = MathF.Min(g.MAmmo0, g.MAmmo + g.MAmmo0 * rate * mul);
         }
     }
 
@@ -2638,11 +2687,12 @@ static class WarEngine
 
             for (tick = 0; tick < MAX_TICKS; tick++)
             {
-                //  – ۳۲: آب‌وهوا وسط نبرد عوض می‌شود
-                if (tick == field.WeatherShiftTick && field.WeatherNext != field.Weather)
+                //  – ۳۲: آب‌وهوا چند بار در طول نبرد عوض می‌شود
+                for (int w = 0; w < WX_SHIFTS; w++)
                 {
+                    if (tick != field.WeatherShiftTick[w] || field.WeatherAt[w] == field.Weather) continue;
                     byte old = field.Weather;
-                    field.Weather = field.WeatherNext;
+                    field.Weather = field.WeatherAt[w];
                     log.Add(tick, 2, LG_ENV,
                         $"هوا از {WeatherName[old]} به {WeatherName[field.Weather]} تغییر کرد و شرایط میدان عوض شد.");
                 }
@@ -2694,6 +2744,11 @@ static class WarEngine
 
                 FireSide(fa, fd, field, true, aMul, accEnv, tick, log, ref rng, ref contact, ref ambushFired);
                 FireSide(fd, fa, field, false, dMul, accEnv, tick, log, ref rng, ref contact, ref ambushFired);
+
+                //  قافله‌ی مهمات: بدون این، هر نبرد چندروزه با خشک شدن انبار
+                //  تمام می‌شود نه با تصمیم فرمانده.
+                ResupplySide(fa, supplyA, tick);
+                ResupplySide(fd, 1f, tick);
 
                 int rA = 0, rD = 0;
                 MoraleSide(fa, field, tick, log, ref rng, ref rA);
@@ -2763,7 +2818,7 @@ static class WarEngine
                     }
                 }
 
-                if (haltTicks > 85 && contact)
+                if (haltTicks > 170 && contact)
                 {
                     log.Add(tick, 2, LG_CRISIS, $"پیشروی در عمق {effDepth:F1} کیلومتری زمین‌گیر شد و جبهه به بن‌بست رسید.");
                     tick++; break;
@@ -3062,10 +3117,42 @@ static class WarEngine
     }
 
     // ─────────── خط زمانی نبرد ───────────
-    static string? Timeline(BattleLog log, byte side, int max = 14)
+    static string? Timeline(BattleLog log, byte side, int max = 16)
     {
-        var items = log.For(side).OrderBy(x => x.Tick).Take(max).ToList();
-        if (items.Count == 0) return null;
+        var all = log.For(side).OrderBy(x => x.Tick).ToList();
+        if (all.Count == 0) return null;
+
+        //  نبرد تا ۴۸ ساعت طول می‌کشد. اگر فقط ۱۶ رویداد اولِ فهرست را بگیریم،
+        //  گزارش در ساعت ششم تمام می‌شود و بازیکن هرگز پایان نبرد را نمی‌بیند.
+        //  پس رویدادهای مهم (رخنه، بحران، طرح) حفظ می‌شوند و از بقیه نمونه
+        //  برداشته می‌شود تا خط زمانی کل نبرد را پوشش بدهد.
+        List<(int Tick, byte Side, byte Kind, string Text)> items;
+        if (all.Count <= max) items = all;
+        else
+        {
+            bool IsKey(byte k) => k is LG_PLAN or LG_BREAK or LG_CRISIS;
+            var keys = all.Where(x => IsKey(x.Kind)).ToList();
+            if (keys.Count >= max)
+            {
+                //  حتی رویدادهای مهم هم زیادند: از سرتاسر نبرد نمونه بگیر
+                items = new();
+                for (int i = 0; i < max; i++) items.Add(keys[i * (keys.Count - 1) / (max - 1)]);
+            }
+            else
+            {
+                //  جای خالی را با رویدادهای عادی، پخش‌شده در طول نبرد، پر کن
+                var rest = all.Where(x => !IsKey(x.Kind)).ToList();
+                int slots = max - keys.Count;
+                var picked = new List<(int, byte, byte, string)>(keys);
+                if (slots > 0 && rest.Count > 0)
+                {
+                    if (rest.Count <= slots) picked.AddRange(rest);
+                    else for (int i = 0; i < slots; i++)
+                        picked.Add(rest[i * (rest.Count - 1) / Math.Max(1, slots - 1)]);
+                }
+                items = picked.OrderBy(x => x.Item1).ToList();
+            }
+        }
         var sb = new StringBuilder();
         foreach (var it in items)
         {
