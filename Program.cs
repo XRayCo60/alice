@@ -3661,7 +3661,30 @@ partial class Program
                 Database.SetGroupLockExemption(chat.Id, true);
                 Database.ClearAllLeaveCooldownsInChat(chat.Id);
                 Database.SetAllShieldExemptionsInChat(chat.Id);
-                await SendTemp(chat.Id, "✅ **معافیت کامل و سراسری برای این گروه ثبت شد!**\n\nتغییرات اعمال‌شده:\n۱. 🔓 **حذف قفل ۳۰ دقیقه‌ای**: حمله بلافاصله پس از آپدیت دارایی‌ها آزاد است.\n۲. 🛡 **حذف تمام سپرها**: سپر ۴۸ ساعتهٔ تمام کشورهای فعلی این گپ برداشته شد.\n۳. ⏳ **حذف تایمر انصراف**: تمام محدودیت‌های ۲۴ ساعتهٔ ساخت مجدد کشور برای بازیکنان این گروه پاک شد.\n۴. ⚡ **حذف تایمر ترنسفر**: زمان انتظار ارسال محموله‌ها صفر شد و محموله‌های جاری فوری تحویل داده شدند.", replyTo: msg.MessageId, ct: ct);
+                await SendTemp(chat.Id,
+                    "✅ **معافیت کامل و سراسری برای این گروه ثبت شد!**\n\n" +
+                    "🔓 **قفل‌های زمانی**\n" +
+                    "• قفل ۳۰ دقیقه‌ای ابتدای آپدیت\n" +
+                    "• تایمر ۲۴ ساعتهٔ ساخت مجدد کشور\n" +
+                    "• تایمر ترنسفر (محموله‌های جاری فوری تحویل شدند)\n" +
+                    "• تایمر ۳ تا ۵ ساعتهٔ حرکت ناوگان ← ۶۰ ثانیه\n\n" +
+                    "🛡 **سپرها**\n" +
+                    "• سپر ۴۸ ساعتهٔ کشورهای تازه‌ساخت\n" +
+                    "• سپر ۱۶ ساعته پس از ۵ حمله\n\n" +
+                    "⚔️ **محدودیت‌های حمله**\n" +
+                    "• حمله به کشور با کمتر از یک‌چهارم قدرت شما\n" +
+                    "• حمله با نبردناو به نیروی دریایی کمتر از سه‌چهارم\n" +
+                    "• سقف تعداد حمله در هر آپدیت\n" +
+                    "• حملهٔ تکراری به یک هدف در ۲۴ ساعت\n\n" +
+                    "🤝 **محدودیت‌های اتحاد**\n" +
+                    "• ممنوعیت هم‌اتحادی رتبه ۱ و ۲\n" +
+                    "• سقف ابرقدرت (۴۰٪ و ۴۵٪ مان‌پاور)\n" +
+                    "• سقف تعداد اعضای هر اتحاد\n" +
+                    "• سقف تعداد اتحادهای گروه\n\n" +
+                    "📦 **سهمیه‌ها**\n" +
+                    "• سقف ترنسفر در هر آپدیت\n" +
+                    "• سقف روزانهٔ صف‌آرایی اتحاد",
+                    replyTo: msg.MessageId, ct: ct);
             }
             else
             {
@@ -3870,7 +3893,9 @@ partial class Program
                 return;
             }
             int totalPlayers = Database.GetCountriesByChatId(chat.Id).Count;
-            int maxAlliances = Math.Max(1, totalPlayers / 2);
+            //  معافیت کامل گروه سقف تعداد اتحادها را هم برمی‌دارد
+            int maxAlliances = Database.HasGroupLockExemption(chat.Id)
+                ? int.MaxValue : Math.Max(1, totalPlayers / 2);
             var alliancesInChat = Database.GetAlliancesByChatId(chat.Id);
             if (alliancesInChat.Count >= maxAlliances)
             {
@@ -3909,7 +3934,9 @@ partial class Program
             if (tgtCountry == null) { await SendTemp(chat.Id, "❌ بازیکن مورد نظر در این گپ کشوری ندارد.", replyTo: msg.MessageId, ct: ct); return; }
             if (Database.GetUserAllianceId(chat.Id, tgtId) > 0) { await SendTemp(chat.Id, "❌ این بازیکن در حال حاضر در یک اتحاد دیگر عضو است!", replyTo: msg.MessageId, ct: ct); return; }
             int totPlayers = Database.GetCountriesByChatId(chat.Id).Count;
-            int maxMembers = Math.Max(2, totPlayers / 2);
+            //  معافیت کامل گروه سقف ظرفیت اتحاد را هم برمی‌دارد
+            int maxMembers = Database.HasGroupLockExemption(chat.Id)
+                ? int.MaxValue : Math.Max(2, totPlayers / 2);
             if (Database.GetAllianceMembers(aid).Count >= maxMembers)
             {
                 await SendTemp(chat.Id, $"⛔ ظرفیت اتحاد تکمیل است! سقف: {maxMembers} نفر", replyTo: msg.MessageId, ct: ct);
@@ -6593,7 +6620,9 @@ partial class Program
             if (alliance == null) { Database.DeleteAllianceInvite(invId); await bot.AnswerCallbackQueryAsync(cb.Id, "❌ اتحاد منحل شده.", showAlert: true, cancellationToken: ct); return; }
             if (Database.GetUserAllianceId(inv.ChatId, inv.TargetUserId) > 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ عضو اتحاد دیگری هستید!", showAlert: true, cancellationToken: ct); return; }
             int totalPlayers = Database.GetCountriesByChatId(inv.ChatId).Count;
-            int maxMembers = Math.Max(2, totalPlayers / 2);
+            //  معافیت کامل گروه سقف ظرفیت اتحاد را هم برمی‌دارد
+            int maxMembers = Database.HasGroupLockExemption(inv.ChatId)
+                ? int.MaxValue : Math.Max(2, totalPlayers / 2);
             if (Database.GetAllianceMembers(inv.AllianceId).Count >= maxMembers) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ ظرفیت پر!", showAlert: true, cancellationToken: ct); return; }
             if (IsSuperpowerCollision(inv.ChatId, inv.LeaderId, inv.TargetUserId, out string reason)) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ " + reason, showAlert: true, cancellationToken: ct); return; }
             Database.AddAllianceMember(inv.AllianceId, inv.ChatId, inv.TargetUserId);
@@ -8093,12 +8122,16 @@ partial class Program
             }
 
             // Rule: attacking with battleship when enemy naval force < 3/4 of ours is impossible
-            long attNaval = attacker.Boats + attacker.Submarines + attacker.Battleships * 10;
-            long defNaval = defender.Boats + defender.Submarines + defender.Battleships * 10;
-            if (attacker.Battleships > 0 && defNaval < attNaval * 3 / 4)
+            //  معافیت کامل گروه این قانون را هم برمی‌دارد
+            if (!Database.HasGroupLockExemption(cid))
             {
-                await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ نیروی دریایی دشمن کمتر از 3/4 نیروی شماست – حمله با نبردناو ممکن نیست!", showAlert: true, cancellationToken: ct);
-                return;
+                long attNaval = attacker.Boats + attacker.Submarines + attacker.Battleships * 10;
+                long defNaval = defender.Boats + defender.Submarines + defender.Battleships * 10;
+                if (attacker.Battleships > 0 && defNaval < attNaval * 3 / 4)
+                {
+                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ نیروی دریایی دشمن کمتر از 3/4 نیروی شماست – حمله با نبردناو ممکن نیست!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
             }
 
             session.Step = SessionStep.AttackWaitingStrategy;
