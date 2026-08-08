@@ -2308,6 +2308,8 @@ static partial class Database
 
     public static bool IsAttackShieldActive(long ownerId, long chatId)
     {
+        // معافیت کامل گروه: سپر ۱۶ ساعته هم اعمال نمی‌شود
+        if (HasGroupLockExemption(chatId)) return false;
         long until = GetAttackShieldUntilMs(ownerId, chatId);
         if (until == 0) return false;
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -2327,6 +2329,8 @@ static partial class Database
 
     public static void AddAttackShieldHit(long defenderId, long chatId)
     {
+        // معافیت کامل گروه: شمارش حمله برای سپر انجام نمی‌شود، پس سپری هم ساخته نمی‌شود
+        if (HasGroupLockExemption(chatId)) return;
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         using var con = OpenCon();
         // Get current count
