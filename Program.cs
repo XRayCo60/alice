@@ -6551,6 +6551,8 @@ partial class Program
     static bool IsSuperpowerCollision(long chatId, long leaderId, long targetId, out string reason)
     {
         reason = "";
+        // معافیت کامل گروه: هیچ سقف ابرقدرتی روی اتحادها اعمال نمی‌شود
+        if (Database.HasGroupLockExemption(chatId)) return false;
         var all = Database.GetCountriesByChatId(chatId).OrderByDescending(c => CalcManpower(c)).ToList();
         if (all.Count <= 1) return false;
         var leader = all.FirstOrDefault(c => c.OwnerId == leaderId);
@@ -7979,7 +7981,8 @@ partial class Program
         }
 
         // Power ratio check already for naval, but also ground – 1/4 rule
-        if (attacker != null)
+        //  معافیت کامل گروه این قانون را هم برمی‌دارد
+        if (attacker != null && !Database.HasGroupLockExemption(cid))
         {
             long attMP = CalcManpower(attacker);
             long defMP = CalcManpower(defender);
@@ -8066,12 +8069,16 @@ partial class Program
             }
 
             // Rule: attacking someone with less than 1/4 of our power is forbidden
-            long attMP = CalcManpower(attacker);
-            long defMP = CalcManpower(defender);
-            if (defMP < attMP / 4)
+            //  معافیت کامل گروه این قانون را هم برمی‌دارد
+            if (!Database.HasGroupLockExemption(cid))
             {
-                await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
-                return;
+                long attMP = CalcManpower(attacker);
+                long defMP = CalcManpower(defender);
+                if (defMP < attMP / 4)
+                {
+                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
             }
 
             //  – قایق نیروی تهاجمی نیست: بدون زیردریایی/نبردناو حمله‌ی دریایی ممکن نیست
@@ -8116,12 +8123,16 @@ partial class Program
                     await bot.AnswerCallbackQueryAsync(cb.Id, $"🛡 {defender.Name} سپر 16 ساعته دارد! تا {leftH} ساعت دیگر قابل حمله نیست.", showAlert: true, cancellationToken: ct);
                     return;
                 }
-                long attMP = CalcManpower(attacker);
-                long defMP = CalcManpower(defender);
-                if (defMP < attMP / 4)
+                //  معافیت کامل گروه این قانون را هم برمی‌دارد
+                if (!Database.HasGroupLockExemption(cid))
                 {
-                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
-                    return;
+                    long attMP = CalcManpower(attacker);
+                    long defMP = CalcManpower(defender);
+                    if (defMP < attMP / 4)
+                    {
+                        await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
+                        return;
+                    }
                 }
             }
             session.Step = SessionStep.AttackWaitingStrategy;
