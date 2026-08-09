@@ -584,9 +584,10 @@ static class WarEngine
         public byte[] WeatherAt = new byte[WX_SHIFTS];         // ۳۲: هوای بعد از هر تغییر
         public float CloudBaseM;        // ۵۸: کف لایه‌ی ابر
 
-        // ── چرخه‌ی شبانه‌روز: دقیقاً یک بار در طول نبرد ──
-        //  نبرد حداکثر ۲۴۰ تیک (۲۴ ساعت) طول می‌کشد و شبانه‌روز هم ۲۴۰ تیک است،
-        //  پس هیچ نبردی دو بار شب نمی‌بیند. طول فازها هم واقعی است، نه مساوی:
+        // ── چرخه‌ی شبانه‌روز ──
+        //  یک شبانه‌روز کامل ۲۴۰ تیک (۲۴ ساعت) است و نبرد تا ۴۸۰ تیک طول
+        //  می‌کشد، پس یک نبرد کامل دقیقاً دو شبانه‌روز را می‌بیند.
+        //  طول فازها واقعی است، نه مساوی:
         //     سپیده‌دم ۲ ساعت | روز ۱۰ ساعت | غروب ۲ ساعت | شب ۱۰ ساعت
         const int PH_DAWN = 20, PH_DAY = 100, PH_DUSK = 20;   // بقیه شب است
         const int DAY_TICKS = 240;
@@ -860,8 +861,12 @@ static class WarEngine
             int m = i % 20;
             fo.G[i].Role = (byte)(m < 12 ? 0 : m < 17 ? 1 : 2);
             fo.G[i].Deployed = fo.G[i].Role == 0;   // خط اول از تیک صفر در خط است
-            // ذخیره‌ی عملیاتی از عقب‌تر شروع می‌کند
-            if (fo.G[i].Role == 2 && attacker) fo.G[i].Y -= 4.5f;
+            // ذخیره‌ی عملیاتی از عقب‌تر شروع می‌کند — ولی نه بیرون از نقشه.
+            //  حرکت، Y را به ‎-6‎ محدود می‌کند؛ اگر اینجا از آن پایین‌تر برود،
+            //  یگان بیرون از میدان متولد می‌شود و مختصاتش در نقشه‌ی جبهه غلط
+            //  گزارش می‌شود.
+            if (fo.G[i].Role == 2 && attacker)
+                fo.G[i].Y = MathF.Max(-6f, fo.G[i].Y - 4.5f);
         }
 
         fo.Cmd = InitCommander(attacker, strat, tac, ref rng);
@@ -906,7 +911,10 @@ static class WarEngine
             {
                 gr.Y = tac == 1 ? rng.Range(0.8f, 3.2f) : rng.Range(1.5f, 6f);
                 gr.Posture = tac == 1 ? P_DEFEND : P_PATROL;
-                if (tac == 1) SeekCover(ref gr, field, ref rng);
+                //  هر مدافعی زمین را بو می‌کشد، چه خط ثابت باشد چه گشت متحرک.
+                //   قبلاً فقط خط ثابت SeekCover می‌گرفت و گشت متحرک وسط دشت باز
+                //   مستقر می‌شد؛ یعنی هم پوشش زمین را از دست می‌داد هم سنگر را.
+                SeekCover(ref gr, field, ref rng);
             }
             else
             {
@@ -1429,10 +1437,46 @@ static class WarEngine
             }
             else
             {
-                bool screen = i % 3 == 0;
-                g.Posture = screen ? P_SCREEN : P_ADVANCE;
-                g.TgtX = Math.Clamp(hotX + g.Lane * 5f, 1f, FRONT_KM - 1);
-                g.TgtY = Math.Clamp(depth + 0.5f + g.Lane * 1f, 1f, 9f);
+                //  دفاع متحرک یعنی «برو و آنجا سنگر بگیر»، نه «تا ابد راه برو».
+                //   قبلاً هر یگان تا پایان نبرد در حالت حرکت می‌ماند و در نتیجه
+                //   هیچ‌وقت ENTRENCH و DUGIN_ACC نمی‌گرفت: ۸۲٪ نبرد را متحرک بود
+                //   و نسبت تبادل ۲.۳ برابر علیه خودش می‌شد.
+                //
+                //   نکته‌ی ظریف: نقطه‌ی هدف به «عمق» وابسته است و عمق هر تیک جلو
+                //   می‌رود، پس اگر هر تیک فاصله را بسنجیم، یگانِ تازه‌رسیده بلافاصله
+                //   دوباره «نرسیده» حساب می‌شود و مدام بین حرکت و سنگر نوسان
+                //   می‌کند. برای همین آستانه‌ی ماندن (۴ کیلومتر) از آستانه‌ی
+                //   رسیدن (۱.۴ کیلومتر) بزرگ‌تر است: یگانی که سنگر گرفته فقط
+                //   وقتی بلند می‌شود که محور فشار واقعاً دور شده باشد.
+                //  پرده‌ی پوششی فقط یک‌ششم نیرو است، نه یک‌سوم. پرده باید نازک
+                //   باشد؛ توده‌ی اصلی باید بجنگد نه راه برود.
+                bool screen = i % 6 == 0;
+                float wantX = Math.Clamp(hotX + g.Lane * 5f, 1f, FRONT_KM - 1);
+                float wantY = Math.Clamp(depth + 0.5f + g.Lane * 1f, 1f, 9f);
+                float dx = wantX - g.X, dy = wantY - g.Y;
+                float d2 = dx * dx + dy * dy;
+                bool dugIn = g.Posture == P_DEFEND;
+                float thr = dugIn ? 4.0f : 1.4f;
+
+                if (screen && !g.Sprung)
+                {
+                    //  پرده‌ی پوششی: کارش کند کردن دشمن است، پس متحرک می‌ماند.
+                    //   ولی همین‌که واقعاً درگیر شد، دیگر پرده نیست و باید
+                    //   مثل بقیه سنگر بگیرد — وگرنه ایستاده جلوی آتش راه می‌رود.
+                    g.Posture = P_SCREEN;
+                    g.TgtX = wantX; g.TgtY = wantY;
+                }
+                else if (d2 < thr * thr)
+                {
+                    //  سر جای خودش است: سنگر بگیر و از همان‌جا آتش کن
+                    g.Posture = P_DEFEND;
+                    g.TgtX = g.X; g.TgtY = g.Y;
+                }
+                else
+                {
+                    g.Posture = P_ADVANCE;
+                    g.TgtX = wantX; g.TgtY = wantY;
+                }
             }
         }
     }
@@ -2149,7 +2193,10 @@ static class WarEngine
         float cap = Math.Clamp((global - GLOBAL_DOM) / Math.Max(0.01f, 0.85f - GLOBAL_DOM), 0f, 1f);
         best *= 0.30f + 0.70f * cap;
 
-        return Math.Max(0f, best);
+        //  سقف عمق همان عمق پیروزی است. یگان‌ها تا WIN_DEPTH+1 هدف‌گذاری
+        //  می‌شوند تا واقعاً از خط رد شوند، ولی عمقِ گزارش‌شده نباید از سقف
+        //  بگذرد وگرنه گزارش می‌نویسد «نفوذ ۳۱ کیلومتر از ۳۰».
+        return Math.Clamp(best, 0f, WIN_DEPTH);
     }
 
     static float SidePower(Force f)

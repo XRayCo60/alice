@@ -8673,8 +8673,16 @@ partial class Program
         attacker.Money += result.AttackerMoneyGained;
         attacker.Iron += result.AttackerIronGained;
         attacker.Welfare += result.AttackerWelfareChange;
-        // Apply losses to all defensive deployments (since they participated but not in assets)
+        //  تلفات مدافع بین «نیروی خودش» و «صف‌آرایی متحدها» تقسیم می‌شود.
+        //   موتور کل نیروی مدافع (خودی + صف‌آرایی) را با هم دیده، پس
+        //   DefenderTanksLost تلفات هر دو را در بر دارد. قبلاً سهم متحدها از
+        //   صف‌آرایی کم می‌شد و بعد *کل* همان عدد دوباره از دارایی مدافع هم کم
+        //   می‌شد — یعنی هرچه متحد بیشتر کمک می‌کرد، مدافع بیشتر ضرر می‌دید.
+        //   حالا هرکس فقط سهم خودش را می‌دهد.
         var allDefDeps = Database.GetActiveDeployments().Where(d => d.ChatId == cid && d.Type == "Defensive" && d.TargetUserId == defender.OwnerId).ToList();
+        long ownTankLoss = result.DefenderTanksLost;
+        long ownSoldLoss = result.DefenderSoldiersLost;
+        long ownFightLoss = result.DefenderFightersLost;
         if (allDefDeps.Count > 0)
         {
             long totalEffTanks = defender.DefenseTanks + depTanks;
@@ -8684,17 +8692,32 @@ partial class Program
             foreach (var dep in allDefDeps)
             {
                 if (totalEffTanks > 0 && dep.Tanks > 0)
-                    dep.Tanks = Math.Max(0, dep.Tanks - (long)Math.Round((double)dep.Tanks / totalEffTanks * result.DefenderTanksLost));
+                {
+                    long share = (long)Math.Round((double)dep.Tanks / totalEffTanks * result.DefenderTanksLost);
+                    share = Math.Min(share, dep.Tanks);
+                    dep.Tanks -= share;
+                    ownTankLoss -= share;
+                }
                 if (totalEffSoldiers > 0 && dep.Soldiers > 0)
-                    dep.Soldiers = Math.Max(0, dep.Soldiers - (long)Math.Round((double)dep.Soldiers / totalEffSoldiers * result.DefenderSoldiersLost));
+                {
+                    long share = (long)Math.Round((double)dep.Soldiers / totalEffSoldiers * result.DefenderSoldiersLost);
+                    share = Math.Min(share, dep.Soldiers);
+                    dep.Soldiers -= share;
+                    ownSoldLoss -= share;
+                }
                 if (totalEffFighters > 0 && dep.Fighters > 0)
-                    dep.Fighters = Math.Max(0, dep.Fighters - (long)Math.Round((double)dep.Fighters / totalEffFighters * result.DefenderFightersLost));
+                {
+                    long share = (long)Math.Round((double)dep.Fighters / totalEffFighters * result.DefenderFightersLost);
+                    share = Math.Min(share, dep.Fighters);
+                    dep.Fighters -= share;
+                    ownFightLoss -= share;
+                }
                 Database.UpdateDeploymentForces(dep);
             }
         }
-        defender.Tanks = Math.Max(0, defender.Tanks - result.DefenderTanksLost);
-        defender.Soldiers = Math.Max(0, defender.Soldiers - result.DefenderSoldiersLost);
-        defender.Planes = Math.Max(0, defender.Planes - result.DefenderFightersLost);
+        defender.Tanks = Math.Max(0, defender.Tanks - Math.Max(0, ownTankLoss));
+        defender.Soldiers = Math.Max(0, defender.Soldiers - Math.Max(0, ownSoldLoss));
+        defender.Planes = Math.Max(0, defender.Planes - Math.Max(0, ownFightLoss));
         defender.AntiAir = Math.Max(0, defender.AntiAir - result.DefenderAntiAirLost);
         defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
         defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
