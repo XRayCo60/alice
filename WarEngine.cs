@@ -174,10 +174,17 @@ static class WarEngine
     static readonly TankSpec SpecUSSR = new("T-28", Faction.USSR,
         76.2f, 555f, 6.30f, 60f, 0.621f, 5f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f);
 
-    // Panzer III — توپ 5cm KwK 38 L/42، ۹۹ گلوله، اپتیک TZF5d عالی، زره ۶۰ (۳۰+۳۰)
-    //   نفوذ واقعی: ۴۷mm در ۵۰۰ متر با Pzgr.39 (نه ۶۷ که قبلاً بود)
+    // Panzer III Ausf.E/F — پیکربندی واقعی ۱۹۳۹ (لهستان)
+    //   توپ 3.7cm KwK 36 L/46.5 با گلوله‌ی Pzgr — نفوذ ۲۹mm در ۵۰۰ متر
+    //   زره ۳۰mm دور تا دور. اپتیک TZF5d عالی، آهنگ آتش بالا، قابلیت اطمینان خوب.
+    //
+    //   توجه: توپ 5cm KwK 38 از ژوئیه ۱۹۴۰ و زره ۶۰mm (۳۰+۳۰) از اکتبر ۱۹۴۰
+    //   آمد — هر دو بعد از زمان این بازی. قبلاً مشخصات Ausf.H سال ۱۹۴۱ اینجا بود
+    //   و عملاً به آلمان دو سال برتری فناوری هدیه می‌داد: اندازه‌گیری نشان داد
+    //   مهاجم در برابر مدافع شوروی ۷۰٪ موفق می‌شد و در برابر آلمان فقط ۲۲٪.
+    //   ۹۹ گلوله ظرفیت واقعی همان تانک است.
     static readonly TankSpec SpecReich = new("Panzer III", Faction.Reich,
-        50f, 685f, 2.06f, 47f, 0.175f, 13f, 60f, 30f, 1.02f, 40f, 15f, 3, 99, 4500, 0.97f, 0.95f, 5, 33f);
+        37f, 745f, 0.685f, 29f, 0.022f, 15f, 30f, 30f, 1.02f, 40f, 15f, 3, 131, 4500, 0.97f, 0.95f, 5, 33f);
 
     static TankSpec SpecOf(Faction f) => f == Faction.USA ? SpecUSA : f == Faction.USSR ? SpecUSSR : SpecReich;
 
@@ -1919,7 +1926,16 @@ static class WarEngine
             if (!own.IsAttacker && u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) acc *= DUGIN_ACC;
             if (field.ElevAt(u.X, u.Y) > field.ElevAt(t.X, t.Y) + 0.1f) acc *= 1.18f;
 
-            float cover = TerCover[tt] * (t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.25f : 0.8f);
+            //  پوشش زمین برای کسی که موضع را از قبل انتخاب و آماده کرده،
+            //   بسیار بیشتر از کسی است که دارد از میان همان زمین عبور می‌کند.
+            //   قبلاً هر دو طرف تقریباً یکسان بهره می‌بردند، برای همین حمله در
+            //   جنگل و شهر *آسان‌تر* از دشت درمی‌آمد — دقیقاً برعکس تاریخ.
+            //   مدافعِ سنگرگرفته حالا کامل از پوشش استفاده می‌کند و مهاجمِ در
+            //   حرکت فقط کسر کوچکی.
+            float coverUse = t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.25f
+                           : t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK ? 0.55f
+                           : 0.8f;
+            float cover = TerCover[tt] * coverUse;
             // برجک کند نمی‌تواند به تهدید پهلو سریع جواب بدهد
             float traverse = Math.Clamp(1.18f - ospec.TurretSec / 90f, 0.72f, 1.15f);
             float morale = 0.55f + u.Morale * 0.45f;
@@ -1950,7 +1966,11 @@ static class WarEngine
 
                         float pen = PenetrationAt(ospec, rangeM);
                         float pk = PenChance(pen, effArmor);
-                        float kills = hits * 0.30f * pk * (0.9f + rng.NextF() * 0.25f);
+                        //  تانکِ پشت پوشش، بدنه‌اش پیدا نیست: بخشی از برخوردها به
+                        //   درخت و دیوار و خاکریز می‌خورد. بدون این، زمین فقط روی
+                        //   پیاده اثر داشت و نبرد زرهی در جنگل و دشت یکسان بود.
+                        float hullDown = 1f - cover * 0.35f;
+                        float kills = hits * 0.30f * pk * hullDown * (0.9f + rng.NextF() * 0.25f);
 
                         ApplyDamage(foe, best, kills, own, u.Model, true);
                         u.CAmmo = MathF.Max(0f, u.CAmmo - shots);
@@ -1973,7 +1993,11 @@ static class WarEngine
                         //   برابر ماده‌ی منفجره دارد. با ۰.۴۵ تانک پشتیبانی پیاده واقعاً
                         //   نقش خودش را بازی می‌کند.
                         float blast = MathF.Pow(MathF.Max(0.01f, ospec.HeFiller), 0.45f) * 3.4f;
-                        kills += heShots * common * blast * (1f - cover * 0.55f);
+                        //  ضریب ۰.۵: تلفات پیاده در سنجش با تاریخ دو برابر بود.
+                        //   یک گردان زیر آتش سنگین در روز ۵ تا ۲۰٪ نفرات می‌داد،
+                        //   موتور به ۳۱ تا ۴۳٪ می‌رسید. پیاده‌ی پراکنده و در پناه،
+                        //   هدف بسیار کم‌بازده‌ای برای گلوله‌ی انفجاری است.
+                        kills += heShots * common * blast * 0.5f * (1f - cover * 0.55f);
                         u.CAmmo = MathF.Max(0f, u.CAmmo - heShots);
                         u.Signature = Math.Min(1f, u.Signature + 0.5f);
                     }
@@ -1981,7 +2005,7 @@ static class WarEngine
                     {
                         float burst = u.Units * ospec.MgCount * 220f * (minutes / 60f);
                         burst = MathF.Min(burst, u.MAmmo);
-                        kills += burst * 0.00042f * common * (1f - cover * 0.85f);
+                        kills += burst * 0.00021f * common * (1f - cover * 0.85f);
                         u.MAmmo = MathF.Max(0f, u.MAmmo - burst);
                         u.Signature = Math.Min(1f, u.Signature + 0.22f);
                     }
@@ -2000,7 +2024,7 @@ static class WarEngine
                     {
                         float rounds = u.Units * 9f * (TICK_MIN / 60f);   // شلیک انفرادی
                         rounds = MathF.Min(rounds, u.MAmmo);
-                        float kills = rounds * 0.0022f * common * (1f - cover * 0.8f);
+                        float kills = rounds * 0.0011f * common * (1f - cover * 0.8f);
                         ApplyDamage(foe, best, kills, own, u.Model, false);
                         u.MAmmo = MathF.Max(0f, u.MAmmo - rounds);
                         u.Signature = Math.Min(1f, u.Signature + 0.16f);
@@ -2842,7 +2866,18 @@ static class WarEngine
                 }
 
                 float surprise = tick < surpriseTicks ? 1.12f : 1f;
-                float aMul = casA * supplyA * surprise;
+
+                //  آب‌وهوای بد، مهاجم را بیشتر از مدافع می‌زند.
+                //   مدافع در موضع ثابت و آماده است؛ مهاجم باید در همان گِل و مه
+                //   یک پیشروی هماهنگ را جلو ببرد، پشتیبانی آتش بگیرد و جهت را
+                //   گم نکند. قبلاً اثر هوا کاملاً قرینه بود و نتیجه این می‌شد که
+                //   مه *بهترین* هوا برای حمله باشد (۷۸٪ در برابر ۷۲٪ آفتابی) —
+                //   عکس چیزی که در آردن و رازپوتیتسا اتفاق افتاد.
+                float wxDrag = 1f - (1f - WxSpeed[field.Weather]) * 0.55f
+                                  - (1f - WxVision[field.Weather]) * 0.30f;
+                wxDrag = Math.Clamp(wxDrag, 0.55f, 1f);
+
+                float aMul = casA * supplyA * surprise * wxDrag;
                 float dMul = casD * (tick < surpriseTicks ? 0.90f : 1f);
 
                 FireSide(fa, fd, field, true, aMul, accEnv, tick, log, ref rng, ref contact, ref ambushFired);
