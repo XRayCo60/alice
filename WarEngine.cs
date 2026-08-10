@@ -431,33 +431,38 @@ static class WarEngine
     static string FactionFa(Faction f) => f == Faction.USA ? "آمریکایی" : f == Faction.USSR ? "شوروی" : "آلمانی";
 
     // ═════════════════ پروفایل فکشن: خدمه، تمپو، تدارکات، بازیابی ════════════
+    //  ═══ پروفایل فکشن حذف شد ═══
+    //   قبلاً هر کشور بر اساس ملیتش هفت ضریب می‌گرفت: کیفیت خدمه، سرعت
+    //   فرماندهی، کف تدارکات، بازیابی تجهیزات، مقاومت روحیه، سازگاری با
+    //   تجهیز بیگانه و مهارت شب. این یعنی دو ارتش کاملاً یکسان، فقط به خاطر
+    //   پرچمشان، نتیجه‌ی متفاوت می‌گرفتند — یک باف ملیتی که جایی در شبیه‌ساز
+    //   ندارد. نتیجه‌ی نبرد باید از تجهیزات، تعداد، زمین، هوا و تصمیم فرمانده
+    //   بیرون بیاید، نه از اینکه بازیکن کدام پرچم را انتخاب کرده.
+    //   فقط متن توصیفی دکترین برای گزارش باقی مانده و هیچ عددی به نبرد نمی‌دهد.
     readonly struct FactionProfile
     {
-        public readonly float CrewQuality;    // کیفیت آموزش خدمه (ضریب آتش)
-        public readonly int   CommandTempo;   // هر چند تیک یک‌بار فرمانده تصمیم می‌گیرد (کمتر = چابک‌تر)
-        public readonly float SupplyFloor;    // کف کارایی تدارکات در عمق زیاد
-        public readonly float Recovery;       // نرخ بازیابی تجهیزات از کار افتاده در صورت تسلط بر میدان
-        public readonly float MoraleResist;   // مقاومت روحیه در برابر تلفات
-        public readonly float ForeignAdapt;   // توان کار با تجهیزات بیگانه
-        public readonly float NightSkill;     // کارایی در شب
-        public readonly string Doctrine;      // توضیح فارسی
-        public FactionProfile(float crew, int tempo, float supply, float rec, float mor, float foreign, float night, string doc)
-        { CrewQuality = crew; CommandTempo = tempo; SupplyFloor = supply; Recovery = rec; MoraleResist = mor; ForeignAdapt = foreign; NightSkill = night; Doctrine = doc; }
+        public readonly string Doctrine;      // فقط متن گزارش — بدون اثر عددی
+        public FactionProfile(string doc) { Doctrine = doc; }
     }
 
     static FactionProfile ProfileOf(Faction f) => f switch
     {
-        Faction.Reich => new FactionProfile(1.08f, 3, 0.74f, 0.38f, 1.00f, 0.92f, 0.95f,
-            "فرماندهی مأموریت‌محور (Auftragstaktik): تصمیم‌گیری سریع در سطح یگان، تمرکز ضربه، ضعف در جنگ فرسایشی طولانی"),
-        Faction.USA => new FactionProfile(1.03f, 4, 0.84f, 0.46f, 1.02f, 0.94f, 0.90f,
-            "برتری تدارکاتی و تعمیرگاهی: خط رسانی پایدار، بازیابی بالای تجهیزات آسیب‌دیده، هماهنگی خوب زمین و هوا"),
-        _ => new FactionProfile(0.98f, 5, 0.70f, 0.30f, 1.18f, 0.88f, 1.00f,
-            "عمق و پایداری: تحمل بالای تلفات، جنگ شبانه و زمستانی، اما زنجیره فرمان کند و انعطاف کم"),
+        Faction.Reich => new FactionProfile("فرماندهی مأموریت‌محور (Auftragstaktik)"),
+        Faction.USA   => new FactionProfile("سازمان‌دهی تدارکاتی و هماهنگی زمین و هوا"),
+        _             => new FactionProfile("جنگ در عمق و پایداری خطوط"),
     };
 
+    //  ثوابت مشترک — جای ضرایب ملیتی را گرفته‌اند و برای همه یکسان‌اند
+    const int   COMMAND_TEMPO = 4;      // هر ۴ تیک یک تصمیم فرماندهی
+    const float SUPPLY_FLOOR  = 0.76f;  // کف کارایی تدارکات در عمق زیاد
+    const float NIGHT_BASE    = 0.85f;  // کارایی آتش در شب
+
     // آشنایی خدمه با مدل خارجی
-    static float Familiarity(Faction crew, Faction origin, FactionProfile prof)
-        => crew == origin ? 1.00f : prof.ForeignAdapt;
+    //  آشنایی خدمه با تجهیز: خدمه‌ای که با تانک بیگانه می‌جنگد، دفترچه و
+    //   قطعه و آموزشش را ندارد. این به ملیت خدمه ربطی ندارد — برای همه یکسان.
+    const float FOREIGN_KIT = 0.92f;
+    static float Familiarity(Faction crew, Faction origin)
+        => crew == origin ? 1.00f : FOREIGN_KIT;
 
     // ───────────────────────────── RNG سبک و قطعی ───────────────────────────
     struct XorRng
@@ -665,7 +670,6 @@ static class WarEngine
         public float StratWelfare;
         public bool HadAirCombat, AtkHadAir, DefHadAir;
         public float BombTonsOnTarget;   // تناژ واقعی بمب روی هدف
-        public long AircrewLost;         // خدمه‌ی پرواز از دست رفته
         public float EscortAltM, CapAltM; // ارتفاع نبرد — برای گزارش
         public string? Narrative;
     }
@@ -843,7 +847,7 @@ static class WarEngine
             fo.ModelNames[i] = models[i].Name;
             fo.Specs[i] = GetTankSpecByModel(models[i].Name);
             fo.ModelSent[i] = models[i].Count;
-            fo.ModelFamiliar[i] = Familiarity(owner, fo.Specs[i].Origin, fo.Prof);
+            fo.ModelFamiliar[i] = Familiarity(owner, fo.Specs[i].Origin);
         }
         fo.SoldiersSent = Math.Max(0, soldiers);
 
@@ -1706,7 +1710,7 @@ static class WarEngine
             return false;
         }
         if (ammoR < 0.16f) { g.Posture = P_HOLD; return false; }
-        float moraleFloor = 0.35f / Math.Max(0.5f, me.Prof.MoraleResist);
+        float moraleFloor = 0.35f;
         if (g.Morale < moraleFloor) { g.Posture = P_REGROUP; return false; }
         return true;
     }
@@ -1883,7 +1887,7 @@ static class WarEngine
     {
         float duel = 0f;
         byte tnow = field.TimeAt(tick);
-        float nightPenalty = tnow == TM_NIGHT ? (0.72f + own.Prof.NightSkill * 0.25f) : 1f;
+        float nightPenalty = tnow == TM_NIGHT ? NIGHT_BASE : 1f;
 
         for (int i = 0; i < own.N; i++)
         {
@@ -1946,7 +1950,7 @@ static class WarEngine
                         * TerAcc[field.TerrAt(u.X, u.Y)] * accEnv
                         * (1f - u.Supp * 0.5f) * nightPenalty;
             acc *= (0.9f + u.Exp * 0.3f);
-            acc *= own.Prof.CrewQuality * famil;
+            acc *= famil;
             if (u.Posture is P_ADVANCE or P_ASSAULT or P_FLANK) acc *= 0.80f;
             if (!own.IsAttacker && u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) acc *= DUGIN_ACC;
             if (field.ElevAt(u.X, u.Y) > field.ElevAt(t.X, t.Y) + 0.1f) acc *= 1.18f;
@@ -2100,7 +2104,7 @@ static class WarEngine
         if (armorKill && t.Type == 1 && shooter.ModelKills.Length > shooterModel)
             shooter.ModelKills[shooterModel] += (long)Math.Round(actual);
 
-        t.Morale = Math.Max(0f, t.Morale - actual / Math.Max(1f, t.Size0) * (1.6f / Math.Max(0.5f, target.Prof.MoraleResist)));
+        t.Morale = Math.Max(0f, t.Morale - actual / Math.Max(1f, t.Size0) * 1.6f);
         if (t.Units < t.Size0 * 0.08f || t.Units < 0.5f)
         {
             t.Alive = false;
@@ -2150,11 +2154,11 @@ static class WarEngine
             ref Group u = ref f.G[i];
             if (!u.Alive) continue;
             u.Supp = Math.Max(0f, u.Supp - 0.08f);
-            u.Morale = Math.Min(1f, u.Morale + 0.004f * f.Prof.MoraleResist);
+            u.Morale = Math.Min(1f, u.Morale + 0.004f);
             bool active = u.Posture is P_ADVANCE or P_ASSAULT or P_FLANK or P_RETREAT;
             u.Fatigue = Math.Clamp(u.Fatigue + (active ? 0.006f : -0.004f), 0f, 1f);
             if (u.Supp > 0.1f) u.Exp = Math.Min(1f, u.Exp + 0.003f);
-            if (u.Posture == P_REGROUP) u.Morale = Math.Min(1f, u.Morale + 0.02f * f.Prof.MoraleResist);
+            if (u.Posture == P_REGROUP) u.Morale = Math.Min(1f, u.Morale + 0.02f);
 
             float lossR = 1f - u.Units / Math.Max(1f, u.Size0);
 
@@ -2172,7 +2176,7 @@ static class WarEngine
                 u.Morale = Math.Min(1f, u.Morale + 0.12f);
             }
 
-            float breakP = 0.12f / Math.Max(0.5f, f.Prof.MoraleResist);
+            float breakP = 0.12f;
             if (lossR > 0.5f && u.Morale < 0.3f && rng.NextF() < breakP)
             {
                 if (u.Posture != P_RETREAT) routs++;
@@ -2277,10 +2281,10 @@ static class WarEngine
         return p;
     }
 
-    static float SupplyFactor(float depth, FactionProfile prof)
+    static float SupplyFactor(float depth)
     {
         if (depth <= 10f) return 1f;
-        return Math.Clamp(1f - (depth - 10f) / 50f, prof.SupplyFloor, 1f);
+        return Math.Clamp(1f - (depth - 10f) / 50f, SUPPLY_FLOOR, 1f);
     }
 
     // ═════════════════════════ فاز هوایی ════════════════════════════════════
@@ -2330,15 +2334,15 @@ static class WarEngine
         long aFight, long aBomb, int aAirStrat, int aAirTac,
         long dFight, long dAA, int dAirStrat, int dAirTac,
         FighterSpec aFs, BomberSpec aBs, FighterSpec dFs,
-        FactionProfile aProf, FactionProfile dProf, ref XorRng rng)
+        ref XorRng rng)
     {
         var o = new AirOutcome { CasAtk = 1f, CasDef = 1f };
         o.AtkHadAir = (aFight + aBomb) > 0;
         o.DefHadAir = (dFight + dAA) > 0;
         if (!o.AtkHadAir && !o.DefHadAir) return o;
 
-        float aFamil = Familiarity(atk.Faction, aFs.Origin, aProf);
-        float dFamil = Familiarity(def.Faction, dFs.Origin, dProf);
+        float aFamil = Familiarity(atk.Faction, aFs.Origin);
+        float dFamil = Familiarity(def.Faction, dFs.Origin);
         byte wx = field.Weather, tm = field.StartTime;
 
         // ── ۵۵: تصمیم سوخت فرمانده‌ی هوایی ──
@@ -2443,7 +2447,7 @@ static class WarEngine
 
                 var tg = A[target];
                 anyCombat = true;
-                float edge = EnergyEdge(d.Alt, tg.Alt) * capBonus * dProf.CrewQuality * dFamil;
+                float edge = EnergyEdge(d.Alt, tg.Alt) * capBonus * dFamil;
 
                 if (tg.Role == 2)
                 {
@@ -2464,7 +2468,7 @@ static class WarEngine
                     // سگ‌جنگی: چابکی و انرژی و وزن آتش
                     float aTurn = 1f / MathF.Max(1f, aFs.TurnSec * agilityPenalty);   // ۵۵: بال پر = چرخش کندتر
                     float dTurn = 1f / MathF.Max(1f, dFs.TurnSec);
-                    float aEdge = EnergyEdge(tg.Alt, d.Alt) * aProf.CrewQuality * aFamil;
+                    float aEdge = EnergyEdge(tg.Alt, d.Alt) * aFamil;
 
                     float dScore = dTurn * dFs.GunKgMin * edge;
                     float aScore = aTurn * aFs.GunKgMin * aEdge;
@@ -2552,8 +2556,6 @@ static class WarEngine
 
         long aFightLost = (long)MathF.Round(MathF.Min(aFight, aLostF));
         long aBombLost  = (long)MathF.Round(MathF.Min(aBomb, aLostB));
-        // خدمه‌ی از دست رفته: B-17 ده نفره سنگین‌تر از DB-3 چهار نفره است
-        o.AircrewLost = (long)MathF.Round(aBombLost * aBs.Crew + aFightLost);
         long dFightLost = (long)MathF.Round(MathF.Min(dFight, dLostF));
         long dAALost    = (long)MathF.Round(MathF.Min(dAA, dLostAA));
 
@@ -2770,8 +2772,6 @@ static class WarEngine
             return res;
         }
 
-        var aProf = ProfileOf(attacker.Faction);
-        var dProf = ProfileOf(defender.Faction);
         var field = GenField(ref rng);
 
         log.Add(0, 2, LG_ENV, $"نبرد در هوای {WeatherName[field.Weather]} و در {TimeName[field.StartTime]} آغاز شد.");
@@ -2782,14 +2782,13 @@ static class WarEngine
         var dFs = dFighterList.Count > 0 ? GetFighterSpecByModel(dFighterList[0].Model) : FighterOf(defender.Faction);
 
         AirOutcome air = RunAirPhase(attacker, defender, field, aFight, aBomb, aAirStrat, aAirTac,
-            dFight, dAA, dAirStrat, dAirTac, aFs, aBs, dFs, aProf, dProf, ref rng);
+            dFight, dAA, dAirStrat, dAirTac, aFs, aBs, dFs, ref rng);
 
         res.AttackerFightersLost = air.AtkFightersLost;
         res.AttackerBombersLost = air.AtkBombersLost;
         res.DefenderFightersLost = air.DefFightersLost;
         res.DefenderAntiAirLost = air.DefAntiAirLost;
         res.AirSuperiority = Math.Round(air.Superiority, 2);
-        res.AttackerCrewLost += air.AircrewLost;
         if (air.Narrative != null) log.Add(2, 2, LG_AIR, air.Narrative);
 
         DistributeLoss(res.AttackerPlaneLossByModel, aFighterList, air.AtkFightersLost);
@@ -2880,12 +2879,12 @@ static class WarEngine
                 float defVis = visEnv * (tick < surpriseTicks ? 0.62f : 1f);   // غافلگیری اولیه
                 SenseSide(fd, fa, field, dStrat == 2, defVis, ref rng);
 
-                if (tick % aProf.CommandTempo == 0)
+                if (tick % COMMAND_TEMPO == 0)
                 {
                     BuildThreatMap(fa, fd);
                     CommandAttacker(fa, fd, field, effDepth, tick, log, ref rng);
                 }
-                if (tick % dProf.CommandTempo == 0)
+                if (tick % COMMAND_TEMPO == 0)
                 {
                     BuildThreatMap(fd, fa);
                     CommandDefender(fd, fa, field, effDepth, tick, log, ref rng);
@@ -2894,7 +2893,7 @@ static class WarEngine
                 MoveSide(fa, fd, field, ref rng);
                 MoveSide(fd, fa, field, ref rng);
 
-                float supplyA = SupplyFactor(effDepth, aProf);
+                float supplyA = SupplyFactor(effDepth);
                 if (!loggedSupply && supplyA < 0.85f)
                 {
                     loggedSupply = true;
@@ -3042,14 +3041,6 @@ static class WarEngine
         bool absWin = anyGround && effDepth >= WIN_DEPTH;
         bool absFail = anyGround && effDepth < FAIL_DEPTH;
 
-        // ── بازیابی تجهیزات: هرکه میدان را نگه داشت، بخشی از خسارتش برمی‌گردد ─
-        float aRecover = 0f, dRecover = 0f;
-        if (anyGround && defHasGround)
-        {
-            aRecover = aProf.Recovery * Math.Clamp(frac * 1.15f, 0f, 1f);
-            dRecover = dProf.Recovery * Math.Clamp(1f - frac * 1.15f, 0f, 1f);
-        }
-        else if (anyGround) aRecover = aProf.Recovery;
 
         //  ── محاصره و اسارت ──────────────────────────────────────────────
         //   وقتی جبهه می‌شکند، یگان‌هایی که ستون مهاجم از آن‌ها گذشته دیگر راه
@@ -3087,8 +3078,8 @@ static class WarEngine
         }
 
         long aTankLoss = 0, aSoldLoss = 0, dTankLoss = 0, dSoldLoss = 0;
-        if (fa != null) FinalizeLosses(fa, aRecover, res.AttackerTankLossByModel, out aTankLoss, out aSoldLoss);
-        if (fd != null) FinalizeLosses(fd, dRecover, res.DefenderTankLossByModel, out dTankLoss, out dSoldLoss);
+        if (fa != null) FinalizeLosses(fa, res.AttackerTankLossByModel, out aTankLoss, out aSoldLoss);
+        if (fd != null) FinalizeLosses(fd, res.DefenderTankLossByModel, out dTankLoss, out dSoldLoss);
 
         aTankLoss = Math.Min(aTankLoss, aTanks); aSoldLoss = Math.Min(aSoldLoss, aSold);
         dTankLoss = Math.Min(dTankLoss, dTanks); dSoldLoss = Math.Min(dSoldLoss, dSold);
@@ -3123,7 +3114,7 @@ static class WarEngine
             aStrat, aTac, dStrat, dTac, aAirStrat, aAirTac, dAirStrat, dAirTac,
             aTankList, dTankList, aFighterList, dFighterList, aBomberList,
             aTanks, aSold, dTanks, dSold, aFight, aBomb, dFight, dAA,
-            frac, effDepth, anyGround, defHasGround, aRecover, dRecover, routsA, routsD);
+            frac, effDepth, anyGround, defHasGround, routsA, routsD);
 
         SaveBattle(attacker, defender, res);
         return res;
@@ -3160,14 +3151,18 @@ static class WarEngine
         }
     }
 
-    static void FinalizeLosses(Force f, float recovery, Dictionary<string, long> byModel, out long tankLoss, out long soldLoss)
+    //  ═══ تعمیرگاه صحرایی حذف شد ═══
+    //   قبلاً بخشی از تجهیزات از کار افتاده «بازیابی» می‌شد و نرخش هم به ملیت
+    //   بستگی داشت. نتیجه این بود که عددی که بازیکن به‌عنوان تلفات می‌دید با
+    //   چیزی که در نبرد واقعاً از بین رفته بود فرق داشت، و مقدار این تفاوت را
+    //   پرچم کشور تعیین می‌کرد. حالا هرچه در میدان از کار افتاد، از دست رفته
+    //   حساب می‌شود — بدون واسطه و بدون باف.
+    static void FinalizeLosses(Force f, Dictionary<string, long> byModel, out long tankLoss, out long soldLoss)
     {
         tankLoss = 0; soldLoss = 0;
         for (int i = 0; i < f.ModelKnocked.Length; i++)
         {
-            // تجهیزات از کار افتاده: بخشی با تعمیرگاه صحرایی برمی‌گردد
-            float lost = f.ModelKnocked[i] * (1f - Math.Clamp(recovery, 0f, 0.6f));
-            long L = Math.Min(f.ModelSent[i], (long)Math.Round(lost));
+            long L = Math.Min(f.ModelSent[i], (long)Math.Round(f.ModelKnocked[i]));
             f.ModelLost[i] = L;
             tankLoss += L;
             if (L > 0)
@@ -3176,9 +3171,7 @@ static class WarEngine
                 byModel[name] = byModel.TryGetValue(name, out var v) ? v + L : L;
             }
         }
-        // مجروحان سبک پیاده‌نظام هم بخشی برمی‌گردند، ولی کمتر از تجهیزات
-        float sLost = f.SoldiersKnocked * (1f - Math.Clamp(recovery * 0.45f, 0f, 0.3f));
-        soldLoss = Math.Min(f.SoldiersSent, (long)Math.Round(sLost));
+        soldLoss = Math.Min(f.SoldiersSent, (long)Math.Round(f.SoldiersKnocked));
         f.SoldiersLost = soldLoss;
     }
 
@@ -3278,7 +3271,7 @@ static class WarEngine
         sb.Append(verdict);
 
         if (own.Owner != os.Origin)
-            sb.Append($" ضمناً خدمه‌ی {FactionFa(own.Owner)} روی زره‌ی {FactionFa(os.Origin)} می‌جنگیدند و کارایی‌شان حدود {(int)Math.Round((1f - own.Prof.ForeignAdapt) * 100)}٪ کمتر از خدمه‌ی بومی همان تانک بود.");
+            sb.Append($" ضمناً خدمه‌ی {FactionFa(own.Owner)} روی زره‌ی {FactionFa(os.Origin)} می‌جنگیدند و کارایی‌شان حدود {(int)Math.Round((1f - FOREIGN_KIT) * 100)}٪ کمتر از خدمه‌ی بومی همان تانک بود.");
 
         return sb.ToString();
     }
@@ -3417,7 +3410,7 @@ static class WarEngine
         long aTanks, long aSold, long dTanks, long dSold,
         long aFight, long aBomb, long dFight, long dAA,
         float frac, float depth,
-        bool anyGround, bool defHasGround, float aRecover, float dRecover,
+        bool anyGround, bool defHasGround,
         int routsA, int routsD)
     {
         string aDoc = AtkDoctrineText(aStrat * 10 + aTac);
@@ -3527,8 +3520,6 @@ static class WarEngine
         {
             sb.Append("\n<b>🏭 عامل فکشن</b>\n");
             sb.Append($"• {Esc(factionText)}\n");
-            if (fa != null && aRecover > 0.02f)
-                sb.Append($"• تعمیرگاه‌های صحرایی شما حدود {(int)Math.Round(Math.Clamp(aRecover, 0f, 0.6f) * 100)}٪ از تجهیزات از کار افتاده را به خط برگرداندند.\n");
             if (fa != null && fa.ForeignShare() > 0.05f)
                 sb.Append($"• {(int)Math.Round(fa.ForeignShare() * 100)}٪ از زره شما ساخت فکشن دیگری بود؛ خدمه با آن کندتر کار کردند.\n");
         }
@@ -3539,7 +3530,6 @@ static class WarEngine
         if (aFight > 0 || aBomb > 0)
         {
             sb.Append($"   ✈️ جنگنده: {Num(r.AttackerFightersLost)} از {Num(aFight)} | 🛩 بمب‌افکن: {Num(r.AttackerBombersLost)} از {Num(aBomb)}\n");
-            if (r.AttackerCrewLost > 0) sb.Append($"   ⚰️ خدمه‌ی پرواز: {Num(r.AttackerCrewLost)} نفر\n");
         }
 
         sb.Append("\n<b>💀 تلفات دشمن</b>\n");
@@ -3585,7 +3575,6 @@ static class WarEngine
             ab.Append("\n<b>💀 تلفات شما</b>\n");
             ab.Append($"   ✈️ جنگنده: {Num(r.AttackerFightersLost)} از {Num(aFight)}\n");
             ab.Append($"   🛩 بمب‌افکن: {Num(r.AttackerBombersLost)} از {Num(aBomb)}\n");
-            if (r.AttackerCrewLost > 0) ab.Append($"   ⚰️ خدمه‌ی پرواز: {Num(r.AttackerCrewLost)} نفر\n");
 
             ab.Append("\n<b>💀 تلفات دشمن</b>\n");
             ab.Append($"   ✈️ جنگنده: {Num(r.DefenderFightersLost)} از {Num(dFight)}\n");
@@ -3634,8 +3623,6 @@ static class WarEngine
         {
             sb.Append("\n<b>🏭 عامل فکشن</b>\n");
             sb.Append($"• {Esc(fd.Prof.Doctrine)}\n");
-            if (dRecover > 0.02f)
-                sb.Append($"• چون میدان دست شما ماند، حدود {(int)Math.Round(Math.Clamp(dRecover, 0f, 0.6f) * 100)}٪ از تجهیزات زمین‌گیرشده بازیابی شد.\n");
             if (fd.ForeignShare() > 0.05f)
                 sb.Append($"• {(int)Math.Round(fd.ForeignShare() * 100)}٪ از زره شما خارجی بود و خدمه با آن کندتر کار کردند.\n");
         }
@@ -3832,7 +3819,7 @@ static class WarEngine
         public long SubsLost => SubLost.Sum();
         public long BSLostTotal => BSLost.Sum();
 
-        public float Familiar(Faction origin) => Familiarity(Owner, origin, Prof);
+        public float Familiar(Faction origin) => Familiarity(Owner, origin);
     }
 
     static NavalSide MakeSide(Faction owner,
@@ -4279,7 +4266,7 @@ static class WarEngine
                 sh.Ammo -= shots;
 
                 // احتمال اصابت: کنترل آتش، فاصله، سطح هدف، دریا
-                float fc = sp.FireControl * side.Prof.CrewQuality * side.Familiar(sp.Origin) * AccuracyFactor(sh);
+                float fc = sp.FireControl * side.Familiar(sp.Origin) * AccuracyFactor(sh);
                 float hitP = Math.Clamp(0.34f * fc * (profile / 200f) / (1f + tgtRange / 11f)
                                         * WxVision[field.Weather] * (1f - seaState * 0.28f), 0.002f, 0.42f);
                 float hits = shots * hitP * sh.Count;
@@ -4505,13 +4492,13 @@ static class WarEngine
                     sh.DmgHull = Math.Min(1f, sh.DmgHull + sh.Flooding * 0.16f);
                     sh.Hp -= sh.Flooding * 0.055f;
                     // مهار خسارت: کیفیت خدمه و بازیابی فکشن
-                    float control = 0.10f + sd2.Prof.CrewQuality * 0.10f + sd2.Prof.Recovery * 0.14f;
+                    float control = 0.24f;
                     sh.Flooding = MathF.Max(0f, sh.Flooding * (1f - control));
                 }
                 if (sh.DmgFire > 0.02f)
                 {
                     // آتش‌سوزی خودش را تغذیه می‌کند تا مهار شود
-                    float fight = 0.12f + sd2.Prof.CrewQuality * 0.12f;
+                    float fight = 0.24f;
                     sh.DmgFire = MathF.Max(0f, sh.DmgFire - fight * 0.5f);
                     sh.Hp -= sh.DmgFire * 0.010f;
                 }
