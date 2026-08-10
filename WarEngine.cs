@@ -3051,6 +3051,41 @@ static class WarEngine
         }
         else if (anyGround) aRecover = aProf.Recovery;
 
+        //  ── محاصره و اسارت ──────────────────────────────────────────────
+        //   وقتی جبهه می‌شکند، یگان‌هایی که ستون مهاجم از آن‌ها گذشته دیگر راه
+        //   عقب‌نشینی ندارند. اینها با گلوله کشته نمی‌شوند، اسیر می‌شوند.
+        //
+        //   بدون این مرحله، مدافعی که کاملاً درهم‌کوبیده شده بود و ۳۰ کیلومتر
+        //   زمین داده بود، فقط ۱۲ تا ۱۶ درصد پیاده‌اش را از دست می‌داد و بقیه
+        //   سالم برمی‌گشتند — چون موتور صرفاً نبرد را تمام می‌کرد و کسی که
+        //   دیگر تیر نمی‌خورد، زنده می‌ماند. تانک ۷۰٪ تلفات می‌داد ولی پیاده نه،
+        //   چون گروه صد نفره باید ۹۲ نفر بدهد تا حذف شود در حالی که گروه ده
+        //   تانکی با ۹.۲ تانک از بین می‌رفت.
+        //
+        //   در واقعیت عکس این است: در یک محاصره، پیاده است که اسیر می‌شود.
+        if (fd != null && anyGround && defHasGround && frac > 0.55f)
+        {
+            //  هرچه رخنه عمیق‌تر، سهم بیشتری از مدافع در جیب می‌افتد
+            float pocket = Math.Clamp((frac - 0.55f) / 0.45f, 0f, 1f);
+            for (int j = 0; j < fd.N; j++)
+            {
+                ref Group g = ref fd.G[j];
+                if (!g.Alive || g.Units <= 0f) continue;
+                //  یگانی که پشت خط پیشروی مانده، بریده شده است
+                float behind = Math.Clamp((effDepth - g.Y) / 12f, 0f, 1f);
+                if (behind <= 0f) continue;
+                //  پیاده‌ی سنگین‌بار و کند، بیشتر از زره اسیر می‌شود
+                float grab = pocket * behind * (g.Type == 0 ? 0.85f : 0.45f);
+                float taken = g.Units * Math.Clamp(grab, 0f, 0.95f);
+                if (taken <= 0f) continue;
+                g.Units -= taken;
+                g.Knocked += taken;
+                if (g.Type == 1 && fd.ModelKnocked.Length > g.Model) fd.ModelKnocked[g.Model] += taken;
+                else if (g.Type == 0) fd.SoldiersKnocked += taken;
+                if (g.Units < g.Size0 * 0.08f || g.Units < 0.5f) g.Alive = false;
+            }
+        }
+
         long aTankLoss = 0, aSoldLoss = 0, dTankLoss = 0, dSoldLoss = 0;
         if (fa != null) FinalizeLosses(fa, aRecover, res.AttackerTankLossByModel, out aTankLoss, out aSoldLoss);
         if (fd != null) FinalizeLosses(fd, dRecover, res.DefenderTankLossByModel, out dTankLoss, out dSoldLoss);
