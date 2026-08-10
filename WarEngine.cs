@@ -98,9 +98,9 @@ static class WarEngine
     const float BRAKE_SPAN = 0.30f;
     const float SECTOR_DOM = 0.62f;           // برتری لازم در سکتور برای تثبیت زمین
     const float GLOBAL_DOM = 0.42f;           // برتری کلی لازم برای تثبیت رخنه
-    const float ENTRENCH = 0.35f;             // کاهش تلفات مدافعِ سنگرگرفته
+    const float ENTRENCH = 0.28f;             // کاهش تلفات مدافعِ سنگرگرفته
     const float INF_RUSH_COVER = 0.45f;       // خیز و پراکندگی پیاده‌ی مهاجم
-    const float DUGIN_ACC = 1.20f;            // دقت بیشتر آتش از سنگر
+    const float DUGIN_ACC = 1.12f;            // دقت بیشتر آتش از سنگر
     const float FALLBACK_P = 0.06f;           // احتمال عقب‌نشینی و سنگرگیری مجدد مدافع
     const float ZOC_R2 = ZOC_R * ZOC_R;
     const float SECTOR_KM = FRONT_KM / SECTORS;
@@ -175,7 +175,7 @@ static class WarEngine
     //   موتور خودش زاویه را حساب می‌کند (EffectiveArmor)، پس PenAt500 باید
     //   عدد برخورد عمود باشد وگرنه زاویه دو بار اعمال می‌شود: ۴۶/cos۳۰ ≈ ۵۳.
     static readonly TankSpec SpecUSA = new("M2 Medium", Faction.USA,
-        37f, 884f, 0.87f, 53f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f, 1.20f);
+        37f, 884f, 0.87f, 53f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f, 1.09f);
 
     // T-28 — توپ 76.2mm L-10 با گلوله‌ی ضدزره BR-350A (APHEBC)
     //   سرعت پوزه ۵۵۵ m/s، نفوذ واقعی ۶۰mm در ۵۰۰ متر (منبع: جدول زره BR-350A)
@@ -185,7 +185,7 @@ static class WarEngine
     //   مدل دیگر می‌کرد و شوروی را عملاً غیرقابل بازی کرده بود.
     //   فقط ۶۹ گلوله و اپتیک ضعیف، پس همچنان کندترین و کم‌دقت‌ترین است.
     static readonly TankSpec SpecUSSR = new("T-28", Faction.USSR,
-        76.2f, 555f, 6.30f, 60f, 0.621f, 9f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f, 1.12f);
+        76.2f, 555f, 6.30f, 60f, 0.621f, 9f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f, 1.05f);
 
     // Panzer III Ausf.E/F — پیکربندی واقعی ۱۹۳۹ (لهستان)
     //   توپ 3.7cm KwK 36 L/46.5 با گلوله‌ی Pzgr — ۲۹mm در ۵۰۰ متر با شیب ۳۰°
@@ -198,7 +198,7 @@ static class WarEngine
     //   مهاجم در برابر مدافع شوروی ۷۰٪ موفق می‌شد و در برابر آلمان فقط ۲۲٪.
     //   ۹۹ گلوله ظرفیت واقعی همان تانک است.
     static readonly TankSpec SpecReich = new("Panzer III", Faction.Reich,
-        37f, 745f, 0.685f, 38f, 0.022f, 15f, 30f, 30f, 1.02f, 40f, 15f, 3, 131, 4500, 0.97f, 0.95f, 5, 33f, 0.94f);
+        37f, 745f, 0.685f, 38f, 0.022f, 15f, 30f, 30f, 1.02f, 40f, 15f, 3, 131, 4500, 0.97f, 0.95f, 5, 33f, 0.97f);
 
     static TankSpec SpecOf(Faction f) => f == Faction.USA ? SpecUSA : f == Faction.USSR ? SpecUSSR : SpecReich;
 
@@ -1963,8 +1963,12 @@ static class WarEngine
             //   جنگل و شهر *آسان‌تر* از دشت درمی‌آمد — دقیقاً برعکس تاریخ.
             //   مدافعِ سنگرگرفته حالا کامل از پوشش استفاده می‌کند و مهاجمِ در
             //   حرکت فقط کسر کوچکی.
-            float coverUse = t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.40f
-                           : t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK ? 0.45f
+            //  اختلاف پوشش بین سنگرگرفته و در حرکت واقعی است، ولی نباید آن‌قدر
+            //   زیاد باشد که در جنگل مهاجم عملاً بی‌دفاع شود. اندازه‌گیری روی
+            //   ۱.۴۰/۰.۴۵ نشان داد فقط از بابت زمین ۱.۴۵ برابر بیشتر آسیب
+            //   می‌خورد و روی هم با بقیه‌ی ضرایب، تلفات ۵۲ به ۷ می‌شد.
+            float coverUse = t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.20f
+                           : t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK ? 0.65f
                            : 0.8f;
             float cover = TerCover[tt] * coverUse;
             // برجک کند نمی‌تواند به تهدید پهلو سریع جواب بدهد
@@ -2000,7 +2004,7 @@ static class WarEngine
                         //  تانکِ پشت پوشش، بدنه‌اش پیدا نیست: بخشی از برخوردها به
                         //   درخت و دیوار و خاکریز می‌خورد. بدون این، زمین فقط روی
                         //   پیاده اثر داشت و نبرد زرهی در جنگل و دشت یکسان بود.
-                        float hullDown = 1f - cover * 0.55f;
+                        float hullDown = 1f - cover * 0.40f;
                         float kills = hits * 0.30f * pk * hullDown * (0.9f + rng.NextF() * 0.25f);
 
                         ApplyDamage(foe, best, kills, own, u.Model, true);
@@ -3213,7 +3217,15 @@ static class WarEngine
     }
 
     static string Num(long v) => v.ToString("N0");
-    static string K(long v) => v >= 1000 ? $"{v / 1000.0:F1}K" : v.ToString();
+    //  خلاصه‌نویسی عدد: بالای یک میلیون هم باید خوانا بماند، وگرنه
+    //   ۳۴ میلیون به شکل «34136.6K» چاپ می‌شود که هیچ‌کس نمی‌خواندش.
+    static string K(long v)
+    {
+        if (v >= 1_000_000_000) return $"{v / 1_000_000_000.0:F1}B";
+        if (v >= 1_000_000) return $"{v / 1_000_000.0:F1}M";
+        if (v >= 1000) return $"{v / 1000.0:F1}K";
+        return v.ToString();
+    }
 
     static string AirSupText(double sup)
     {
@@ -3277,15 +3289,6 @@ static class WarEngine
     }
 
     // ─────────── تحلیل فکشن ───────────
-    static string? FactionAnalysis(Force? fa, Force? fd)
-    {
-        if (fa == null) return null;
-        var sb = new StringBuilder();
-        sb.Append($"دکترین {FactionFa(fa.Owner)} مهاجم: {fa.Prof.Doctrine}.");
-        if (fd != null)
-            sb.Append($"\n   دکترین {FactionFa(fd.Owner)} مدافع: {fd.Prof.Doctrine}.");
-        return sb.ToString();
-    }
 
     // ── ۴۰: نقشه‌ی متنی جبهه ──
     //  یک نمای ۱۰ ستونی از جبهه که نشان می‌دهد رخنه کجا شکل گرفت.
@@ -3441,7 +3444,6 @@ static class WarEngine
         string? armorMatch = ArmorMatchupLines(fa, fd);
         string? aModels = ModelLossLines(fa);
         string? dModels = ModelLossLines(fd);
-        string? factionText = FactionAnalysis(fa, fd);
 
         string why = r.AttackerWon
             ? "تمرکز به‌موقع قوا روی نازک‌ترین بخش خط و توسعه‌ی سریع رخنه، کار دفاع را تمام کرد."
@@ -3516,12 +3518,10 @@ static class WarEngine
             }
         }
 
-        if (factionText != null)
+        if (fa != null && fa.ForeignShare() > 0.05f)
         {
-            sb.Append("\n<b>🏭 عامل فکشن</b>\n");
-            sb.Append($"• {Esc(factionText)}\n");
-            if (fa != null && fa.ForeignShare() > 0.05f)
-                sb.Append($"• {(int)Math.Round(fa.ForeignShare() * 100)}٪ از زره شما ساخت فکشن دیگری بود؛ خدمه با آن کندتر کار کردند.\n");
+            sb.Append("\n<b>🔧 تجهیزات خارجی</b>\n");
+            sb.Append($"• {(int)Math.Round(fa.ForeignShare() * 100)}٪ از زره شما ساخت کشور دیگری بود؛ خدمه با آن کندتر کار کردند.\n");
         }
 
         sb.Append("\n<b>💀 تلفات شما</b>\n");
@@ -3621,10 +3621,11 @@ static class WarEngine
 
         if (fd != null)
         {
-            sb.Append("\n<b>🏭 عامل فکشن</b>\n");
-            sb.Append($"• {Esc(fd.Prof.Doctrine)}\n");
             if (fd.ForeignShare() > 0.05f)
+            {
+                sb.Append("\n<b>🔧 تجهیزات خارجی</b>\n");
                 sb.Append($"• {(int)Math.Round(fd.ForeignShare() * 100)}٪ از زره شما خارجی بود و خدمه با آن کندتر کار کردند.\n");
+            }
         }
 
         sb.Append("\n<b>💀 تلفات شما</b>\n");
