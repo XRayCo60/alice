@@ -48,9 +48,7 @@ class Country
     public long DefenseFighters { get; set; } = 0;
     public long DefenseBoats { get; set; } = 0;
     public long DefenseSubmarines { get; set; } = 0;
-    //  – naval fuel & damage tracking
-    public int BoatsFuel { get; set; } = 100; // 0-100 fuel percent for boats fleet
-    public int SubmarinesFuel { get; set; } = 100;
+    //  – naval deployment tracking (سیستم سوخت حذف شد)
     public long BoatsAtSea { get; set; } = 0;
     public long SubmarinesAtSea { get; set; } = 0;
     public long BattleshipsAtSea { get; set; } = 0;
@@ -508,9 +506,10 @@ static partial class Database
         //  – naval expansion tables
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
-        string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, eqModels, defenseModels, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        //  – شمارش پیروزی دریایی روی هر بندر: هر ۲ پیروزی یک سطح بندر را می‌خورد
+        string navalPortHits = @"CREATE TABLE IF NOT EXISTS NavalPortHits(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Hits INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, eqModels, defenseModels, navalInvasions, attackShields, navalBoatCooldowns, navalPortHits })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -548,8 +547,6 @@ static partial class Database
         EnsureColumn(con, "Countries", "BattleshipDamage", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Countries", "DefenseBoats", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Countries", "DefenseSubmarines", "INTEGER DEFAULT 0");
-        EnsureColumn(con, "Countries", "BoatsFuel", "INTEGER DEFAULT 100");
-        EnsureColumn(con, "Countries", "SubmarinesFuel", "INTEGER DEFAULT 100");
         EnsureColumn(con, "Countries", "BoatsAtSea", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Countries", "SubmarinesAtSea", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Countries", "BattleshipsAtSea", "INTEGER DEFAULT 0");
@@ -608,7 +605,7 @@ static partial class Database
         "ChatId,OwnerId,Name,OwnerName,Faction,FlagFileId,Money,Population," +
         "FactoryLevel,PortLevel,MineLevel,Iron,Soldiers,RecruitmentRate,Welfare," +
         "Tanks,DefenseTanks,DefenseSoldiers,DefenseStrategy,DefenseTactic,Planes,TaxRate,Cities,Bombers,AntiAir,DefenseFighters,AirDefStrategy,AirDefTactic,Besieged,DefenseWins,CreatedAtMs,DefTankPct,DefSoldierPct,DefFighterPct," +
-        "Boats,Submarines,Battleships,BattleshipDamage,DefenseBoats,DefenseSubmarines,BoatsFuel,SubmarinesFuel,BoatsAtSea,SubmarinesAtSea,BattleshipsAtSea";
+        "Boats,Submarines,Battleships,BattleshipDamage,DefenseBoats,DefenseSubmarines,BoatsAtSea,SubmarinesAtSea,BattleshipsAtSea";
 
     private static Country ReadCountry(SqliteDataReader r)
     {
@@ -654,11 +651,9 @@ static partial class Database
             BattleshipDamage = r.FieldCount > 37 && !r.IsDBNull(37) ? r.GetInt64(37) : 0,
             DefenseBoats = r.FieldCount > 38 && !r.IsDBNull(38) ? r.GetInt64(38) : 0,
             DefenseSubmarines = r.FieldCount > 39 && !r.IsDBNull(39) ? r.GetInt64(39) : 0,
-            BoatsFuel = r.FieldCount > 40 && !r.IsDBNull(40) ? r.GetInt32(40) : 100,
-            SubmarinesFuel = r.FieldCount > 41 && !r.IsDBNull(41) ? r.GetInt32(41) : 100,
-            BoatsAtSea = r.FieldCount > 42 && !r.IsDBNull(42) ? r.GetInt64(42) : 0,
-            SubmarinesAtSea = r.FieldCount > 43 && !r.IsDBNull(43) ? r.GetInt64(43) : 0,
-            BattleshipsAtSea = r.FieldCount > 44 && !r.IsDBNull(44) ? r.GetInt64(44) : 0,
+            BoatsAtSea = r.FieldCount > 40 && !r.IsDBNull(40) ? r.GetInt64(40) : 0,
+            SubmarinesAtSea = r.FieldCount > 41 && !r.IsDBNull(41) ? r.GetInt64(41) : 0,
+            BattleshipsAtSea = r.FieldCount > 42 && !r.IsDBNull(42) ? r.GetInt64(42) : 0,
         };
     }
 
@@ -687,9 +682,9 @@ static partial class Database
         using var cmd = con.CreateCommand();
         cmd.CommandText = @"
         INSERT INTO Countries
-          (ChatId,OwnerId,Name,OwnerName,Faction,FlagFileId,Money,Population,FactoryLevel,PortLevel,MineLevel,Iron,Soldiers,RecruitmentRate,Welfare,Tanks,Planes,DefenseTanks,DefenseSoldiers,DefenseStrategy,DefenseTactic,TaxRate,Cities,Bombers,AntiAir,DefenseFighters,AirDefStrategy,AirDefTactic,Besieged,DefenseWins,CreatedAtMs,Boats,Submarines,Battleships,BattleshipDamage,DefenseBoats,DefenseSubmarines,BoatsFuel,SubmarinesFuel,BoatsAtSea,SubmarinesAtSea,BattleshipsAtSea)
+          (ChatId,OwnerId,Name,OwnerName,Faction,FlagFileId,Money,Population,FactoryLevel,PortLevel,MineLevel,Iron,Soldiers,RecruitmentRate,Welfare,Tanks,Planes,DefenseTanks,DefenseSoldiers,DefenseStrategy,DefenseTactic,TaxRate,Cities,Bombers,AntiAir,DefenseFighters,AirDefStrategy,AirDefTactic,Besieged,DefenseWins,CreatedAtMs,Boats,Submarines,Battleships,BattleshipDamage,DefenseBoats,DefenseSubmarines,BoatsAtSea,SubmarinesAtSea,BattleshipsAtSea)
         VALUES
-          (@ChatId,@OwnerId,@Name,@OwnerName,@Faction,@FlagFileId,@Money,@Population,@FactoryLevel,@PortLevel,@MineLevel,@Iron,@Soldiers,@RecruitmentRate,@Welfare,@Tanks,@Planes,@DefenseTanks,@DefenseSoldiers,@DefenseStrategy,@DefenseTactic,@TaxRate,@Cities,@Bombers,@AntiAir,@DefenseFighters,@AirDefStrategy,@AirDefTactic,@Besieged,@DefenseWins,@CreatedAtMs,@Boats,@Submarines,@Battleships,@BattleshipDamage,@DefenseBoats,@DefenseSubmarines,@BoatsFuel,@SubmarinesFuel,@BoatsAtSea,@SubmarinesAtSea,@BattleshipsAtSea)";
+          (@ChatId,@OwnerId,@Name,@OwnerName,@Faction,@FlagFileId,@Money,@Population,@FactoryLevel,@PortLevel,@MineLevel,@Iron,@Soldiers,@RecruitmentRate,@Welfare,@Tanks,@Planes,@DefenseTanks,@DefenseSoldiers,@DefenseStrategy,@DefenseTactic,@TaxRate,@Cities,@Bombers,@AntiAir,@DefenseFighters,@AirDefStrategy,@AirDefTactic,@Besieged,@DefenseWins,@CreatedAtMs,@Boats,@Submarines,@Battleships,@BattleshipDamage,@DefenseBoats,@DefenseSubmarines,@BoatsAtSea,@SubmarinesAtSea,@BattleshipsAtSea)";
         cmd.Parameters.AddWithValue("@ChatId", c.ChatId);
         cmd.Parameters.AddWithValue("@OwnerId", c.OwnerId);
         cmd.Parameters.AddWithValue("@Name", c.Name);
@@ -727,8 +722,6 @@ static partial class Database
         cmd.Parameters.AddWithValue("@BattleshipDamage", c.BattleshipDamage);
         cmd.Parameters.AddWithValue("@DefenseBoats", c.DefenseBoats);
         cmd.Parameters.AddWithValue("@DefenseSubmarines", c.DefenseSubmarines);
-        cmd.Parameters.AddWithValue("@BoatsFuel", c.BoatsFuel);
-        cmd.Parameters.AddWithValue("@SubmarinesFuel", c.SubmarinesFuel);
         cmd.Parameters.AddWithValue("@BoatsAtSea", c.BoatsAtSea);
         cmd.Parameters.AddWithValue("@SubmarinesAtSea", c.SubmarinesAtSea);
         cmd.Parameters.AddWithValue("@BattleshipsAtSea", c.BattleshipsAtSea);
@@ -1081,7 +1074,7 @@ static partial class Database
                             RecruitmentRate=@rr, Welfare=@wf, Tanks=@tanks, Planes=@planes, Bombers=@bombers, AntiAir=@antiair,
                             AirDefStrategy=@ads, AirDefTactic=@adt, Besieged=@bsg, Cities=@cities, DefenseWins=@dwins, TaxRate=@tax, DefTankPct=@dtp, DefSoldierPct=@dsp, DefFighterPct=@dfp,
                             Boats=@boats, Submarines=@subs, Battleships=@bships, BattleshipDamage=@bdmg, DefenseBoats=@dbboats, DefenseSubmarines=@dbsubs,
-                            BoatsFuel=@bfuel, SubmarinesFuel=@sfuel, BoatsAtSea=@bsea, SubmarinesAtSea=@ssea, BattleshipsAtSea=@bssea
+                            BoatsAtSea=@bsea, SubmarinesAtSea=@ssea, BattleshipsAtSea=@bssea
                             WHERE OwnerId=@id AND ChatId=@chat";
         cmd.Parameters.AddWithValue("@money", c.Money);
         cmd.Parameters.AddWithValue("@iron", c.Iron);
@@ -1108,8 +1101,6 @@ static partial class Database
         cmd.Parameters.AddWithValue("@bdmg", c.BattleshipDamage);
         cmd.Parameters.AddWithValue("@dbboats", c.DefenseBoats);
         cmd.Parameters.AddWithValue("@dbsubs", c.DefenseSubmarines);
-        cmd.Parameters.AddWithValue("@bfuel", c.BoatsFuel);
-        cmd.Parameters.AddWithValue("@sfuel", c.SubmarinesFuel);
         cmd.Parameters.AddWithValue("@bsea", c.BoatsAtSea);
         cmd.Parameters.AddWithValue("@ssea", c.SubmarinesAtSea);
         cmd.Parameters.AddWithValue("@bssea", c.BattleshipsAtSea);
@@ -2317,6 +2308,8 @@ static partial class Database
 
     public static bool IsAttackShieldActive(long ownerId, long chatId)
     {
+        // معافیت کامل گروه: سپر ۱۶ ساعته هم اعمال نمی‌شود
+        if (HasGroupLockExemption(chatId)) return false;
         long until = GetAttackShieldUntilMs(ownerId, chatId);
         if (until == 0) return false;
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -2336,6 +2329,8 @@ static partial class Database
 
     public static void AddAttackShieldHit(long defenderId, long chatId)
     {
+        // معافیت کامل گروه: شمارش حمله برای سپر انجام نمی‌شود، پس سپری هم ساخته نمی‌شود
+        if (HasGroupLockExemption(chatId)) return;
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         using var con = OpenCon();
         // Get current count
@@ -2406,29 +2401,27 @@ static partial class Database
         cmd.ExecuteNonQuery();
     }
 
-    // Boat fuel
-    public static int GetBoatFuelPct(long ownerId, long chatId)
+    //  – هر ۲ پیروزی دریایی، یک سطح از بندر مدافع کم می‌کند
+    public static int AddNavalPortHit(long ownerId, long chatId)
     {
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT FuelPct FROM BoatFuelStates WHERE OwnerId=@o AND ChatId=@c";
+        cmd.CommandText = @"INSERT INTO NavalPortHits(OwnerId,ChatId,Hits) VALUES(@o,@c,1)
+                            ON CONFLICT(OwnerId,ChatId) DO UPDATE SET Hits = Hits + 1
+                            RETURNING Hits";
         cmd.Parameters.AddWithValue("@o", ownerId);
         cmd.Parameters.AddWithValue("@c", chatId);
         var v = cmd.ExecuteScalar();
-        if (v == null || v == DBNull.Value) return 100;
-        return Convert.ToInt32(v);
+        return v == null || v == DBNull.Value ? 1 : Convert.ToInt32(v);
     }
 
-    public static void SetBoatFuelPct(long ownerId, long chatId, int pct)
+    public static void ResetNavalPortHits(long ownerId, long chatId)
     {
-        pct = Math.Clamp(pct, 0, 100);
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = @"INSERT INTO BoatFuelStates(OwnerId,ChatId,FuelPct) VALUES(@o,@c,@pct)
-                            ON CONFLICT(OwnerId,ChatId) DO UPDATE SET FuelPct=@pct";
+        cmd.CommandText = "DELETE FROM NavalPortHits WHERE OwnerId=@o AND ChatId=@c";
         cmd.Parameters.AddWithValue("@o", ownerId);
         cmd.Parameters.AddWithValue("@c", chatId);
-        cmd.Parameters.AddWithValue("@pct", pct);
         cmd.ExecuteNonQuery();
     }
 
@@ -2576,87 +2569,72 @@ partial class Program
     //  در گروه و پیوی یکسان استفاده می‌شود.
     // ============================================================
         const string HelpText =
-        "📘 <b>راهنمای کامل آلیس</b>\n" +
-        "برای اجرای هر بخش، فقط کافی است دستور مربوطه را (در گروه) بنویسید.\n" +
-        "بعضی بخش‌ها (حمله، ترنسفر، صف‌آرایی، وضعیت دفاع) برای تنظیم دقیق به <b>پیوی ربات</b> منتقل می‌شوند.\n" +
-        "برای لغو هر عملیات نیمه‌کاره، کلمهٔ «<b>لغو</b>» را بنویسید.\n" +
+        "📘 <b>راهنمای آلیس</b>\n" +
+        "دستورها را در گروه بنویسید. بخش‌هایی که تنظیم دقیق می‌خواهند (حمله، ترنسفر، صف‌آرایی، وضعیت دفاع) در پیوی ربات ادامه پیدا می‌کنند.\n" +
+        "برای بستن هر عملیات نیمه‌کاره: «<b>لغو</b>»\n" +
         "──────────────\n\n" +
 
-        "🌍 <b>شروع و مدیریت کشور</b>\n" +
-        "• <b>انتخاب کشور</b> — ساخت کشور جدید (انتخاب فکشن 🇺🇸/☭/⚫ + نام).\n" +
-        "  ❌ نام‌های مشابه بالای 90% ممنوع: «این نام خیلی شبیه به نام موجود است!!»\n" +
-        "• <b>دارایی</b> (یا «کشورم») — مشاهدهٔ کامل اقتصادی، نظامی و دریایی.\n" +
-        "• <b>مان پاور</b> — قدرت کل + تفکیک عوامل.\n" +
-        "• <b>تغییر اسم</b> — تغییر نام کشور (بررسی شباهت 90%).\n" +
-        "• <b>تغییر پرچم</b> — ارسال عکس.\n" +
-        "• <b>انصراف</b> — حذف کامل کشور (۲۴ ساعت قفل ساخت مجدد).\n\n" +
+        "🌍 <b>کشور</b>\n" +
+        "• <b>انتخاب کشور</b> — ساخت کشور (فکشن 🇺🇸/☭/⚫ + نام)\n" +
+        "• <b>دارایی</b> یا <b>کشورم</b> — وضعیت کامل\n" +
+        "• <b>مان پاور</b> — قدرت کل کشور\n" +
+        "• <b>تغییر اسم</b> | <b>تغییر پرچم</b> (عکس بفرستید)\n" +
+        "• <b>انصراف</b> — حذف کشور (۲۴ ساعت قفل ساخت مجدد)\n\n" +
 
-        "🏗 <b>اقتصاد و توسعه</b>\n" +
-        "• <b>اقتصاد</b> / ساختمان — ارتقای 🏭 کارخانه، ⚓ بندر و ⛏️ معدن.\n" +
-        "• بندر سطح 4 لازم برای نبردناو (Bismarck/Iowa/Sovetsky Soyuz) حداکثر 3 عدد.\n" +
-        "• <b>مالیات</b> ۰-۱۰۰٪، <b>آموزش سرباز</b> ۰-۱۰، <b>ترید</b> 1 رویال=10K پول.\n\n" +
+        "🏗 <b>اقتصاد</b>\n" +
+        "• <b>اقتصاد</b> — ارتقای 🏭 کارخانه، ⚓ بندر، ⛏️ معدن\n" +
+        "• <b>مالیات</b> ۰ تا ۱۰۰٪ | <b>آموزش سرباز</b> ۰ تا ۱۰\n" +
+        "• <b>ترید</b> — هر ۱ رویال = ۱۰K پول\n\n" +
 
-        "⚔️ <b>ساخت ارتش — چندمدلی</b>\n" +
-        "• هر کشور چندین مدل تجهیزات دارد و حتی با تغییر فکشن حفظ می‌شود.\n" +
-        "• <b>ساخت تانک</b> — M2 Medium 🇺🇸 / T-28 ☭ / Panzer III ⚫ (هر ۵ عدد).\n" +
-        "• <b>ساخت هواپیما</b> — P-36 / I-16 / Bf 109 + بمب‌افکن B-17 / DB-3 / He 111.\n" +
-        "• <b>پدافند</b> — توپ 76mm ضد هوایی.\n" +
-        "• در حمله و دفاع می‌توانید برای هر مدل جداگانه تعداد / درصد تعیین کنید.\n" +
-        "• موتور جنگ ترکیب وزنی مدل‌ها با حداقل 2% تاثیر + امتیاز تنوع تا 8% و گزارش هوشمند پویا.\n\n" +
+        "⚔️ <b>ساخت ارتش</b>\n" +
+        "• <b>ساخت تانک</b> — M2 Medium 🇺🇸 / T-28 ☭ / Panzer III ⚫\n" +
+        "• <b>ساخت هواپیما</b> — جنگنده و بمب‌افکن\n" +
+        "• <b>پدافند</b> — توپ ضدهوایی ۷۶mm\n" +
+        "• روی هر دکمه بزنید تا مشخصات کامل و قیمتش را ببینید\n" +
+        "• تجهیزات هر مدل جدا نگه داشته می‌شود، حتی اگر فکشن عوض کنید\n\n" +
 
-        "⚓ <b>نیروی دریایی — ناوگان</b>\n" +
-        "• دستور: <b>خرید ناو / خرید کشتی / خرید قایق / نیروی دریایی / ناوگان</b>\n" +
-        "  🇩🇪 S-Boot 38–41 گره — هر 5: 2K پول+1K آهن\n" +
-        "  🇺🇸 PT Boat 40–45 گره — هر 5: 3K+1.5K\n" +
-        "  ☭ G-5 50–53 گره — هر 5: 2.5K+1.5K\n" +
-        "• زیردریایی: Type VIIC 17.7/7.6 — 10K+5K | Gato 21/9 — 10K+5K | S-class 13–14/7–8 — 8K+4K\n" +
-        "• نبردناو: Bismarck 30 گره 2092 خدمه 8x380mm — 50K+30K | Iowa 28 گره 1800 خدمه 9x406mm — 50K+40K | Sovetsky Soyuz 23 گره 1220 خدمه 12x305mm — 45K+25K (پورت>=4 max3)\n" +
-        "• <b>سوخت قایق</b>: پس از هر حمله دریایی سوخت 0% و به بندر بازمی‌گردد. بدون سوخت حمله ممکن نیست. خودکار در آپدیت دارایی یا دستی: <b>سوخت گیری / سوخت قایق</b>\n" +
-        "• <b>آسیب نبردناو</b>: عادی فقط آسیب نه انهدام مگر یک‌طرفه. تعمیر: <b>تعمیر ناو / تعمیر ناوگان</b> هزینه 60% قیمت × درصد آسیب.\n" +
-        "• انتقال نبردناو: <b>نمیتوانید به این کشور نبردناو ترنسفر کنید، تعداد نبرد ناو: 3</b>\n\n" +
+        "⚓ <b>نیروی دریایی</b>\n" +
+        "• <b>ناوگان</b> یا <b>خرید ناو</b> — قایق، زیردریایی، نبردناو\n" +
+        "• نبردناو نیاز به بندر سطح ۴ دارد و حداکثر ۳ عدد\n" +
+        "• 🚤 قایق فقط برای <b>دفاع از سواحل خودتان</b> است و به تنهایی نمی‌تواند حمله کند\n" +
+        "• ⚓ برای حمله‌ی دریایی حتماً زیردریایی یا نبردناو لازم دارید\n" +
+        "• <b>تعمیر ناو</b> — نبردناو آسیب‌دیده را برمی‌گرداند\n\n" +
 
-        "🗡 <b>حمله — زمینی/هوایی و دریایی</b>\n" +
-        "• <b>حمله</b> — هدف (Country (OwnerName)، متحدان حذف) → نوع: ⚔️ زمینی/هوایی یا ⚓ دریایی.\n" +
-        "• زمینی: هجوم منسجم / محاصره و ضربه + تاکتیک مستقیم/سبک/پراکنده/متحرک. هوایی: برتری/بمباران.\n" +
-        "• دریایی:\n" +
-        "  1️⃣ <b>نابودی ناوگان اصلی دشمن</b> — حمله غافلگیرانه به پایگاه‌های دریایی / کشاندن به نبرد تعیین‌کننده\n" +
-        "  2️⃣ <b>عملیات آبی‌خاکی</b> — بمباران دریایی / پیاده‌سازی موجی\n" +
-        "  دفاع: استحکامات و موانع ساحلی / ضدحمله سریع / حمله و عقب‌نشینی / کمین دریایی\n" +
-        "• برای هر مدل قایق/زیر/نبردناو جداگانه تعداد اعزام.\n" +
-        "• <b>تاخیری</b>: ناوگان پس از آپدیت دارایی می‌رسد + اطلاع به مدافع. غنیمت 1.5x زمینی. پیروزی >90% → بندر مدافع -1.\n" +
-        "• قوانین: حمله به <1/4 قدرت شما ممنوع. با نبردناو وقتی دریایی دشمن <3/4 غیرممکن. 5 حمله در 24h → 16h سپر.\n" +
-        "• قفل 30 دقیقه بعد آپدیت + سپر 48h تازه‌ساخت.\n\n" +
+        "🗡 <b>حمله</b>\n" +
+        "• <b>حمله</b> → هدف را انتخاب کنید → نوع: ⚔️ زمینی/هوایی یا ⚓ دریایی\n" +
+        "• بعد استراتژی و تاکتیک را انتخاب می‌کنید و تعداد هر مدل را می‌فرستید\n" +
+        "• توضیح هر استراتژی موقع انتخاب نمایش داده می‌شود\n" +
+        "• ناوگان دریایی چند ساعت در راه است و مدافع خبردار می‌شود\n" +
+        "⚠️ محدودیت‌ها:\n" +
+        "• حمله به کشوری با کمتر از یک‌چهارم قدرت شما ممنوع است\n" +
+        "• ۵ حمله در ۲۴ ساعت روی یک نفر ← ۱۶ ساعت سپر می‌گیرد\n" +
+        "• کشور تازه‌ساخت ۴۸ ساعت سپر دارد\n" +
+        "• ۳۰ دقیقه بعد از آپدیت دارایی حمله قفل است\n\n" +
 
-        "🛡 <b>دفاع — چندمدلی و دریایی</b>\n" +
-        "• <b>وضعیت دفاع</b> در پیوی: درصد برای هر مدل تانک/جنگنده/قایق/زیر جداگانه (20-100%). حداقل 20% همیشه در دفاع.\n" +
-        "• دفاع دریایی: قایق و زیردریایی per-model.\n\n" +
+        "🛡 <b>دفاع</b>\n" +
+        "• <b>وضعیت دفاع</b> (پیوی) — برای هر مدل تانک، جنگنده، قایق و زیردریایی درصد جداگانه تعیین کنید (۲۰ تا ۱۰۰٪)\n" +
+        "• حداقل ۲۰٪ همیشه در دفاع می‌ماند\n" +
+        "• استراتژی و تاکتیک دفاعی را هم همین‌جا تنظیم کنید\n\n" +
 
-        "🤝 <b>اتحادها</b>\n" +
-        "• <b>ساخت اتحاد</b> (شباهت 90% چک)، <b>ایجاد درخواست عضویت</b> ریپلای، <b>وضعیت اتحاد</b>، <b>لیست اتحاد ها</b>، <b>حذف N</b>، <b>خروج</b>، <b>انحلال</b>.\n\n" +
+        "🤝 <b>اتحاد</b>\n" +
+        "• <b>ساخت اتحاد</b> | <b>ایجاد درخواست عضویت</b> (ریپلای)\n" +
+        "• <b>وضعیت اتحاد</b> | <b>لیست اتحاد ها</b> | <b>خروج</b> | <b>انحلال اتحاد</b>\n\n" +
 
-        "🚚 <b>عملیات مشترک — ترنسفر و صف‌آرایی</b>\n" +
-        "• <b>ترنسفر</b> — پول/آهن/سرباز/تانک/جنگنده/بمب‌افکن/قایق/زیر/نبردناو به هم‌اتحادی (پیوی). حفظ مدل حتی با تغییر فکشن. هر مدل مقدار جداگانه. نبردناو max3.\n" +
-        "• <b>صف آرایی تهاجمی/دفاعی</b> — همیشه یکپارچه. سازنده استراتژی+تاکتیک.\n" +
-        "• نیروهای دفاعی در دارایی دیده نمی‌شوند، فقط در <b>جزئیات نظامی → اطلاعات نیروهای صف آرایی</b> گروه‌بندی فکشن با مجموع. پیام گروه فقط مشارکت‌کنندگان + 🎯 استراتژی: X | تاکتیک: Y. پس از join پیام پین ویرایش می‌شود.\n" +
-        "• <b>اعزام نیرو</b> / دکمه ⚔️ مشارکت. <b>لغو صف آرایی</b> → آنپین+حذف.\n\n" +
+        "🚚 <b>ترنسفر و صف‌آرایی</b>\n" +
+        "• <b>ترنسفر</b> (پیوی) — پول، آهن، سرباز و تجهیزات به هم‌اتحادی\n" +
+        "• <b>صف آرایی تهاجمی</b> یا <b>دفاعی</b> — عملیات مشترک اتحاد\n" +
+        "• <b>اعزام نیرو</b> برای مشارکت | <b>لغو صف آرایی</b> برای بستن\n" +
+        "• نیروی دفاعی در دارایی دیده نمی‌شود، در <b>جزئیات نظامی</b> ببینید\n\n" +
 
-        "🏆 <b>لیدربورد شبانه</b>\n" +
-        "• هر شب 22:00 تهران +30 ثانیه، سه بورد: برترین مان‌پاور پلیرها، برترین گروه‌ها تعداد پلیر، برترین گروه‌ها مجموع مان‌پاور با 🥇🥈🥉 و دیوایدر ━━━━━━━━━━━━━━━━━━━ به پیوی مالک و کانال اختیاری. تنظیم کانال: پنل ادمین. دستور: adm:lb:now.\n\n" +
+        "🏆 <b>لیدربورد</b>\n" +
+        "• هر شب ساعت ۲۲:۰۰ تهران: برترین بازیکنان و گروه‌ها\n\n" +
 
-        "👮 <b>پنل ادمین</b>\n" +
-        "• ماژول‌ها: پلیرها، کشورها، گروه‌ها، اتحادها، اقتصاد، جنگ، عملیات، اعلامیه، تنظیمات، نگهداری. فارسی با صفحه‌بندی.\n\n" +
-
-        "ℹ️ <b>نکات فنی</b>\n" +
-        "• بهینه‌سازی: GetCountriesByChatId WHERE ChatId=@cid، GetAttackableTargets تک کانکشن NOT IN، کش عنوان، 500ms.\n" +
-        "• دکمه جزئیات نظامی فقط مالک و خصوصی (پیوی).\n" +
-        "• همه متن‌های بازیکن فارسی.\n" +
-        "• قبل از حمله/ترنسفر/صف‌آرایی یکبار در پیوی استارت کنید. «لغو» برای خروج.\n" +
+        "ℹ️ <b>نکته</b>\n" +
+        "• قبل از اولین حمله یا ترنسفر، یک‌بار در پیوی ربات <b>/start</b> بزنید\n" +
+        "• گزارش کامل نبرد بعد از هر جنگ به پیوی شما می‌آید\n" +
         "──────────────\n📢 @alice_safe_house1";
-
-    // ============================================================
-    //  منطقه‌زمانی تهران — مقاوم و مستقل از تنظیمات سرور
-    // ============================================================
     static readonly TimeSpan TehranOffset = TimeSpan.FromHours(3.5);
+
     static DateTime GetTehranNow()
     {
         return DateTime.UtcNow.AddHours(3.5);
@@ -2707,6 +2685,8 @@ partial class Program
 
     static void LoadSettings()
     {
+        //  – ۴۰: بازیابی وضعیت سوییچ نقشه‌ی جبهه از دیتابیس
+        try { WarEngine.ShowFrontMap = Database.GetSetting("ShowFrontMap") == "1"; } catch { }
         var mode = Database.GetSetting("UpdateMode");
         var val = Database.GetSetting("UpdateValue");
         var special = Database.GetSetting("SpecialPhotoFileId");
@@ -2843,6 +2823,80 @@ partial class Program
         }
         ScheduleDelete(chatId, m.MessageId, 30);
         return m;
+    }
+
+    //  – راهنما از سقف ۴۰۹۶ کاراکتری تلگرام بلندتر است.
+    //     روی خط خالی می‌شکنیم تا هیچ تگ HTML نصف نشود.
+    static List<string> SplitForTelegram(string text, int limit = 3500)
+    {
+        var parts = new List<string>();
+        if (string.IsNullOrEmpty(text)) return parts;
+        var blocks = text.Split("\n\n");
+        var cur = new StringBuilder();
+        foreach (var blk in blocks)
+        {
+            if (cur.Length > 0 && cur.Length + blk.Length + 2 > limit)
+            {
+                parts.Add(cur.ToString().TrimEnd());
+                cur.Clear();
+            }
+            if (blk.Length > limit)
+            {
+                if (cur.Length > 0) { parts.Add(cur.ToString().TrimEnd()); cur.Clear(); }
+                foreach (var line in blk.Split('\n'))
+                {
+                    if (cur.Length + line.Length + 1 > limit) { parts.Add(cur.ToString().TrimEnd()); cur.Clear(); }
+                    cur.Append(line).Append('\n');
+                }
+                continue;
+            }
+            cur.Append(blk).Append("\n\n");
+        }
+        if (cur.Length > 0) parts.Add(cur.ToString().TrimEnd());
+        return parts;
+    }
+
+    //  – گزارش نبرد با مدل‌های زیاد می‌تواند از ۴۰۹۶ کاراکتر رد شود.
+    //     این تابع امن می‌فرستد: تکه‌تکه، و اگر HTML شکست، متن ساده.
+    static async Task SendReport(long chatId, string text, bool temporary, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        foreach (var part in SplitForTelegram(text))
+        {
+            try
+            {
+                if (temporary) await SendTemp(chatId, part, parseMode: ParseMode.Html, ct: ct);
+                else await SendPermanent(chatId, part, parseMode: ParseMode.Html, ct: ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[REPORT ERR] {ex.Message}");
+                string plain = System.Text.RegularExpressions.Regex.Replace(part, "<[^>]+>", "");
+                try { if (temporary) await SendTemp(chatId, plain, ct: ct); else await SendPermanent(chatId, plain, ct: ct); } catch { }
+            }
+            await Task.Delay(120, ct);
+        }
+    }
+
+    static async Task SendHelp(long chatId, bool temporary, CancellationToken ct)
+    {
+        var parts = SplitForTelegram(HelpText);
+        foreach (var part in parts)
+        {
+            try
+            {
+                if (temporary) await SendTemp(chatId, part, parseMode: ParseMode.Html, ct: ct);
+                else await SendPermanent(chatId, part, parseMode: ParseMode.Html, ct: ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[HELP ERR] {ex.Message}");
+                // اگر HTML مشکل داشت، دست‌کم متن ساده برسد
+                string plain = System.Text.RegularExpressions.Regex.Replace(part, "<[^>]+>", "");
+                try { if (temporary) await SendTemp(chatId, plain, ct: ct); else await SendPermanent(chatId, plain, ct: ct); } catch { }
+            }
+            await Task.Delay(120, ct);
+        }
     }
 
     static async Task<Message> SendPermanent(long chatId, string text, IReplyMarkup? markup = null,
@@ -3331,7 +3385,7 @@ partial class Program
         }
         if (txt == "راهنما" || txt == "/help" || txt == "help")
         {
-            await SendPermanent(uid, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(uid, temporary: false, ct);
             return;
         }
     }
@@ -3518,7 +3572,7 @@ partial class Program
                 string senderName = user.FirstName;
                 string grpTitle = chat.Title ?? "";
                 string pref = vLog.IsUserMode==1 ? $"[{grpTitle}] {senderName}: " : $"{senderName}: ";
-                Message sent = null;
+                Message? sent = null;
                 if (!string.IsNullOrEmpty(msg.Text)){
                     string t = pref + msg.Text;
                     if (replyMap!=0) sent = await bot.SendTextMessageAsync(destId, t, replyToMessageId: replyMap, cancellationToken: ct);
@@ -3569,7 +3623,7 @@ partial class Program
                 string sName = user.FirstName;
                 string gTitle = chat.Title ?? "";
                 string pref = vLog.IsUserMode==1 ? $"[{gTitle}] {sName}: " : $"{sName}: ";
-                Message sent = null;
+                Message? sent = null;
                 if (!string.IsNullOrEmpty(msg.Text)){
                     string t = pref + msg.Text;
                     if (replyMap!=0) sent = await bot.SendTextMessageAsync(destId, t, replyToMessageId: replyMap, cancellationToken: ct);
@@ -3607,7 +3661,30 @@ partial class Program
                 Database.SetGroupLockExemption(chat.Id, true);
                 Database.ClearAllLeaveCooldownsInChat(chat.Id);
                 Database.SetAllShieldExemptionsInChat(chat.Id);
-                await SendTemp(chat.Id, "✅ **معافیت کامل و سراسری برای این گروه ثبت شد!**\n\nتغییرات اعمال‌شده:\n۱. 🔓 **حذف قفل ۳۰ دقیقه‌ای**: حمله بلافاصله پس از آپدیت دارایی‌ها آزاد است.\n۲. 🛡 **حذف تمام سپرها**: سپر ۴۸ ساعتهٔ تمام کشورهای فعلی این گپ برداشته شد.\n۳. ⏳ **حذف تایمر انصراف**: تمام محدودیت‌های ۲۴ ساعتهٔ ساخت مجدد کشور برای بازیکنان این گروه پاک شد.\n۴. ⚡ **حذف تایمر ترنسفر**: زمان انتظار ارسال محموله‌ها صفر شد و محموله‌های جاری فوری تحویل داده شدند.", replyTo: msg.MessageId, ct: ct);
+                await SendTemp(chat.Id,
+                    "✅ **معافیت کامل و سراسری برای این گروه ثبت شد!**\n\n" +
+                    "🔓 **قفل‌های زمانی**\n" +
+                    "• قفل ۳۰ دقیقه‌ای ابتدای آپدیت\n" +
+                    "• تایمر ۲۴ ساعتهٔ ساخت مجدد کشور\n" +
+                    "• تایمر ترنسفر (محموله‌های جاری فوری تحویل شدند)\n" +
+                    "• تایمر ۳ تا ۵ ساعتهٔ حرکت ناوگان ← ۶۰ ثانیه\n\n" +
+                    "🛡 **سپرها**\n" +
+                    "• سپر ۴۸ ساعتهٔ کشورهای تازه‌ساخت\n" +
+                    "• سپر ۱۶ ساعته پس از ۵ حمله\n\n" +
+                    "⚔️ **محدودیت‌های حمله**\n" +
+                    "• حمله به کشور با کمتر از یک‌چهارم قدرت شما\n" +
+                    "• حمله با نبردناو به نیروی دریایی کمتر از سه‌چهارم\n" +
+                    "• سقف تعداد حمله در هر آپدیت\n" +
+                    "• حملهٔ تکراری به یک هدف در ۲۴ ساعت\n\n" +
+                    "🤝 **محدودیت‌های اتحاد**\n" +
+                    "• ممنوعیت هم‌اتحادی رتبه ۱ و ۲\n" +
+                    "• سقف ابرقدرت (۴۰٪ و ۴۵٪ مان‌پاور)\n" +
+                    "• سقف تعداد اعضای هر اتحاد\n" +
+                    "• سقف تعداد اتحادهای گروه\n\n" +
+                    "📦 **سهمیه‌ها**\n" +
+                    "• سقف ترنسفر در هر آپدیت\n" +
+                    "• سقف روزانهٔ صف‌آرایی اتحاد",
+                    replyTo: msg.MessageId, ct: ct);
             }
             else
             {
@@ -3816,7 +3893,9 @@ partial class Program
                 return;
             }
             int totalPlayers = Database.GetCountriesByChatId(chat.Id).Count;
-            int maxAlliances = Math.Max(1, totalPlayers / 2);
+            //  معافیت کامل گروه سقف تعداد اتحادها را هم برمی‌دارد
+            int maxAlliances = Database.HasGroupLockExemption(chat.Id)
+                ? int.MaxValue : Math.Max(1, totalPlayers / 2);
             var alliancesInChat = Database.GetAlliancesByChatId(chat.Id);
             if (alliancesInChat.Count >= maxAlliances)
             {
@@ -3855,7 +3934,9 @@ partial class Program
             if (tgtCountry == null) { await SendTemp(chat.Id, "❌ بازیکن مورد نظر در این گپ کشوری ندارد.", replyTo: msg.MessageId, ct: ct); return; }
             if (Database.GetUserAllianceId(chat.Id, tgtId) > 0) { await SendTemp(chat.Id, "❌ این بازیکن در حال حاضر در یک اتحاد دیگر عضو است!", replyTo: msg.MessageId, ct: ct); return; }
             int totPlayers = Database.GetCountriesByChatId(chat.Id).Count;
-            int maxMembers = Math.Max(2, totPlayers / 2);
+            //  معافیت کامل گروه سقف ظرفیت اتحاد را هم برمی‌دارد
+            int maxMembers = Database.HasGroupLockExemption(chat.Id)
+                ? int.MaxValue : Math.Max(2, totPlayers / 2);
             if (Database.GetAllianceMembers(aid).Count >= maxMembers)
             {
                 await SendTemp(chat.Id, $"⛔ ظرفیت اتحاد تکمیل است! سقف: {maxMembers} نفر", replyTo: msg.MessageId, ct: ct);
@@ -4081,7 +4162,7 @@ partial class Program
         if (txt == "راهنما")
         {
             // FIX(4): راهنمای کامل (در گروه)
-            await SendTemp(chat.Id, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(chat.Id, temporary: true, ct);
             return;
         }
 
@@ -4141,7 +4222,7 @@ partial class Program
             if (country == null) { await SendTemp(chat.Id, MsgNoCountryGuide, ct: ct); return; }
             // Check port level for battleship info
             string portInfo = country.PortLevel < 4 ? "\n⚠️ برای ساخت نبردناو بندر سطح ۴ لازم است" : "";
-            string fuelInfo = $"\n⛽ سوخت قایق‌ها: {country.BoatsFuel}% | زیردریایی: {country.SubmarinesFuel}%";
+            string fuelInfo = "\n🚤 قایق‌ها فقط نیروی دفاع ساحلی‌اند و در حمله سهم ضربه ندارند.";
             string dmgInfo = country.BattleshipDamage > 0 ? $"\n🔧 آسیب نبردناو: {country.BattleshipDamage}% مجموع | تعداد: {country.Battleships}" : $"\n🚢 نبردناو: {country.Battleships}/3";
             string seaInfo = (country.BoatsAtSea + country.SubmarinesAtSea + country.BattleshipsAtSea) > 0 ? $"\n🌊 در دریا: {country.BoatsAtSea}🚤 {country.SubmarinesAtSea}⚓ {country.BattleshipsAtSea}🚢" : "";
             var navalKb = country.Faction switch
@@ -4151,21 +4232,21 @@ partial class Program
                     new[] { InlineKeyboardButton.WithCallbackData("🚤 PT Boat (قایق) – 5 عدد", $"boat_info:{uid}:PTBoat") },
                     new[] { InlineKeyboardButton.WithCallbackData("🚢 Gato (زیردریایی)", $"sub_info:{uid}:Gato") },
                     new[] { InlineKeyboardButton.WithCallbackData("⚓ Iowa (نبردناو)", $"battleship_info:{uid}:Iowa") },
-                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}"), InlineKeyboardButton.WithCallbackData("⛽ سوخت‌گیری قایق", $"boat_refuel:{uid}") }
+                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}") }
                 }),
                 Faction.USSR => new InlineKeyboardMarkup(new[]
                 {
                     new[] { InlineKeyboardButton.WithCallbackData("🚤 G-5 (قایق) – 5 عدد", $"boat_info:{uid}:G5") },
                     new[] { InlineKeyboardButton.WithCallbackData("🚢 S-class (زیردریایی)", $"sub_info:{uid}:SClass") },
                     new[] { InlineKeyboardButton.WithCallbackData("⚓ Sovetsky Soyuz (نبردناو)", $"battleship_info:{uid}:Soyuz") },
-                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}"), InlineKeyboardButton.WithCallbackData("⛽ سوخت‌گیری قایق", $"boat_refuel:{uid}") }
+                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}") }
                 }),
                 _ => new InlineKeyboardMarkup(new[]
                 {
                     new[] { InlineKeyboardButton.WithCallbackData("🚤 S-Boot (قایق) – 5 عدد", $"boat_info:{uid}:SBoot") },
                     new[] { InlineKeyboardButton.WithCallbackData("🚢 Type VIIC (زیردریایی)", $"sub_info:{uid}:VIIC") },
                     new[] { InlineKeyboardButton.WithCallbackData("⚓ Bismarck (نبردناو)", $"battleship_info:{uid}:Bismarck") },
-                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}"), InlineKeyboardButton.WithCallbackData("⛽ سوخت‌گیری قایق", $"boat_refuel:{uid}") }
+                    new[] { InlineKeyboardButton.WithCallbackData("🔧 تعمیر ناو", $"battleship_repair:{uid}") }
                 })
             };
             await SendTemp(chat.Id, $"⚓ نیروی دریایی – فکشن {country.Faction}{portInfo}{fuelInfo}{dmgInfo}{seaInfo}\nبرای اطلاعات هر واحد روی دکمه بزنید:", markup: navalKb, ct: ct);
@@ -4185,32 +4266,34 @@ partial class Program
             long ironPer = country.Faction == Faction.USA ? 40000 : country.Faction == Faction.USSR ? 25000 : 30000;
             long totalMoneyCost = moneyPer * totalCount;
             long totalIronCost = ironPer * totalCount;
+            //  – هزینه‌ی تعمیر = درصد آسیب × قیمت ساخت (۲۰٪ آسیب → ۲۰٪ قیمت)
             double dmgFraction = totalDamage / (double)(totalCount * 100);
-            long needMoney = (long)(totalMoneyCost * 0.6 * dmgFraction);
-            long needIron = (long)(totalIronCost * 0.6 * dmgFraction);
+            long needMoney = (long)(totalMoneyCost * dmgFraction);
+            long needIron = (long)(totalIronCost * dmgFraction);
             var repairKb = new InlineKeyboardMarkup(new[]
             {
                 new[] { InlineKeyboardButton.WithCallbackData($"✅ تعمیر کامل ({needMoney/1000}K پول، {needIron/1000}K آهن)", $"battleship_repair_confirm:{uid}:{needMoney}:{needIron}") },
                 new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", "cancel") }
             });
-            await SendTemp(chat.Id, $"🔧 **تعمیر ناو** 🔧\n━━━━━━━━━━━━━━━━━━━\n🚢 تعداد نبردناو: {country.Battleships}\n💥 آسیب مجموع: {totalDamage}% (میانگین {totalDamage / Math.Max(1, totalCount)}% هر ناو)\n💰 هزینه تعمیر کامل (60% قیمت ساخت): {needMoney:N0} پول + {needIron:N0} آهن\n💡 توضیح: نبردناوها در نبردهای دریایی عادی فقط آسیب می‌بینند و منهدم نمی‌شوند، مگر نبرد یک‌طرفه باشد. برای بازگرداندن به 100% از این دستور استفاده کنید.\n━━━━━━━━━━━━━━━━━━━", markup: repairKb, ct: ct);
+            await SendTemp(chat.Id, $"🔧 **تعمیر ناو** 🔧\n━━━━━━━━━━━━━━━━━━━\n🚢 تعداد نبردناو: {country.Battleships}\n💥 آسیب مجموع: {totalDamage}% (میانگین {totalDamage / Math.Max(1, totalCount)}% هر ناو)\n💰 هزینه تعمیر: {needMoney:N0} پول + {needIron:N0} آهن\n💡 هزینه دقیقاً برابر درصد آسیب است: ۲۰٪ آسیب یعنی ۲۰٪ قیمت ساخت.\n🚢 نبردناو به‌سختی غرق می‌شود؛ معمولاً فقط آسیب می‌بیند و با تعمیر به خط برمی‌گردد.\n━━━━━━━━━━━━━━━━━━━", markup: repairKb, ct: ct);
+            return;
+        }
+
+        //  – ۴۰: سوییچ نمایش نقشه‌ی جبهه در گزارش (فقط ادمین)
+        if (txt == "نقشه جبهه" || txt == "نقشه‌ی جبهه" || txt == "نمایش نقشه")
+        {
+            if (!Database.IsAdminActive(uid)) { await SendTemp(chat.Id, "⛔ این دستور فقط برای ادمین است.", ct: ct); return; }
+            WarEngine.ShowFrontMap = !WarEngine.ShowFrontMap;
+            Database.SetSetting("ShowFrontMap", WarEngine.ShowFrontMap ? "1" : "0");
+            await SendTemp(chat.Id, WarEngine.ShowFrontMap
+                ? "🗺 نمایش نقشه‌ی متنی جبهه در گزارش‌ها روشن شد."
+                : "🗺 نمایش نقشه‌ی جبهه خاموش شد.", ct: ct);
             return;
         }
 
         if (txt == "سوخت گیری" || txt == "سوخت‌گیری" || txt == "سوخت قایق" || txt == "شارژ قایق" || txt == "سوختگیری قایق")
         {
-            var country = Database.GetCountry(uid, chat.Id);
-            if (country == null) { await SendTemp(chat.Id, MsgNoCountryGuide, ct: ct); return; }
-            if (country.Boats == 0) { await SendTemp(chat.Id, "❌ شما قایقی ندارید.", ct: ct); return; }
-            if (country.BoatsFuel >= 100) { await SendTemp(chat.Id, "✅ سوخت قایق‌ها کامل است (100%).", ct: ct); return; }
-            int missing = 100 - country.BoatsFuel;
-            long needIron = (long)(country.Boats * missing * 0.5); // 0.5 iron per % per boat? small
-            var refuelKb = new InlineKeyboardMarkup(new[]
-            {
-                new[] { InlineKeyboardButton.WithCallbackData($"⛽ سوخت‌گیری کامل ({needIron:N0} آهن)", $"boat_refuel_confirm:{uid}:{needIron}") },
-                new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", "cancel") }
-            });
-            await SendTemp(chat.Id, $"⛽ **سوخت‌گیری قایق‌ها**\n━━━━━━━━━━━━━━━━━━━\n🚤 تعداد قایق: {country.Boats}\n⛽ سوخت فعلی: {country.BoatsFuel}%\n🔧 نیاز: {missing}% → هزینه {needIron:N0} آهن\n💡 قایق‌ها سوخت محدود دارند و پس از هر حمله دریایی سوخت تمام می‌کنند و به بندر بازمی‌گردند. بدون سوخت نمی‌توانند حمله کنند و در آپدیت دارایی به صورت خودکار با هزینه کم سوخت‌گیری می‌شوند، اما می‌توانید دستی هم سوخت‌گیری کنید.\n━━━━━━━━━━━━━━━━━━━", markup: refuelKb, ct: ct);
+            await SendTemp(chat.Id, "⛽ سیستم سوخت حذف شد.\n🚤 قایق‌ها دیگر سوخت‌گیری نمی‌خواهند و همیشه آماده‌ی دفاع از سواحل شما هستند.\n⚓ برای حمله‌ی دریایی به زیردریایی یا نبردناو نیاز دارید.", ct: ct);
             return;
         }
 
@@ -5148,11 +5231,11 @@ partial class Program
                 var defenderCountry = Database.GetCountry(sess.AttackTargetId, sess.AttackChatId);
                 if (attackerCountry == null || defenderCountry == null) { EndSession(uid); await SendTemp(uid, "❌ کشور یافت نشد.", ct: ct); return; }
 
-                // Fuel check for boats
-                if (totalBoats > 0 && attackerCountry.BoatsFuel < 20)
+                //  – قایق نیروی تهاجمی نیست: بدون زیردریایی/نبردناو حمله ممکن نیست
+                if (totalSubs + totalBS == 0)
                 {
                     EndSession(uid);
-                    await SendTemp(uid, $"⛽ سوخت قایق‌های شما {attackerCountry.BoatsFuel}% است – نیاز به سوخت‌گیری دارید! دستور «سوخت‌گیری قایق» را بزنید.", ct: ct);
+                    await SendTemp(uid, "🚤 قایق‌های تندرو فقط برای دفاع ساحلی‌اند و نمی‌توانند به تنهایی به کشور دیگری حمله کنند.\n⚓ برای حمله‌ی دریایی حداقل یک زیردریایی یا نبردناو اعزام کنید (قایق‌ها می‌توانند به‌عنوان اسکورت همراهشان بروند).", ct: ct);
                     return;
                 }
                 // Attack shield check
@@ -5165,9 +5248,19 @@ partial class Program
                     await SendTemp(uid, $"🛡 {defenderCountry.Name} به دلیل 5 حمله اخیر تا {leftH} ساعت دیگر سپر 16 ساعته دارد و قابل حمله نیست!", ct: ct);
                     return;
                 }
-                // Create delayed invasion – fleet arrives after asset update (user-friendly 5 min, processed by both timers)
+                //  – زمان سفر ناوگان: بین ۳ تا ۵ ساعت تصادفی.
+                //     ناوگان واقعاً باید مسافت دریایی را طی کند و مدافع فرصت واکنش دارد.
+                //     در گروهی که «معافیت کامل» دارد، این زمان به ۱ دقیقه می‌افتد.
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                long arriveMs = nowMs + 5 * 60 * 1000; // 5 minutes delay, processed by transfer timer (60s) and asset update
+                bool navalExempt = Database.HasGroupLockExemption(sess.AttackChatId);
+                long travelMs;
+                if (navalExempt) travelMs = 60 * 1000L;
+                else travelMs = (long)(rng.Next(3 * 3600, 5 * 3600 + 1)) * 1000L;
+                long arriveMs = nowMs + travelMs;
+                string etaText = navalExempt
+                    ? "۱ دقیقه (معافیت کامل)"
+                    : $"{travelMs / 3600000L} ساعت و {(travelMs % 3600000L) / 60000L} دقیقه";
+                var arriveLocal = DateTimeOffset.FromUnixTimeMilliseconds(arriveMs).ToOffset(TimeSpan.FromHours(3.5));
 
                 var inv = new NavalInvasion
                 {
@@ -5222,8 +5315,8 @@ partial class Program
                 Database.ReconcileDefense(uid, sess.AttackChatId);
 
                 EndSession(uid);
-                await SendTemp(uid, $"⚓ ناوگان اعزام شد!\n\n🚤 قایق: {totalBoats} | ⚓ زیردریایی: {totalSubs} | 🚢 نبردناو: {totalBS}\n🎯 هدف: {defenderCountry.Name}\n📍 استراتژی: {sess.AttackNavalStrategy} / تاکتیک: {sess.AttackNavalTactic}\n\n⏳ ناوگان پس از آپدیت دارایی به مقصد می‌رسد و به مدافع اطلاع داده می‌شود.\n🌊 سوخت قایق‌ها پس از نبرد تمام می‌شود و نیاز به سوخت‌گیری دارد.", ct: ct);
-                try { await SendTemp(sess.AttackChatId, $"⚓ {attackerCountry.Name} ناوگان دریایی به سمت {defenderCountry.Name} اعزام کرد!\n🚤{totalBoats} ⚓{totalSubs} 🚢{totalBS} – رسیدن پس از آپدیت دارایی", ct: ct); } catch { }
+                await SendTemp(uid, $"⚓ ناوگان اعزام شد!\n\n🚤 قایق: {totalBoats} | ⚓ زیردریایی: {totalSubs} | 🚢 نبردناو: {totalBS}\n🎯 هدف: {defenderCountry.Name}\n📍 استراتژی: {sess.AttackNavalStrategy} / تاکتیک: {sess.AttackNavalTactic}\n\n🧭 زمان سفر دریایی: {etaText}\n🕐 رسیدن حدود {arriveLocal:HH:mm} به وقت تهران\n🚤 قایق‌ها فقط نقش اسکورت دارند؛ ضربه‌ی اصلی با زیردریایی و نبردناو است.", ct: ct);
+                try { await SendTemp(sess.AttackChatId, $"⚓ {attackerCountry.Name} ناوگان دریایی به سمت {defenderCountry.Name} اعزام کرد!\n🚤{totalBoats} ⚓{totalSubs} 🚢{totalBS}\n🧭 زمان تخمینی رسیدن: {etaText}", ct: ct); } catch { }
                 return;
             }
 
@@ -5314,6 +5407,7 @@ partial class Program
                 sess.AttackPlaneModelAmountsFinal = new List<long>(sess.AttackModelAmounts);
                 // Now bombers per-model
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
+                if (atk == null) { EndSession(uid); await SendTemp(uid, "❌ کشور یافت نشد.", ct: ct); return; }
                 var bomberBreakdown = GetTransferBreakdown(atk, "bombers");
                 if (bomberBreakdown.Count == 0)
                 {
@@ -5481,7 +5575,7 @@ partial class Program
         }
         if (txt == "راهنما" || txt == "/help" || txt == "help")
         {
-            await SendPermanent(uid, HelpText, parseMode: ParseMode.Html, ct: ct);
+            await SendHelp(uid, temporary: false, ct);
             return;
         }
 
@@ -5513,7 +5607,7 @@ partial class Program
         var parts = cb.Data.Split(':');
         if (parts.Length < 1) return;
 
-        if (parts[0] is "eq_details" or "dep_info" or "faction" or "build_menu" or "upgrade" or "tank_info" or "tank_buy" or "plane_info" or "plane_buy" or "bomber_info" or "bomber_buy" or "aa_info" or "aa_buy" or "boat_info" or "boat_buy" or "sub_info" or "sub_buy" or "battleship_info" or "battleship_buy" or "battleship_repair" or "battleship_repair_confirm" or "boat_refuel" or "boat_refuel_confirm" or "cancel")
+        if (parts[0] is "eq_details" or "dep_info" or "faction" or "build_menu" or "upgrade" or "tank_info" or "tank_buy" or "plane_info" or "plane_buy" or "bomber_info" or "bomber_buy" or "aa_info" or "aa_buy" or "boat_info" or "boat_buy" or "sub_info" or "sub_buy" or "battleship_info" or "battleship_buy" or "battleship_repair" or "battleship_repair_confirm" or "cancel")
         {
             if (parts.Length >= 2 && TryParseLong(parts[1], out long ownerBtn))
             {
@@ -5552,8 +5646,6 @@ partial class Program
             case "battleship_buy": await HandleBattleshipBuyCallback(cb, parts, ct); break;
             case "battleship_repair": await HandleBattleshipRepairCallback(cb, parts, ct); break;
             case "battleship_repair_confirm": await HandleBattleshipRepairConfirmCallback(cb, parts, ct); break;
-            case "boat_refuel": await HandleBoatRefuelCallback(cb, parts, ct); break;
-            case "boat_refuel_confirm": await HandleBoatRefuelConfirmCallback(cb, parts, ct); break;
             case "airdef_strategy": await HandleAirDefStrategyCallback(cb, parts, ct); break;
             case "airdef_tactic": await HandleAirDefTacticCallback(cb, parts, ct); break;
             case "attack_group": await HandleAttackGroupCallback(cb, parts, ct); break;
@@ -5999,9 +6091,9 @@ partial class Program
         string tid = parts[2];
         string info = tid switch
         {
-            "M2Medium" => "🇺🇸 M2 Medium\n\n⚖️ ۱۸ تن | 🔫 ۳۷mm | 🛡 ۳۰mm | ⚡ ۴۲km/h\n💰 هر ۵ تانک: ۲K آهن + ۲K پول",
-            "T28" => "🇷🇺 T-28\n\n⚖️ ۲۸ تن | 🔫 ۷۶mm | 🛡 ۸۰mm | ⚡ ۳۷km/h\n💰 هر ۵ تانک: ۳K آهن + ۳K پول",
-            "PanzerIII" => "🇩🇪 Panzer III\n\n⚖️ ۲۳ تن | 🔫 ۵۰mm | 🛡 ۶۰mm | ⚡ ۴۰km/h\n💰 هر ۵ تانک: ۲.۵K آهن + ۲.۵K پول",
+            "M2Medium" => "🇺🇸 M2 Medium\n\n⚖️ ۱۸.۷ تن | 👥 خدمه ۶\n🔫 توپ ۳۷mm M6 — نفوذ ۴۶mm در ۵۰۰ متر\n🎯 آهنگ آتش ۲۰ گلوله/دقیقه | ۲۰۰ گلوله\n🔫 ۷ مسلسل با ۱۲۲۵۰ فشنگ — بهترین ضدپیاده\n🛡 زره ۳۲mm جلو / ۲۵mm پهلو (پرچی)\n⚡ ۴۲km/h جاده، ۲۶ آفرود | اطمینان ۹۵٪\n💡 نقش: پرآتش و سریع، ولی زره نازک\n💰 هر ۵ تانک: ۲K آهن + ۲K پول",
+            "T28" => "🇷🇺 T-28\n\n⚖️ ۲۵ تن | 👥 خدمه ۶\n🔫 توپ ۷۶.۲mm L-10 با گلوله BR-350A\n🎯 نفوذ ۶۰mm در ۵۰۰ متر — بالاترین نفوذ این سه\n💥 گلوله انفجاری ۶۲۱ گرم TNT — قوی‌ترین ضدسنگر\n⏱ ولی فقط ۵ گلوله/دقیقه و ۶۹ گلوله کل\n🛡 زره ۳۰mm جلو / ۲۰mm پهلو | 🔭 اپتیک ضعیف\n⚡ ۳۷km/h جاده، ۱۸ آفرود | اطمینان ۸۲٪\n💡 ضربه‌ی سنگین ولی کند — با روحیه‌ی بالای شوروی دوام می‌آورد\n💰 هر ۵ تانک: ۳K آهن + ۳K پول",
+            "PanzerIII" => "🇩🇪 Panzer III\n\n⚖️ ۲۱.۵ تن | 👥 خدمه ۵\n🔫 توپ ۵۰mm KwK 38 L/42 — نفوذ ۴۷mm در ۵۰۰ متر\n🎯 آهنگ آتش ۱۳ گلوله/دقیقه | ۹۹ گلوله\n🛡 زره ۶۰mm جلو (۳۰+۳۰) / ۳۰mm پهلو\n🔭 اپتیک TZF5d — بهترین دقت در برد بلند\n⚡ ۴۰km/h جاده، ۱۵ آفرود | اطمینان ۹۷٪\n💡 نقش: متعادل — زره جلویش در برابر ۳۷mm تقریباً مصون است\n💰 هر ۵ تانک: ۲.۵K آهن + ۲.۵K پول",
             _ => "تانک ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6039,9 +6131,9 @@ partial class Program
         string pid = parts[2];
         string info = pid switch
         {
-            "Bf109" => "🇩🇪 Bf 109\n⚡ ۵۷۰km/h | 🎯 مانور ۸/۱۰\n💰 هر ۵: ۲K آهن + ۵K پول",
-            "P36" => "🇺🇸 P-36\n⚡ ۵۰۰km/h | 🎯 مانور ۹/۱۰\n💰 هر ۵: ۱.۵K آهن + ۴K پول",
-            "I16" => "🇷🇺 I-16\n⚡ ۵۲۰km/h | 🎯 مانور ۹/۱۰\n💰 هر ۵: ۱K آهن + ۳.۵K پول",
+            "Bf109" => "🇩🇪 Bf 109\n⚡ ۵۷۰km/h | ⛰ سقف ۱۱۰۰۰m | 📈 صعود ۱۵.۵ m/s\n🔫 وزن آتش ۴۴ kg/min — سنگین‌ترین\n🌀 دور کامل ۲۰.۵ ثانیه | مهمات ۱۱ ثانیه آتش\n📏 برد ۶۶۰km | 💣 ۲۵۰kg بمب\n💡 سریع و کوبنده، ولی مهمات کم و برد کوتاه\n💰 هر ۵: ۲K آهن + ۵K پول",
+            "P36" => "🇺🇸 P-36\n⚡ ۵۰۰km/h | ⛰ سقف ۱۰۰۰۰m | 📈 صعود ۱۰.۵ m/s\n🔫 وزن آتش ۱۲ kg/min — سبک\n🌀 دور کامل ۱۸.۵ ثانیه | مهمات ۲۵ ثانیه آتش\n📏 برد ۱۳۰۰km — طولانی‌ترین\n💡 چابک و بادوام با برد بلند، ولی کم‌سلاح\n💰 هر ۵: ۱.۵K آهن + ۴K پول",
+            "I16" => "🇷🇺 I-16\n⚡ ۵۲۵km/h | ⛰ سقف ۹۷۰۰m | 📈 صعود ۱۴.۷ m/s\n🔫 وزن آتش ۲۸ kg/min (۲×ShVAK ۲۰mm)\n🌀 دور کامل ۱۷ ثانیه — چابک‌ترین\n📏 برد ۷۰۰km | مهمات فقط ۱۲ ثانیه\n💡 در سگ‌جنگی نزدیک عالی، ولی شکننده و کم‌برد\n💰 هر ۵: ۱K آهن + ۳.۵K پول",
             _ => "ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6078,9 +6170,9 @@ partial class Program
         string bid = parts[2];
         string info = bid switch
         {
-            "B17" => "🇺🇸 B-17\n⚡ ۴۶۰km/h | 🛡 ۸/۱۰ | 💣 ۳۶۰۰kg\n💰 هر ۱: ۳K آهن + ۵K پول",
-            "He111" => "🇩🇪 He 111\n⚡ ۴۳۵km/h | 🛡 ۵/۱۰ | 💣 ۲۰۰۰kg\n💰 هر ۱: ۲K آهن + ۴K پول",
-            "DB3" => "🇷🇺 DB-3\n⚡ ۴۳۰km/h | 🛡 ۳/۱۰ | 💣 ۱۰۰۰kg\n💰 هر ۱: ۱K آهن + ۳K پول",
+            "B17" => "🇺🇸 B-17\n⚡ ۴۶۲km/h | ⛰ سقف ۱۰۸۵۰m — بالاتر از برد اغلب پدافندها\n💣 بار بمب ۲۷۲۴kg | 🎯 خطای بمباران ۳۵۰m (نشانه‌روی Norden)\n🔫 دفاع ۷۸ kg/min از ۸ جایگاه — پوشش کروی\n🛡 تحمل ۲.۲× | 👥 خدمه ۱۰\n💡 دیرکشته‌ترین بمب‌افکن؛ بالا پرواز می‌کند و دقیق می‌زند\n💰 هر ۱: ۳K آهن + ۵K پول",
+            "He111" => "🇩🇪 He 111\n⚡ ۴۴۰km/h | ⛰ سقف ۶۵۰۰m — در برد پدافند\n💣 بار بمب ۲۰۰۰kg | 🎯 خطای بمباران ۳۰۰m\n🔫 دفاع ۲۲ kg/min از ۵ جایگاه\n🛡 تحمل ۱.۰× | 👥 خدمه ۵\n💡 دقیق ولی کم‌ارتفاع؛ بدون اسکورت آسیب‌پذیر است\n💰 هر ۱: ۲K آهن + ۴K پول",
+            "DB3" => "🇷🇺 DB-3\n⚡ ۴۳۹km/h | ⛰ سقف ۸۴۰۰m | 📏 برد ۳۸۰۰km\n💣 بار بمب ۱۰۰۰kg | 🎯 خطای بمباران ۴۲۰m\n🔫 دفاع فقط ۱۴ kg/min از ۳ جایگاه\n🛡 تحمل ۰.۷۵× | 👥 خدمه ۴\n⚠️ بردِ بلند ولی بسیار آسیب‌پذیر — حتماً با اسکورت\n💰 هر ۱: ۱K آهن + ۳K پول",
             _ => "ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6147,9 +6239,9 @@ partial class Program
         string bid = parts[2];
         string info = bid switch
         {
-            "SBoot" => "🇩🇪 S-Boot (E-Boat)\n⚡ سرعت: 38–41 گره (70–76 km/h)\n🛡 زره: تقریباً هیچ (بدنه فولادی سبک)\n👥 خدمه: 21–24 نفر\n🔫 تسلیحات: 2x لوله اژدر 533mm، 1x توپ 20mm، چند مسلسل 7.92mm\n💰 هر 5 عدد: 2K پول + 1K آهن",
-            "PTBoat" => "🇺🇸 PT Boat\n⚡ سرعت: 40–45 گره (74–83 km/h)\n🛡 زره: هیچ\n👥 خدمه: 10–14 نفر\n🔫 تسلیحات: 2–4 اژدر، مسلسل 12.7mm، گاهی توپ 20mm\n💰 هر 5 عدد: 3K پول + 1.5K آهن",
-            "G5" => "🇷🇺 G-5\n⚡ سرعت: 50–53 گره (93–98 km/h)\n🛡 زره: هیچ\n👥 خدمه: 6 نفر\n🔫 تسلیحات: 2x اژدر 533mm، 2x مسلسل 7.62mm\n💰 هر 5 عدد: 2.5K پول + 1.5K آهن",
+            "SBoot" => "🇩🇪 S-Boot (E-Boat)\n⚡ ۳۹.۵ گره | 📏 ۳۴.۹m × ۵.۳m | ۱۰۰ تن\n🔫 ۲ لوله اژدر ۵۳۳mm (کلاهک ۲۸۰kg، برد ۷.۵km)\n💥 توپ ۲۰mm | 🛡 ورقه ۱۰mm ضدترکش\n🌊 دریانوردی ۰.۸۵ — در دریای متلاطم هم می‌جنگد\n👥 خدمه ۲۴\n💡 بهترین قایق برای آب ناآرام\n💰 هر 5 عدد: 2K پول + 1K آهن",
+            "PTBoat" => "🇺🇸 PT Boat\n⚡ ۴۱ گره | 📏 ۲۴.۴m × ۶.۳m | ۵۶ تن\n🔫 ۴ لوله اژدر (کلاهک ۲۷۲kg، برد ۴.۱km)\n💥 توپ ۲۰mm، ۱۴ kg/min آتش سبک | 🛡 بدنه چوبی، بدون زره\n🌊 دریانوردی ۰.۵۵ — در موج سنگین کند می‌شود\n👥 خدمه ۱۴\n💡 بیشترین اژدر، ولی بدنه‌ی شکننده\n💰 هر 5 عدد: 3K پول + 1.5K آهن",
+            "G5" => "🇷🇺 G-5\n⚡ ۵۱ گره — سریع‌ترین | 📏 ۱۹.۱m × ۳.۴m | فقط ۱۷ تن\n🔫 ۲ اژدر ۵۳۳mm (کلاهک ۲۰۰kg، برد ۳km)\n💥 مسلسل ۱۲.۷mm | 🛡 ورقه ۷mm\n🌊 دریانوردی ۰.۳۰ — فقط آب آرام!\n👥 خدمه ۶\n⚠️ در دریای متلاطم تقریباً بی‌استفاده می‌شود\n💰 هر 5 عدد: 2.5K پول + 1.5K آهن",
             _ => "قایق ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6170,6 +6262,7 @@ partial class Program
         long cid = cb.Message.Chat.Id;
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
+        if (c.PortLevel <= 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — تا بازسازی نمی‌توانید قایق بسازید", showAlert: true, cancellationToken: ct); return; }
 
         // Price per 5
         double moneyPer5 = bid switch { "SBoot" => 2000, "PTBoat" => 3000, "G5" => 2500, _ => 0 };
@@ -6196,9 +6289,9 @@ partial class Program
         string sid = parts[2];
         string info = sid switch
         {
-            "VIIC" => "🇩🇪 Type VIIC U-boat\n⚡ سرعت: 17.7 گره روی آب / 7.6 گره زیر آب\n🛡 زره: ندارد (بدنه فشاری 18–22mm فولاد)\n👥 خدمه: 44–52 نفر\n🔫 تسلیحات: 5x لوله اژدر 533mm، 11–14 اژدر، 1x توپ 88mm، 1x توپ 20mm ضدهوایی\n💰 هر 1 عدد: 10K پول + 5K آهن",
-            "Gato" => "🇺🇸 Gato\n⚡ سرعت: 21 گره روی آب / 9 گره زیر آب\n🛡 زره: ندارد (بدنه فشاری فولادی)\n👥 خدمه: 55–60 نفر\n🔫 تسلیحات: 8x لوله اژدر 533mm، 24 اژدر، 1x توپ 76mm، مسلسل ضدهوایی\n💰 هر 1 عدد: 10K پول + 5K آهن",
-            "SClass" => "🇷🇺 S-class, Series IX\n⚡ سرعت: 13–14 گره روی آب / 7–8 گره زیر آب\n🛡 زره: ندارد (بدنه فشاری فولادی)\n👥 خدمه: 37–44 نفر\n🔫 تسلیحات: 6x لوله اژدر 533mm، 10 اژدر، 1x توپ 45mm، مسلسل ضدهوایی\n💰 هر 1 عدد: 8K پول + 4K آهن",
+            "VIIC" => "🇩🇪 Type VIIC U-boat\n⚡ ۱۷.۷ گره سطح / ۷.۶ گره زیر آب\n🌊 عمق مجاز ۲۳۰m — عمیق‌ترین\n⏱ غواصی در ۲۵ ثانیه — سریع‌ترین فرار\n🔇 صدا ۰.۳۰ — ساکت‌ترین\n🔫 ۵ لوله، ۱۴ اژدر (کلاهک ۲۸۰kg، برد ۷.۵km) | توپ عرشه ۸۸mm\n🔋 ۲۰ ساعت زیر آب | 👥 خدمه ۴۸\n💡 بهترین شکارچی: عمیق، ساکت، سریع در غواصی\n💰 هر 1 عدد: 10K پول + 5K آهن",
+            "Gato" => "🇺🇸 Gato\n⚡ ۲۱ گره سطح / ۸.۷ گره زیر آب\n🌊 عمق مجاز ۹۰m | ⏱ غواصی ۳۵ ثانیه\n🔇 صدا ۰.۴۰\n🔫 ۱۰ لوله، ۲۴ اژدر (کلاهک ۲۹۲kg، برد ۸.۲km) — بیشترین اژدر\n🔋 ۴۸ ساعت زیر آب — طولانی‌ترین گشت | 👥 خدمه ۶۰\n💡 بیشترین قدرت آتش، ولی عمق کم و غواصی کند\n💰 هر 1 عدد: 10K پول + 5K آهن",
+            "SClass" => "🇷🇺 S-class, Series IX\n⚡ ۱۹.۵ گره سطح / ۸.۷ گره زیر آب\n🌊 عمق مجاز ۱۰۰m | ⏱ غواصی ۴۸ ثانیه — کندترین\n🔊 صدا ۰.۵۵ — پرصداترین، راحت پیدا می‌شود\n🔫 ۶ لوله، ۱۲ اژدر (کلاهک ۳۰۰kg، برد ۴km) | توپ ۱۰۰mm\n🔋 ۱۵ ساعت زیر آب | 👥 خدمه ۴۶\n⚠️ کلاهک سنگین ولی برد کوتاه و بقای پایین\n💰 هر 1 عدد: 8K پول + 4K آهن",
             _ => "زیردریایی ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6219,6 +6312,7 @@ partial class Program
         long cid = cb.Message.Chat.Id;
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
+        if (c.PortLevel <= 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — تا بازسازی نمی‌توانید زیردریایی بسازید", showAlert: true, cancellationToken: ct); return; }
 
         double moneyPer1 = sid switch { "VIIC" => 10000, "Gato" => 10000, "SClass" => 8000, _ => 0 };
         double ironPer1 = sid switch { "VIIC" => 5000, "Gato" => 5000, "SClass" => 4000, _ => 0 };
@@ -6244,9 +6338,9 @@ partial class Program
         string bid = parts[2];
         string info = bid switch
         {
-            "Bismarck" => "🇩🇪 Bismarck\n⚓ تعداد ساخته شده: 2\n⚡ سرعت: 30 گره (56 km/h)\n👥 خدمه: 2,092 نفر\n🛡 زره: کمربند اصلی 320mm، عرشه 100–120mm، برجک‌ها 360mm، برج فرماندهی 350mm\n🔫 تسلیحات: 8x 380mm (4 برجک دوتایی)، 12x 150mm، 16x 105mm ضدهوایی، 16x 37mm ضدهوایی، 12x 20mm ضدهوایی، 4x Arado Ar 196 شناسایی\n💰 هر 1: 50K پول + 30K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
-            "Iowa" => "🇺🇸 Iowa\n⚡ سرعت: 28 گره (52 km/h)\n👥 خدمه: 1,800 نفر\n🛡 زره: کمربند اصلی 305mm، عرشه 140mm، برجک‌ها 406mm، برج فرماندهی 373mm\n🔫 تسلیحات: 9x 406mm (3 برجک سه‌تایی)، 20x 127mm دو منظوره، 16x 28mm ضدهوایی، 18x 12.7mm مسلسل، 3x Vought OS2U Kingfisher شناسایی\n💰 هر 1: 50K پول + 40K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
-            "Soyuz" => "🇷🇺 Sovetsky Soyuz\n⚓ تعداد ساخته شده: 4\n⚡ سرعت: 23 گره (43 km/h)\n👥 خدمه: 1,220 نفر\n🛡 زره: کمربند اصلی 225mm، عرشه 50–75mm، برجک‌ها 203mm، برج فرماندهی 254mm\n🔫 تسلیحات: 12x 305mm (4 برجک سه‌تایی)، 16x 120mm، 6x 76.2mm ضدهوایی، 6x 37mm ضدهوایی، 12x 12.7mm مسلسل\n💰 هر 1: 45K پول + 25K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
+            "Bismarck" => "🇩🇪 Bismarck\n⚡ ۳۰.۱ گره | 📏 ۲۵۱m × ۳۶m | ۵۰,۳۰۰ تن\n🔫 ۸× ۳۸۰mm (گلوله ۸۰۰kg، پوزه ۸۲۰m/s، برد ۳۶.۵km)\n🎯 ۲.۳ گلوله/دقیقه هر لوله | ۱۲× ۱۵۰mm فرعی\n🛡 کمربند ۳۲۰mm | عرشه ۱۲۰mm ⚠️ | برجک ۳۶۰mm\n📡 کنترل آتش ۸۲٪ | 🎯 پدافند ۱۹۰ kg/min | 👥 ۲۰۹۲\n💡 کمربند عالی ولی عرشه‌ی نازک — در برد بلند آسیب‌پذیر\n💰 هر 1: 50K پول + 30K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
+            "Iowa" => "🇺🇸 Iowa\n⚡ ۳۲.۵ گره — سریع‌ترین | 📏 ۲۷۰m × ۳۳m | ۵۷,۵۴۰ تن\n🔫 ۹× ۴۰۶mm (گلوله ۱۲۲۵kg، پوزه ۷۶۲m/s، برد ۳۸.۷km)\n🎯 ۲ گلوله/دقیقه هر لوله | ۲۰× ۱۲۷mm دومنظوره\n🛡 کمربند ۳۰۷mm | عرشه ۱۵۲mm | برجک ۴۹۵mm\n📡 کنترل آتش ۹۸٪ (رادار Mk8) — بهترین جنگ\n🎯 پدافند ۹۰۰ kg/min — بی‌رقیب | 👥 ۲۷۰۰\n💡 سنگین‌ترین گلوله + بهترین رادار: در برد بلند اول می‌زند\n💰 هر 1: 50K پول + 40K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
+            "Soyuz" => "🇷🇺 Sovetsky Soyuz\n⚡ ۲۸ گره | 📏 ۲۶۹m × ۳۸.۹m | ۵۹,۱۵۰ تن\n🔫 ۹× ۴۰۶mm (گلوله ۱۱۰۸kg، پوزه ۸۳۰m/s، برد ۴۵.۶km) — بلندترین برد\n🛡 کمربند ۳۷۵mm — ضخیم‌ترین | عرشه ۱۵۵mm\n📡 کنترل آتش ۵۵٪ — بدون رادار، دقت پایین\n🎯 پدافند فقط ۱۲۰ kg/min ⚠️ | 👥 ۱۶۶۴\n💡 زره و برد عالی، ولی بدون رادار دیر هدف را می‌زند\n💰 هر 1: 45K پول + 25K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
             _ => "نبردناو ناشناخته"
         };
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
@@ -6268,6 +6362,11 @@ partial class Program
         var c = Database.GetCountry(uid, cid);
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور", cancellationToken: ct); return; }
 
+        if (c.PortLevel <= 0)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id, "💥 بندر شما ویران شده — اول بازسازی کنید", showAlert: true, cancellationToken: ct);
+            return;
+        }
         if (c.PortLevel < 4)
         {
             await bot.AnswerCallbackQueryAsync(cb.Id, "⚓ برای ساخت نبردناو بندر سطح ۴ لازم است", showAlert: true, cancellationToken: ct);
@@ -6310,9 +6409,10 @@ partial class Program
         long ironPer = c.Faction == Faction.USA ? 40000 : c.Faction == Faction.USSR ? 25000 : 30000;
         long totalMoney = moneyPer * totalCount;
         long totalIron = ironPer * totalCount;
+        //  – درصد آسیب × قیمت ساخت
         double frac = c.BattleshipDamage / (double)(totalCount * 100);
-        long needMoney = (long)(totalMoney * 0.6 * frac);
-        long needIron = (long)(totalIron * 0.6 * frac);
+        long needMoney = (long)(totalMoney * frac);
+        long needIron = (long)(totalIron * frac);
         var kb = new InlineKeyboardMarkup(new[]
         {
             new[] { InlineKeyboardButton.WithCallbackData($"✅ تعمیر ({needMoney/1000}K پول، {needIron/1000}K آهن)", $"battleship_repair_confirm:{uid}:{needMoney}:{needIron}") },
@@ -6339,46 +6439,6 @@ partial class Program
         Database.UpdateCountryFull(c);
         await bot.AnswerCallbackQueryAsync(cb.Id, "✅ تعمیر شد!", cancellationToken: ct);
         await SendTemp(cb.Message.Chat.Id, $"✅ نبردناوهای شما به طور کامل تعمیر شد!\n💰 هزینه: {needMoney:N0} پول + {needIron:N0} آهن\n🚢 آماده نبرد!", ct: ct);
-        if (cb.Message != null) DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
-    }
-
-    static async Task HandleBoatRefuelCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
-    {
-        if (parts.Length < 2 || cb.Message == null) return;
-        long uid = cb.From.Id;
-        long cid = cb.Message.Chat.Id;
-        var c = Database.GetCountry(uid, cid);
-        if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور یافت نشد", showAlert: true, cancellationToken: ct); return; }
-        if (c.Boats == 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ قایقی ندارید", showAlert: true, cancellationToken: ct); return; }
-        if (c.BoatsFuel >= 100) { await bot.AnswerCallbackQueryAsync(cb.Id, "✅ سوخت کامل است", showAlert: true, cancellationToken: ct); return; }
-        int missing = 100 - c.BoatsFuel;
-        long needIron = c.Boats * missing / 2;
-        if (needIron <= 0) needIron = c.Boats;
-        var kb = new InlineKeyboardMarkup(new[]
-        {
-            new[] { InlineKeyboardButton.WithCallbackData($"⛽ سوخت‌گیری ({needIron:N0} آهن)", $"boat_refuel_confirm:{uid}:{needIron}") },
-            new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", $"cancel:{uid}") }
-        });
-        await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
-        await SendTemp(cid, $"⛽ سوخت قایق‌ها: {c.BoatsFuel}%\n🚤 تعداد: {c.Boats}\n🔧 نیاز: {missing}% → {needIron:N0} آهن", markup: kb, ct: ct);
-    }
-
-    static async Task HandleBoatRefuelConfirmCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
-    {
-        if (parts.Length < 3 || cb.Message == null) return;
-        long uid = cb.From.Id;
-        if (!TryParseLong(parts[2], out long needIron)) return;
-        long cid = cb.Message.Chat.Id;
-        var c = Database.GetCountry(uid, cid);
-        if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور یافت نشد", showAlert: true, cancellationToken: ct); return; }
-        if (c.Iron < needIron) { await bot.AnswerCallbackQueryAsync(cb.Id, $"❌ آهن کم: نیاز {needIron:N0}", showAlert: true, cancellationToken: ct); return; }
-        c.Iron -= needIron;
-        c.BoatsFuel = 100;
-        c.SubmarinesFuel = Math.Max(c.SubmarinesFuel, 100);
-        Database.SetBoatFuelPct(uid, cid, 100);
-        Database.UpdateCountryFull(c);
-        await bot.AnswerCallbackQueryAsync(cb.Id, "✅ سوخت‌گیری شد!", cancellationToken: ct);
-        await SendTemp(cb.Message.Chat.Id, $"✅ قایق‌های شما سوخت‌گیری شد!\n⛽ سوخت: 100%\n💰 هزینه: {needIron:N0} آهن\n🌊 آماده اعزام!", ct: ct);
         if (cb.Message != null) DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
     }
 
@@ -6500,13 +6560,30 @@ partial class Program
         double incomePower = nonTaxIncome / 20.0;
         double groundPower = (c.Soldiers / 20.0) + (c.Tanks * 15);
         double airPower = (c.Planes * 12) + (c.Bombers * 25);
+        //  – نیروی دریایی بخش سنگینی از قدرت ملی است.
+        //     وزن‌ها با هزینه‌ی واقعی ساخت هم‌تراز شده‌اند (نرخ مرجع: تانک، ~۱۹ امتیاز
+        //     به ازای هر ۱۰۰۰ هزینه):
+        //       قایق      ۶۰۰ هزینه  →   ۱۲
+        //       زیردریایی ۱۵٬۰۰۰    →  ۲۸۰
+        //       نبردناو   ۸۵٬۰۰۰    → ۱۸۰۰  (+ پاداش کمیابی: سقف ۳ و نیاز بندر ۴)
+        //     نبردناو آسیب‌دیده به نسبت آسیبش کم‌ارزش‌تر می‌شود (کف ۲۵٪).
+        long bsCount = c.Battleships + c.BattleshipsAtSea;
+        double bsHealth = bsCount > 0
+            ? Math.Clamp(1.0 - (c.BattleshipDamage / (double)(bsCount * 100)), 0.25, 1.0)
+            : 1.0;
+        double navalPower = ((c.Boats + c.BoatsAtSea) * 12)
+                          + ((c.Submarines + c.SubmarinesAtSea) * 280)
+                          + (bsCount * 1800 * bsHealth)
+                          + (c.PortLevel * 60);
         double otherPower = (c.Cities * 50) + (c.AntiAir * 8) + (c.RecruitmentRate * 40) + (c.DefenseWins * 30);
-        return (long)Math.Ceiling(Math.Max(0, popPower + incomePower + groundPower + airPower + otherPower));
+        return (long)Math.Ceiling(Math.Max(0, popPower + incomePower + groundPower + airPower + navalPower + otherPower));
     }
 
     static bool IsSuperpowerCollision(long chatId, long leaderId, long targetId, out string reason)
     {
         reason = "";
+        // معافیت کامل گروه: هیچ سقف ابرقدرتی روی اتحادها اعمال نمی‌شود
+        if (Database.HasGroupLockExemption(chatId)) return false;
         var all = Database.GetCountriesByChatId(chatId).OrderByDescending(c => CalcManpower(c)).ToList();
         if (all.Count <= 1) return false;
         var leader = all.FirstOrDefault(c => c.OwnerId == leaderId);
@@ -6543,7 +6620,9 @@ partial class Program
             if (alliance == null) { Database.DeleteAllianceInvite(invId); await bot.AnswerCallbackQueryAsync(cb.Id, "❌ اتحاد منحل شده.", showAlert: true, cancellationToken: ct); return; }
             if (Database.GetUserAllianceId(inv.ChatId, inv.TargetUserId) > 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ عضو اتحاد دیگری هستید!", showAlert: true, cancellationToken: ct); return; }
             int totalPlayers = Database.GetCountriesByChatId(inv.ChatId).Count;
-            int maxMembers = Math.Max(2, totalPlayers / 2);
+            //  معافیت کامل گروه سقف ظرفیت اتحاد را هم برمی‌دارد
+            int maxMembers = Database.HasGroupLockExemption(inv.ChatId)
+                ? int.MaxValue : Math.Max(2, totalPlayers / 2);
             if (Database.GetAllianceMembers(inv.AllianceId).Count >= maxMembers) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ ظرفیت پر!", showAlert: true, cancellationToken: ct); return; }
             if (IsSuperpowerCollision(inv.ChatId, inv.LeaderId, inv.TargetUserId, out string reason)) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ " + reason, showAlert: true, cancellationToken: ct); return; }
             Database.AddAllianceMember(inv.AllianceId, inv.ChatId, inv.TargetUserId);
@@ -6852,7 +6931,7 @@ partial class Program
         long mp = CalcManpower(c);
         string crisis = c.Besieged >= 2 ? "🆘 بحرانی! (۵۰٪ درآمد، قفل سطح ۴-۵)\n\n" : "";
         // Naval info for وضعیت کشور
-        string navalLine = $"🚤 قایق: {c.Boats} (سوخت {c.BoatsFuel}%{(c.BoatsAtSea>0 ? $", در دریا {c.BoatsAtSea}" : "")}) | ⚓ زیردریایی: {c.Submarines}{(c.SubmarinesAtSea>0 ? $" در دریا {c.SubmarinesAtSea}" : "")} | 🚢 نبردناو: {c.Battleships}/3{(c.BattleshipDamage>0 ? $" آسیب {c.BattleshipDamage}%" : "")}{(c.BattleshipsAtSea>0 ? $" در دریا {c.BattleshipsAtSea}" : "")}";
+        string navalLine = $"🚤 قایق (دفاع ساحلی): {c.Boats}{(c.BoatsAtSea>0 ? $" | در دریا {c.BoatsAtSea}" : "")} | ⚓ زیردریایی: {c.Submarines}{(c.SubmarinesAtSea>0 ? $" در دریا {c.SubmarinesAtSea}" : "")} | 🚢 نبردناو: {c.Battleships}/3{(c.BattleshipDamage>0 ? $" آسیب {c.BattleshipDamage}%" : "")}{(c.BattleshipsAtSea>0 ? $" در دریا {c.BattleshipsAtSea}" : "")}";
         string info = crisis + $"🏳️ کشور: {c.Name}\n👤 مالک: {c.OwnerName}\n{status}\n⚡ مان‌پاور: {mp / 1000.0:F1}K\n\n" +
             $"💰 پول: {(c.Money / 1000.0):F1}K\n🏭 ساختمان: +{bInc / 1000.0:F1}K\n🧾 مالیات: +{tInc / 1000.0:F1}K ({c.TaxRate}%)\n\n" +
             $"🔩 آهن: {(c.Iron / 1000.0):F1}K\n⛏️ معدن: +{iInc / 1000.0:F1}K\n\n" +
@@ -6951,7 +7030,7 @@ partial class Program
         var sb = new StringBuilder();
         sb.AppendLine($"⚔️ <b>جزئیات نظامی {c.Name} (خصوصی):</b>");
         sb.AppendLine("━━━━━━━━━━━━━━━━━━━");
-        sb.AppendLine($"👤 مالک: {c.OwnerName} | 💰 {c.Money:N0} | 🔩 {c.Iron:N0} | ⛽ قایق {c.BoatsFuel}%");
+        sb.AppendLine($"👤 مالک: {c.OwnerName} | 💰 {c.Money:N0} | 🔩 {c.Iron:N0} | 🚤 قایق {c.Boats:N0}");
         if (c.BattleshipDamage>0) sb.AppendLine($"🔧 آسیب نبردناو: {c.BattleshipDamage}% | در دریا: {c.BoatsAtSea}🚤 {c.SubmarinesAtSea}⚓ {c.BattleshipsAtSea}🚢");
         sb.AppendLine();
 
@@ -7454,7 +7533,25 @@ partial class Program
                     if (attacker == null || defender == null) { Database.DeleteDeployment(d.Id); try { await SendPermanent(d.ChatId, $"❌ صف‌آرایی «{aName}» علیه «{tName}» لغو شد.", ct: ct); } catch { } continue; }
                     try { await SendPermanent(d.ChatId, $"⚔️ آغاز تهاجم اتحاد «{aName}» علیه «{tName}»!", ct: ct); } catch { }
                     attacker.Tanks += d.Tanks; attacker.Soldiers += d.Soldiers; attacker.Planes += d.Fighters; attacker.Bombers += d.Bombers;
-                    var result = WarEngine.RunBattle(attacker, defender, d.Tanks, d.Soldiers, d.Fighters, d.Bombers, d.Strategy, d.Tactic, 0, 0);
+                    //  – ترکیب زرهی/هوایی اتحاد به تفکیک فکشن مشارکت‌کنندگان (تلفات هر مدل جدا حساب می‌شود)
+                    var depContribsOff = Database.GetDeploymentContributors(d.Id);
+                    var offTankBreak = new List<(string Model, long Count)>();
+                    var offPlaneBreak = new List<(string Model, long Count)>();
+                    var offBomberBreak = new List<(string Model, long Count)>();
+                    if (depContribsOff.Count > 0)
+                    {
+                        foreach (var grp in depContribsOff.GroupBy(x => Database.GetCountry(x.UserId, d.ChatId)?.Faction ?? attacker.Faction))
+                        {
+                            long gt = grp.Sum(x => x.Tanks), gf = grp.Sum(x => x.Fighters), gb = grp.Sum(x => x.Bombers);
+                            if (gt > 0) offTankBreak.Add((Database.GetDefaultTankModel(grp.Key), gt));
+                            if (gf > 0) offPlaneBreak.Add((Database.GetDefaultPlaneModel(grp.Key), gf));
+                            if (gb > 0) offBomberBreak.Add((Database.GetDefaultBomberModel(grp.Key), gb));
+                        }
+                    }
+                    if (offTankBreak.Count == 0 && d.Tanks > 0) offTankBreak.Add((Database.GetDefaultTankModel(attacker.Faction), d.Tanks));
+                    if (offPlaneBreak.Count == 0 && d.Fighters > 0) offPlaneBreak.Add((Database.GetDefaultPlaneModel(attacker.Faction), d.Fighters));
+                    if (offBomberBreak.Count == 0 && d.Bombers > 0) offBomberBreak.Add((Database.GetDefaultBomberModel(attacker.Faction), d.Bombers));
+                    var result = WarEngine.RunBattleAdvanced(attacker, defender, offTankBreak, d.Soldiers, offPlaneBreak, offBomberBreak, null, 0, null, d.Strategy, d.Tactic, 0, 0);
                     attacker.Tanks = Math.Max(0, attacker.Tanks - d.Tanks);
                     attacker.Soldiers = Math.Max(0, attacker.Soldiers - d.Soldiers);
                     attacker.Planes = Math.Max(0, attacker.Planes - d.Fighters);
@@ -7495,10 +7592,10 @@ partial class Program
                     if (!string.IsNullOrEmpty(result.AttackerReport))
                     {
                         var allIds = contribs.Select(x => x.UserId).Distinct().ToList();
-                        foreach (var pid in allIds) { try { await bot.SendTextMessageAsync(pid, result.AttackerReport, cancellationToken: ct); } catch { } }
+                        foreach (var pid in allIds) { try { await SendReport(pid, result.AttackerReport, false, ct); } catch { } }
                     }
-                    if (!string.IsNullOrEmpty(result.DefenderReport)) try { await bot.SendTextMessageAsync(d.TargetUserId, result.DefenderReport, cancellationToken: ct); } catch { }
-                    if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(d.ChatId, result.GroupAnnouncement, ct: ct); } catch { } }
+                    if (!string.IsNullOrEmpty(result.DefenderReport)) try { await SendReport(d.TargetUserId, result.DefenderReport, false, ct); } catch { }
+                    if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendReport(d.ChatId, result.GroupAnnouncement, false, ct); } catch { } }
                     await ProcessSiege(d.InitiatorId, d.TargetUserId, d.ChatId, result, ct);
                     Database.DeleteDeployment(d.Id);
                 }
@@ -7601,29 +7698,6 @@ partial class Program
             c.Soldiers = newSol;
             c.Welfare = newWelfare;
 
-            //  – auto refuel boats if fuel <100 and enough iron and port >=1
-            if (c.Boats > 0 && c.BoatsFuel < 100)
-            {
-                long needIron = c.Boats * (100 - c.BoatsFuel) / 20; // 5% per boat per 1% fuel? small
-                if (needIron <= 0) needIron = c.Boats * 1;
-                if (c.Iron >= needIron && c.PortLevel >= 1)
-                {
-                    c.Iron -= needIron;
-                    c.BoatsFuel = 100;
-                    Database.SetBoatFuelPct(c.OwnerId, c.ChatId, 100);
-                    Console.WriteLine($"[AUTO REFUEL] {c.Name} boats refueled for {needIron} iron");
-                }
-            }
-            if (c.Submarines > 0 && c.SubmarinesFuel < 100)
-            {
-                long needIron = c.Submarines * (100 - c.SubmarinesFuel) / 10;
-                if (c.Iron >= needIron && c.PortLevel >= 1)
-                {
-                    c.Iron -= needIron;
-                    c.SubmarinesFuel = 100;
-                }
-            }
-
             Database.UpdateCountryFull(c);
             Database.ReconcileDefense(c.OwnerId, c.ChatId);
         }
@@ -7634,7 +7708,6 @@ partial class Program
             "👥 جمعیت بر اساس رفاه رشد کرد\n" +
             "🪖 سربازگیری طبق نرخ انجام شد\n" +
             "🏥 رفاه بر اساس مالیات، سربازگیری و بندر به‌روزرسانی شد\n" +
-            "⛽ سوخت قایق‌ها در صورت نیاز به صورت خودکار تامین شد\n\n" +
             "📊 برای مشاهدهٔ جزئیات بنویسید: کشورم";
         var chatIds = countries.Select(x => x.ChatId).Distinct().ToList();
         int sentGroups = 0;
@@ -7807,11 +7880,6 @@ partial class Program
                 attacker.Submarines += result.AttackerSubsSurvived;
                 attacker.Battleships += result.AttackerBattleshipsSurvived;
                 attacker.BattleshipDamage += result.AttackerBattleshipDamage;
-                // fuel consumed
-                attacker.BoatsFuel = 0;
-                attacker.SubmarinesFuel = Math.Max(0, attacker.SubmarinesFuel - 30);
-                Database.SetBoatFuelPct(attacker.OwnerId, attacker.ChatId, 0);
-                attacker.Boats += 0; // already added survivors
 
                 // Apply defender losses
                 // For simplicity, deduct from total counts proportionally to breakdowns
@@ -7823,11 +7891,34 @@ partial class Program
                 defender.Battleships = Math.Max(0, defender.Battleships - defBSLoss);
                 defender.BattleshipDamage += result.DefenderBattleshipDamage;
 
-                // If success >=90, port level -1
-                if (result.SuccessPercent >= 90)
+                //  – نردبان تخریب بندر: هر ۲ پیروزی دریایی یک سطح بندر را می‌خورد
+                //     سطح ۵ → ۴ → ۳ → ۲ → ۱ → صفر (تخریب کامل)
+                string? portNews = null;
+                if (result.AttackerWon)
                 {
-                    defender.PortLevel = Math.Max(1, defender.PortLevel - 1);
+                    int hits = Database.AddNavalPortHit(defender.OwnerId, defender.ChatId);
+                    if (hits >= 2)
+                    {
+                        Database.ResetNavalPortHits(defender.OwnerId, defender.ChatId);
+                        int before = defender.PortLevel;
+                        defender.PortLevel = Math.Max(0, defender.PortLevel - 1);
+                        portNews = defender.PortLevel <= 0
+                            ? $"💥 بندر {defender.Name} به‌کلی ویران شد! تا بازسازی، ناوگان جدید ساخته نمی‌شود."
+                            : $"⚓ بندر {defender.Name} از سطح {before} به سطح {defender.PortLevel} سقوط کرد.";
+                    }
+                    else
+                    {
+                        portNews = $"⚓ یک پیروزی دریایی دیگر روی {defender.Name} ثبت شد؛ با پیروزی بعدی سطح بندرش می‌شکند. (۱ از ۲)";
+                    }
                 }
+
+                //  – ۹ و ۱۱: رفاه و تلفات خدمه‌ی دریایی
+                attacker.Welfare += result.AttackerWelfareChange;
+                defender.Welfare += result.DefenderWelfareChange;
+                if (result.AttackerCrewLost > 0)
+                    attacker.Population = Math.Max(0, attacker.Population - result.AttackerCrewLost);
+                if (result.DefenderCrewLost > 0)
+                    defender.Population = Math.Max(0, defender.Population - result.DefenderCrewLost);
 
                 // Loot
                 defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
@@ -7851,9 +7942,10 @@ partial class Program
                 }
 
                 // Notifications – attacker private, defender private, group
-                try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
-                try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
-                try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
+                try { await SendReport(inv.AttackerId, result.AttackerReport, false, ct); } catch { }
+                try { await SendReport(inv.DefenderId, result.DefenderReport, false, ct); } catch { }
+                try { await SendReport(inv.ChatId, result.GroupAnnouncement, false, ct); } catch { }
+                if (portNews != null) { try { await SendPermanent(inv.ChatId, portNews, ct: ct); } catch { } }
 
                 Database.MarkNavalInvasionProcessed(inv.Id);
                 Database.DeleteNavalInvasion(inv.Id);
@@ -7922,7 +8014,8 @@ partial class Program
         }
 
         // Power ratio check already for naval, but also ground – 1/4 rule
-        if (attacker != null)
+        //  معافیت کامل گروه این قانون را هم برمی‌دارد
+        if (attacker != null && !Database.HasGroupLockExemption(cid))
         {
             long attMP = CalcManpower(attacker);
             long defMP = CalcManpower(defender);
@@ -8009,21 +8102,36 @@ partial class Program
             }
 
             // Rule: attacking someone with less than 1/4 of our power is forbidden
-            long attMP = CalcManpower(attacker);
-            long defMP = CalcManpower(defender);
-            if (defMP < attMP / 4)
+            //  معافیت کامل گروه این قانون را هم برمی‌دارد
+            if (!Database.HasGroupLockExemption(cid))
             {
-                await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
+                long attMP = CalcManpower(attacker);
+                long defMP = CalcManpower(defender);
+                if (defMP < attMP / 4)
+                {
+                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
+            }
+
+            //  – قایق نیروی تهاجمی نیست: بدون زیردریایی/نبردناو حمله‌ی دریایی ممکن نیست
+            if (attacker.Submarines + attacker.Battleships + attacker.SubmarinesAtSea + attacker.BattleshipsAtSea <= 0)
+            {
+                await bot.AnswerCallbackQueryAsync(cb.Id, "🚤 قایق‌های تندرو فقط نیروی دفاع ساحلی‌اند. برای حمله‌ی دریایی به زیردریایی یا نبردناو نیاز دارید.", showAlert: true, cancellationToken: ct);
                 return;
             }
 
             // Rule: attacking with battleship when enemy naval force < 3/4 of ours is impossible
-            long attNaval = attacker.Boats + attacker.Submarines + attacker.Battleships * 10;
-            long defNaval = defender.Boats + defender.Submarines + defender.Battleships * 10;
-            if (attacker.Battleships > 0 && defNaval < attNaval * 3 / 4)
+            //  معافیت کامل گروه این قانون را هم برمی‌دارد
+            if (!Database.HasGroupLockExemption(cid))
             {
-                await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ نیروی دریایی دشمن کمتر از 3/4 نیروی شماست – حمله با نبردناو ممکن نیست!", showAlert: true, cancellationToken: ct);
-                return;
+                long attNaval = attacker.Boats + attacker.Submarines + attacker.Battleships * 10;
+                long defNaval = defender.Boats + defender.Submarines + defender.Battleships * 10;
+                if (attacker.Battleships > 0 && defNaval < attNaval * 3 / 4)
+                {
+                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ نیروی دریایی دشمن کمتر از 3/4 نیروی شماست – حمله با نبردناو ممکن نیست!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
             }
 
             session.Step = SessionStep.AttackWaitingStrategy;
@@ -8052,12 +8160,16 @@ partial class Program
                     await bot.AnswerCallbackQueryAsync(cb.Id, $"🛡 {defender.Name} سپر 16 ساعته دارد! تا {leftH} ساعت دیگر قابل حمله نیست.", showAlert: true, cancellationToken: ct);
                     return;
                 }
-                long attMP = CalcManpower(attacker);
-                long defMP = CalcManpower(defender);
-                if (defMP < attMP / 4)
+                //  معافیت کامل گروه این قانون را هم برمی‌دارد
+                if (!Database.HasGroupLockExemption(cid))
                 {
-                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
-                    return;
+                    long attMP = CalcManpower(attacker);
+                    long defMP = CalcManpower(defender);
+                    if (defMP < attMP / 4)
+                    {
+                        await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
+                        return;
+                    }
                 }
             }
             session.Step = SessionStep.AttackWaitingStrategy;
@@ -8561,8 +8673,16 @@ partial class Program
         attacker.Money += result.AttackerMoneyGained;
         attacker.Iron += result.AttackerIronGained;
         attacker.Welfare += result.AttackerWelfareChange;
-        // Apply losses to all defensive deployments (since they participated but not in assets)
+        //  تلفات مدافع بین «نیروی خودش» و «صف‌آرایی متحدها» تقسیم می‌شود.
+        //   موتور کل نیروی مدافع (خودی + صف‌آرایی) را با هم دیده، پس
+        //   DefenderTanksLost تلفات هر دو را در بر دارد. قبلاً سهم متحدها از
+        //   صف‌آرایی کم می‌شد و بعد *کل* همان عدد دوباره از دارایی مدافع هم کم
+        //   می‌شد — یعنی هرچه متحد بیشتر کمک می‌کرد، مدافع بیشتر ضرر می‌دید.
+        //   حالا هرکس فقط سهم خودش را می‌دهد.
         var allDefDeps = Database.GetActiveDeployments().Where(d => d.ChatId == cid && d.Type == "Defensive" && d.TargetUserId == defender.OwnerId).ToList();
+        long ownTankLoss = result.DefenderTanksLost;
+        long ownSoldLoss = result.DefenderSoldiersLost;
+        long ownFightLoss = result.DefenderFightersLost;
         if (allDefDeps.Count > 0)
         {
             long totalEffTanks = defender.DefenseTanks + depTanks;
@@ -8572,17 +8692,32 @@ partial class Program
             foreach (var dep in allDefDeps)
             {
                 if (totalEffTanks > 0 && dep.Tanks > 0)
-                    dep.Tanks = Math.Max(0, dep.Tanks - (long)Math.Round((double)dep.Tanks / totalEffTanks * result.DefenderTanksLost));
+                {
+                    long share = (long)Math.Round((double)dep.Tanks / totalEffTanks * result.DefenderTanksLost);
+                    share = Math.Min(share, dep.Tanks);
+                    dep.Tanks -= share;
+                    ownTankLoss -= share;
+                }
                 if (totalEffSoldiers > 0 && dep.Soldiers > 0)
-                    dep.Soldiers = Math.Max(0, dep.Soldiers - (long)Math.Round((double)dep.Soldiers / totalEffSoldiers * result.DefenderSoldiersLost));
+                {
+                    long share = (long)Math.Round((double)dep.Soldiers / totalEffSoldiers * result.DefenderSoldiersLost);
+                    share = Math.Min(share, dep.Soldiers);
+                    dep.Soldiers -= share;
+                    ownSoldLoss -= share;
+                }
                 if (totalEffFighters > 0 && dep.Fighters > 0)
-                    dep.Fighters = Math.Max(0, dep.Fighters - (long)Math.Round((double)dep.Fighters / totalEffFighters * result.DefenderFightersLost));
+                {
+                    long share = (long)Math.Round((double)dep.Fighters / totalEffFighters * result.DefenderFightersLost);
+                    share = Math.Min(share, dep.Fighters);
+                    dep.Fighters -= share;
+                    ownFightLoss -= share;
+                }
                 Database.UpdateDeploymentForces(dep);
             }
         }
-        defender.Tanks = Math.Max(0, defender.Tanks - result.DefenderTanksLost);
-        defender.Soldiers = Math.Max(0, defender.Soldiers - result.DefenderSoldiersLost);
-        defender.Planes = Math.Max(0, defender.Planes - result.DefenderFightersLost);
+        defender.Tanks = Math.Max(0, defender.Tanks - Math.Max(0, ownTankLoss));
+        defender.Soldiers = Math.Max(0, defender.Soldiers - Math.Max(0, ownSoldLoss));
+        defender.Planes = Math.Max(0, defender.Planes - Math.Max(0, ownFightLoss));
         defender.AntiAir = Math.Max(0, defender.AntiAir - result.DefenderAntiAirLost);
         defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
         defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
@@ -8591,9 +8726,9 @@ partial class Program
         Database.UpdateCountryFull(defender);
         Database.ReconcileDefense(attacker.OwnerId, attacker.ChatId);
         Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
-        if (!string.IsNullOrEmpty(result.AttackerReport)) await SendPermanent(uid, result.AttackerReport, ct: ct);
-        if (!string.IsNullOrEmpty(result.DefenderReport)) { try { await SendPermanent(tid, result.DefenderReport, ct: ct); } catch { } }
-        if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(cid, result.GroupAnnouncement, ct: ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.AttackerReport)) { try { await SendReport(uid, result.AttackerReport, false, ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.DefenderReport)) { try { await SendReport(tid, result.DefenderReport, false, ct); } catch { } }
+        if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendReport(cid, result.GroupAnnouncement, false, ct); } catch { } }
         await ProcessSiege(uid, tid, cid, result, ct);
     }
 
@@ -8753,12 +8888,12 @@ partial class Program
             foreach (var (model, count, pct) in boatBreakdown)
             {
                 long defCount = (long)Math.Ceiling(count * pct / 100.0);
-                sbDef.AppendLine($"  • {model}: {defCount:N0}/{count:N0} ({pct}%) | سوخت {country.BoatsFuel}%");
+                sbDef.AppendLine($"  • {model}: {defCount:N0}/{count:N0} ({pct}%)");
             }
         }
         else
         {
-            sbDef.AppendLine($"🚤 قایق: دفاع {country.DefenseBoats:N0} / کل {country.Boats:N0} | سوخت {country.BoatsFuel}%");
+            sbDef.AppendLine($"🚤 قایق: دفاع {country.DefenseBoats:N0} / کل {country.Boats:N0}");
         }
         if (subBreakdown.Count > 0)
         {
@@ -8798,7 +8933,7 @@ partial class Program
             $"تاکتیک: {airTactic}\n\n" +
 
             "⚓ دفاع دریایی\n" +
-            $"بندر سطح: {country.PortLevel} | قایق سوخت: {country.BoatsFuel}% | نبردناو آسیب: {country.BattleshipDamage}%\n\n" +
+            $"بندر سطح: {country.PortLevel} | نبردناو آسیب: {country.BattleshipDamage}%\n🚤 قایق‌ها نیروی دفاع ساحلی‌اند و در آب‌های خودی بیشترین کارایی را دارند.\n\n" +
 
             sbDef.ToString() + "\n" +
 
@@ -12064,7 +12199,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminPlayersHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminPlayersHome(CancellationToken ct = default)
     {
         var all = Database.GetAllCountries();
         var top = all.Select(c => new { Country = c, MP = CalcManpower(c) })
@@ -12094,7 +12229,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
 
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static async Task SendAdminPlayerDetail(long adminId, long targetId, CancellationToken ct)
@@ -12156,7 +12291,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminCountriesHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminCountriesHome(CancellationToken ct = default)
     {
         var all = Database.GetAllCountries();
         var top = all.Select(c => new { Country = c, MP = CalcManpower(c) }).OrderByDescending(x => x.MP).Take(8).ToList();
@@ -12176,7 +12311,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🔍 جستجو نام", "adm:countries:search"), InlineKeyboardButton.WithCallbackData("⚔️ محاصره شده‌ها", "adm:countries:sieged") },
             new[] { InlineKeyboardButton.WithCallbackData("🔄 تازه‌سازی", "adm:countries:home"), InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static (string Text, InlineKeyboardMarkup Keyboard) BuildAdminCountrySearchResults(List<Country> results, string query)
@@ -12395,7 +12530,7 @@ partial class Program
         await SendPermanent(adminId, screen.Text, markup: screen.Keyboard, ct: ct);
     }
 
-    static async Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminWarHome(CancellationToken ct = default)
+    static Task<(string Text, InlineKeyboardMarkup Keyboard)> BuildAdminWarHome(CancellationToken ct = default)
     {
         var sieged = Database.GetSiegedCountries(10);
         var recentBattles = Database.GetRecentBattles(5);
@@ -12419,7 +12554,7 @@ partial class Program
             new[] { InlineKeyboardButton.WithCallbackData("🔥 محاصره‌ها", "adm:war:sieged"), InlineKeyboardButton.WithCallbackData("📜 نبردها", "adm:war:battles") },
             new[] { InlineKeyboardButton.WithCallbackData("🛡 رفع بن حمله", "adm:war:clearlocks"), InlineKeyboardButton.WithCallbackData("🏠 خانه", "adm:home") }
         });
-        return (sb.ToString(), kb);
+        return Task.FromResult((sb.ToString(), kb));
     }
 
     static async Task SendAdminOperationsHome(long adminId, CancellationToken ct)
