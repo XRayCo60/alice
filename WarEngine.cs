@@ -99,6 +99,7 @@ static class WarEngine
     const float SECTOR_DOM = 0.62f;           // برتری لازم در سکتور برای تثبیت زمین
     const float GLOBAL_DOM = 0.42f;           // برتری کلی لازم برای تثبیت رخنه
     const float ENTRENCH = 0.35f;             // کاهش تلفات مدافعِ سنگرگرفته
+    const float INF_RUSH_COVER = 0.45f;       // خیز و پراکندگی پیاده‌ی مهاجم
     const float DUGIN_ACC = 1.20f;            // دقت بیشتر آتش از سنگر
     const float FALLBACK_P = 0.06f;           // احتمال عقب‌نشینی و سنگرگیری مجدد مدافع
     const float ZOC_R2 = ZOC_R * ZOC_R;
@@ -1715,7 +1716,18 @@ static class WarEngine
     //  – هر یگان دشمنِ سالم در نزدیکی، پیشروی را کند و در نهایت متوقف می‌کند.
     static void MoveSide(Force f, Force foe, Field field, ref XorRng rng)
     {
+        //  آب‌وهوای بد، مهاجم را بیشتر از مدافع کند می‌کند.
+        //   مدافع در موضع آماده نشسته و لازم نیست جایی برود؛ مهاجم است که باید
+        //   در گِل و برف و مه یک پیشروی هماهنگ را جلو ببرد.
+        //
+        //   چرا اینجا و نه فقط روی آتش: اندازه‌گیری نشان داد جریمه‌ی آتش تنها
+        //   کافی نیست. در هوای بد هر دو طرف کمتر شلیک می‌کنند، پس نسبت قوای
+        //   مهاجم بالا می‌ماند و چون EffectiveDepth عمدتاً به همین نسبت وابسته
+        //   است، عمقِ گزارش‌شده تکان نمی‌خورد — با اینکه پیشروی فیزیکی از ۱۳
+        //   به ۸ کیلومتر افتاده بود. کند کردن خودِ حرکت، مستقیم روی عمق اثر
+        //   می‌گذارد و همان چیزی است که تهاجم را در واقعیت می‌خواباند.
         float wxSpd = WxSpeed[field.Weather];
+        if (f.IsAttacker) wxSpd *= 0.55f + 0.45f * WxSpeed[field.Weather];
         for (int i = 0; i < f.N; i++)
         {
             ref Group u = ref f.G[i];
@@ -2069,6 +2081,15 @@ static class WarEngine
         ref Group t = ref target.G[idx];
         // مدافعِ سنگرگرفته سخت‌تر کشته می‌شود
         if (!target.IsAttacker && t.Posture is P_DEFEND or P_AMBUSH or P_HOLD) kills *= 1f - ENTRENCH;
+
+        //  پیاده‌ی در حال پیشروی هم بی‌دفاع نیست: خیز می‌رود، از چاله و شیار و
+        //   دیوار استفاده می‌کند و پراکنده حرکت می‌کند. یک گلوله‌ی انفجاری روی
+        //   یک جوخه نمی‌افتد، روی صد متر زمین می‌افتد.
+        //   قبلاً پیاده‌ی مهاجم هیچ کاهشی نمی‌گرفت و اندازه‌گیری نشان داد یک
+        //   گروه صد نفره زیر آتش فقط یک گروه تانک در ۱.۶ ساعت پاک می‌شد، که
+        //   تلفات روزانه‌ی مهاجم را به ۵۰٪ می‌رساند — دو تا سه برابر واقعیت.
+        if (t.Type == 0 && t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK)
+            kills *= 1f - INF_RUSH_COVER;
         if (kills <= 0f) return;
         float actual = Math.Min(kills, t.Units);
         t.Units = Math.Max(0f, t.Units - actual);
@@ -2933,6 +2954,30 @@ static class WarEngine
 
                 if (effDepth >= WIN_DEPTH) { tick++; break; }
                 if (aPow < aPow0 * 0.13f) { log.Add(tick, 2, LG_CRISIS, "توان رزمی مهاجم به آستانه‌ی فروپاشی رسید و حمله متوقف شد."); tick++; break; }
+
+                //  ── نقطه‌ی فرسایش: حمله‌ای که جواب نمی‌دهد، رها می‌شود ──
+                //   هیچ فرماندهی دو شبانه‌روز به یک خط دست‌نخورده حمله نمی‌کند
+                //   تا ۸۷٪ لشکرش را از دست بدهد. وقتی نیمی از توان رفته و
+                //   پیشروی هم قفل شده، عملیات «به نقطه‌ی فرسایش رسیده» و
+                //   متوقف می‌شود. بدون این، نبردهای برابر تا سقف زمان کش
+                //   می‌آمدند و تلفات پیاده‌ی مهاجم به ۵۸٪ می‌رسید — دو تا سه
+                //   برابر چیزی که یک لشکر واقعی تحمل می‌کرد.
+                //   فرمانده‌ی جسورتر دیرتر دست می‌کشد.
+                //   معیار «چقدر خرج شده» باید تلفات واقعی باشد، نه SidePower:
+                //   آن یکی ضریب مهمات هم دارد، پس یگانِ سالمِ کم‌مهمات را
+                //   «تلف‌شده» می‌خواند و یگانِ نصفه‌شده‌ی پرمهمات را سالم.
+                float aLostNow = fa.SoldiersKnocked;
+                for (int mi = 0; mi < fa.ModelKnocked.Length; mi++) aLostNow += fa.ModelKnocked[mi] * 10f;
+                float aBase = fa.SoldiersSent;
+                for (int mi = 0; mi < fa.ModelSent.Length; mi++) aBase += fa.ModelSent[mi] * 10f;
+                float spent = aLostNow / Math.Max(1f, aBase);
+                float quitAt = 0.32f + fa.Cmd.Aggression * 0.18f;
+                if (spent > quitAt && haltTicks > 12 && contact)
+                {
+                    log.Add(tick, 0, LG_CRISIS,
+                        $"حمله به نقطه‌ی فرسایش رسید: بیش از {spent * 100f:F0}٪ توان رزمی رفته و پیشروی متوقف شده؛ فرمانده عملیات را خواباند.");
+                    tick++; break;
+                }
                 if (dPow < dPow0 * 0.10f && effDepth > 6f)
                 {
                     effDepth = Math.Min(WIN_DEPTH, effDepth + (WIN_DEPTH - effDepth) * 0.7f);
