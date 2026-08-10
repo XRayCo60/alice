@@ -155,27 +155,40 @@ static class WarEngine
         public readonly float Optics;       // کیفیت اپتیک ۰..۱
         public readonly int   Crew;
         public readonly float TurretSec;    // ثانیه برای چرخش کامل برجک
+        //  نیم‌رخ: چقدر راحت زده می‌شود. ۱.۰ = متوسط، بزرگ‌تر = هدف بزرگ‌تر.
+        //   موتور تا اینجا فقط آمار سلاح و زره را می‌دید، نه اندازه و طرح بدنه را.
+        //   ولی ضعف اصلی بعضی تانک‌های ۱۹۳۹ دقیقاً همین بود: بلند، پرچی، با
+        //   جایگاه‌های جانبی. M2 با ارتفاع ۲.۸۲ متر یکی از بلندترین‌های زمان
+        //   خودش بود و همین آن را «منسوخ» می‌کرد، نه اعدادِ توپ و زره‌اش.
+        public readonly float Silhouette;
         public TankSpec(string n, Faction o, float cal, float mv, float sm, float pen, float he, float rof,
-            float af, float asd, float slope, float sp, float spo, int mg, int cr, int mr, float rel, float opt, int crew, float tsec)
+            float af, float asd, float slope, float sp, float spo, int mg, int cr, int mr, float rel, float opt, int crew, float tsec,
+            float sil = 1.0f)
         { Name=n; Origin=o; Caliber=cal; MuzzleVel=mv; ShellMass=sm; PenAt500=pen; HeFiller=he; RoF=rof;
           ArmorFront=af; ArmorSide=asd; Slope=slope; Speed=sp; SpeedOff=spo; MgCount=mg;
-          CannonRounds=cr; MgRounds=mr; Reliab=rel; Optics=opt; Crew=crew; TurretSec=tsec; }
+          CannonRounds=cr; MgRounds=mr; Reliab=rel; Optics=opt; Crew=crew; TurretSec=tsec; Silhouette=sil; }
     }
 
-    // M2 Medium — توپ 37mm M6، ۲۰۰ گلوله، ۷ مسلسل با ۱۲۲۵۰ فشنگ، زره ۳۲ پرچی، ۴۲ km/h
-    //   نفوذ واقعی: ۴۶mm در ۴۵۷ متر روی زره سخت‌شده با شیب ۳۰°
+    // M2 Medium — توپ 37mm M3، ۲۰۰ گلوله، ۷ مسلسل با ۱۲۲۵۰ فشنگ، زره ۳۲، ۴۲ km/h
+    //   نفوذ منبع: ۴۶mm در ۴۵۷ متر روی زره سخت‌شده با شیب ۳۰°.
+    //   موتور خودش زاویه را حساب می‌کند (EffectiveArmor)، پس PenAt500 باید
+    //   عدد برخورد عمود باشد وگرنه زاویه دو بار اعمال می‌شود: ۴۶/cos۳۰ ≈ ۵۳.
     static readonly TankSpec SpecUSA = new("M2 Medium", Faction.USA,
-        37f, 884f, 0.87f, 46f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f);
+        37f, 884f, 0.87f, 53f, 0.039f, 20f, 32f, 25f, 1.08f, 42f, 26f, 7, 200, 12250, 0.95f, 0.80f, 6, 20f, 1.20f);
 
     // T-28 — توپ 76.2mm L-10 با گلوله‌ی ضدزره BR-350A (APHEBC)
     //   سرعت پوزه ۵۵۵ m/s، نفوذ واقعی ۶۰mm در ۵۰۰ متر (منبع: جدول زره BR-350A)
     //   گلوله‌ی انفجاری OF-350M با ۶۲۱ گرم TNT — قوی‌ترین ضدپیاده‌ی این سه
-    //   ولی آهنگ آتش پایین (۵/دقیقه)، فقط ۶۹ گلوله و اپتیک ضعیف
+    //   آهنگ آتش: بارگذاری L-10 حدود ۶.۵ ثانیه است، یعنی ~۹ گلوله در دقیقه.
+    //   قبلاً ۵ گذاشته شده بود که خروجی دفاعی این تانک را سه برابر کمتر از دو
+    //   مدل دیگر می‌کرد و شوروی را عملاً غیرقابل بازی کرده بود.
+    //   فقط ۶۹ گلوله و اپتیک ضعیف، پس همچنان کندترین و کم‌دقت‌ترین است.
     static readonly TankSpec SpecUSSR = new("T-28", Faction.USSR,
-        76.2f, 555f, 6.30f, 60f, 0.621f, 5f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f);
+        76.2f, 555f, 6.30f, 60f, 0.621f, 9f, 30f, 20f, 1.00f, 37f, 18f, 4, 69, 7938, 0.82f, 0.55f, 6, 26f, 1.12f);
 
     // Panzer III Ausf.E/F — پیکربندی واقعی ۱۹۳۹ (لهستان)
-    //   توپ 3.7cm KwK 36 L/46.5 با گلوله‌ی Pzgr — نفوذ ۲۹mm در ۵۰۰ متر
+    //   توپ 3.7cm KwK 36 L/46.5 با گلوله‌ی Pzgr — ۲۹mm در ۵۰۰ متر با شیب ۳۰°
+    //   که روی مبنای برخورد عمود می‌شود ۳۸mm (هم‌مبنا با دو مدل دیگر)
     //   زره ۳۰mm دور تا دور. اپتیک TZF5d عالی، آهنگ آتش بالا، قابلیت اطمینان خوب.
     //
     //   توجه: توپ 5cm KwK 38 از ژوئیه ۱۹۴۰ و زره ۶۰mm (۳۰+۳۰) از اکتبر ۱۹۴۰
@@ -184,7 +197,7 @@ static class WarEngine
     //   مهاجم در برابر مدافع شوروی ۷۰٪ موفق می‌شد و در برابر آلمان فقط ۲۲٪.
     //   ۹۹ گلوله ظرفیت واقعی همان تانک است.
     static readonly TankSpec SpecReich = new("Panzer III", Faction.Reich,
-        37f, 745f, 0.685f, 29f, 0.022f, 15f, 30f, 30f, 1.02f, 40f, 15f, 3, 131, 4500, 0.97f, 0.95f, 5, 33f);
+        37f, 745f, 0.685f, 38f, 0.022f, 15f, 30f, 30f, 1.02f, 40f, 15f, 3, 131, 4500, 0.97f, 0.95f, 5, 33f, 0.94f);
 
     static TankSpec SpecOf(Faction f) => f == Faction.USA ? SpecUSA : f == Faction.USSR ? SpecUSSR : SpecReich;
 
@@ -1925,6 +1938,8 @@ static class WarEngine
             if (u.Posture is P_ADVANCE or P_ASSAULT or P_FLANK) acc *= 0.80f;
             if (!own.IsAttacker && u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) acc *= DUGIN_ACC;
             if (field.ElevAt(u.X, u.Y) > field.ElevAt(t.X, t.Y) + 0.1f) acc *= 1.18f;
+            //  هدف بلندتر و حجیم‌تر، راحت‌تر زده می‌شود
+            if (t.Type == 1 && foe.Specs.Length > 0) acc *= fspec.Silhouette;
 
             //  پوشش زمین برای کسی که موضع را از قبل انتخاب و آماده کرده،
             //   بسیار بیشتر از کسی است که دارد از میان همان زمین عبور می‌کند.
@@ -1932,8 +1947,8 @@ static class WarEngine
             //   جنگل و شهر *آسان‌تر* از دشت درمی‌آمد — دقیقاً برعکس تاریخ.
             //   مدافعِ سنگرگرفته حالا کامل از پوشش استفاده می‌کند و مهاجمِ در
             //   حرکت فقط کسر کوچکی.
-            float coverUse = t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.25f
-                           : t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK ? 0.55f
+            float coverUse = t.Posture is P_DEFEND or P_AMBUSH or P_HOLD ? 1.40f
+                           : t.Posture is P_ADVANCE or P_ASSAULT or P_FLANK ? 0.45f
                            : 0.8f;
             float cover = TerCover[tt] * coverUse;
             // برجک کند نمی‌تواند به تهدید پهلو سریع جواب بدهد
@@ -1969,7 +1984,7 @@ static class WarEngine
                         //  تانکِ پشت پوشش، بدنه‌اش پیدا نیست: بخشی از برخوردها به
                         //   درخت و دیوار و خاکریز می‌خورد. بدون این، زمین فقط روی
                         //   پیاده اثر داشت و نبرد زرهی در جنگل و دشت یکسان بود.
-                        float hullDown = 1f - cover * 0.35f;
+                        float hullDown = 1f - cover * 0.55f;
                         float kills = hits * 0.30f * pk * hullDown * (0.9f + rng.NextF() * 0.25f);
 
                         ApplyDamage(foe, best, kills, own, u.Model, true);
@@ -2873,9 +2888,9 @@ static class WarEngine
                 //   گم نکند. قبلاً اثر هوا کاملاً قرینه بود و نتیجه این می‌شد که
                 //   مه *بهترین* هوا برای حمله باشد (۷۸٪ در برابر ۷۲٪ آفتابی) —
                 //   عکس چیزی که در آردن و رازپوتیتسا اتفاق افتاد.
-                float wxDrag = 1f - (1f - WxSpeed[field.Weather]) * 0.55f
-                                  - (1f - WxVision[field.Weather]) * 0.30f;
-                wxDrag = Math.Clamp(wxDrag, 0.55f, 1f);
+                float wxDrag = 1f - (1f - WxSpeed[field.Weather]) * 0.90f
+                                  - (1f - WxVision[field.Weather]) * 0.50f;
+                wxDrag = Math.Clamp(wxDrag, 0.40f, 1f);
 
                 float aMul = casA * supplyA * surprise * wxDrag;
                 float dMul = casD * (tick < surpriseTicks ? 0.90f : 1f);
