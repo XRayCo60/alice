@@ -109,6 +109,8 @@ static class WarEngine
     const float GLOBAL_DOM = 0.42f;           // برتری کلی لازم برای تثبیت رخنه
     const float ENTRENCH = 0.28f;             // کاهش تلفات مدافعِ سنگرگرفته
     const float INF_RUSH_COVER = 0.45f;       // خیز و پراکندگی پیاده‌ی مهاجم
+    const float ENGAGE_FRAC = 0.012f;         // کسر هر تیک که یگان واقعاً آتش می‌کند
+    const float KILL_PER_HIT = 1.25f;         // بازده هر اصابت (جبران کسر درگیری)
     const float DUGIN_ACC = 1.12f;            // دقت بیشتر آتش از سنگر
     const float FALLBACK_P = 0.06f;           // احتمال عقب‌نشینی و سنگرگیری مجدد مدافع
     const float ZOC_R2 = ZOC_R * ZOC_R;
@@ -1992,7 +1994,14 @@ static class WarEngine
                 // ── شمار واقعی گلوله در این تیک: آهنگ آتش × زمان ──
                 float minutes = TICK_MIN;
                 //  آهنگ آتش پایدار، نه چرخه‌ی بیشینه — نگاه کن به EffectiveRoF
-                float shotsPossible = u.Units * EffectiveRoF(ospec.RoF) * minutes * 0.05f;
+                //  کسری از هر تیک که یگان واقعاً در حال آتش است.
+                //   ۰.۰۵ برای نبردهای کوتاه واسنجی شده بود؛ در نبرد ۴۸ ساعته
+                //   یعنی یک T-28 در کل نبرد ۱۳۵۰ گلوله می‌خواهد، بیست برابر
+                //   ظرفیت ۶۹ تایی‌اش. نتیجه این بود که زره مهاجم بعد از ۲.۵
+                //   ساعت خشک می‌شد، TriageGroup آن را زمین‌گیر می‌کرد و تانکِ
+                //   بی‌مهمات زیر آتش می‌ماند — حمله از تدارکات می‌شکست نه از نبرد.
+                //   یک تانک واقعی در یک روز نبرد سنگین ۲۰ تا ۴۰ گلوله می‌زد.
+                float shotsPossible = u.Units * EffectiveRoF(ospec.RoF) * minutes * ENGAGE_FRAC;
 
                 if (t.Type == 1)
                 {
@@ -2015,7 +2024,9 @@ static class WarEngine
                         //   درخت و دیوار و خاکریز می‌خورد. بدون این، زمین فقط روی
                         //   پیاده اثر داشت و نبرد زرهی در جنگل و دشت یکسان بود.
                         float hullDown = 1f - cover * 0.40f;
-                        float kills = hits * 0.30f * pk * hullDown * (0.9f + rng.NextF() * 0.25f);
+                        //  چون کسر درگیری ۴.۲ برابر کم شد، بازده هر گلوله به
+                        //   همان نسبت بالا رفت تا آهنگ کشتار همان بماند.
+                        float kills = hits * KILL_PER_HIT * pk * hullDown * (0.9f + rng.NextF() * 0.25f);
 
                         ApplyDamage(foe, best, kills, own, u.Model, true);
                         u.CAmmo = MathF.Max(0f, u.CAmmo - shots);
@@ -2042,7 +2053,7 @@ static class WarEngine
                         //   یک گردان زیر آتش سنگین در روز ۵ تا ۲۰٪ نفرات می‌داد،
                         //   موتور به ۳۱ تا ۴۳٪ می‌رسید. پیاده‌ی پراکنده و در پناه،
                         //   هدف بسیار کم‌بازده‌ای برای گلوله‌ی انفجاری است.
-                        kills += heShots * common * blast * 0.5f * (1f - cover * 0.55f);
+                        kills += heShots * common * blast * 2.1f * (1f - cover * 0.55f);
                         u.CAmmo = MathF.Max(0f, u.CAmmo - heShots);
                         u.Signature = Math.Min(1f, u.Signature + 0.5f);
                     }
@@ -2150,12 +2161,19 @@ static class WarEngine
         {
             ref Group g = ref f.G[i];
             if (!g.Alive) continue;
-            //  زیر آتش یا در حال یورش، قافله به یگان نمی‌رسد
-            if (g.Posture is P_ASSAULT or P_RETREAT) continue;
-            if (g.Supp > 0.35f) continue;
+            if (g.Posture == P_RETREAT) continue;
 
-            //  یگانی که عقب کشیده و خودش را جمع می‌کند، کامل‌تر بار می‌گیرد
-            float mul = g.Posture is P_REGROUP or P_HOLD ? 1.8f : 1f;
+            //  یگانِ در حال یورش هم مهمات می‌گیرد، فقط کمتر و سخت‌تر.
+            //   قبلاً P_ASSAULT کامل کنار گذاشته می‌شد، و چون مهاجم به محض
+            //   عبور از عمق دو کیلومتر تا آخر نبرد در همین حالت می‌ماند، عملاً
+            //   هیچ‌وقت بازرسانی نمی‌شد. T-28 با ۶۹ گلوله بعد از ۲.۵ ساعت خشک
+            //   می‌شد، بعد TriageGroup آن را به P_HOLD می‌برد و تانکِ بی‌مهمات
+            //   زیر آتش می‌ماند. حمله از تدارکات می‌شکست، نه از نبرد.
+            //   سرکوب هم دیگر بازرسانی را صفر نمی‌کند، فقط نصفش می‌کند.
+            float mul = g.Posture is P_REGROUP or P_HOLD ? 1.8f
+                      : g.Posture == P_ASSAULT ? 0.45f
+                      : 1f;
+            if (g.Supp > 0.35f) mul *= 0.5f;
             g.CAmmo = MathF.Min(g.CAmmo0, g.CAmmo + g.CAmmo0 * rate * mul);
             g.MAmmo = MathF.Min(g.MAmmo0, g.MAmmo + g.MAmmo0 * rate * mul);
         }
@@ -3012,12 +3030,22 @@ static class WarEngine
                 //   معیار «چقدر خرج شده» باید تلفات واقعی باشد، نه SidePower:
                 //   آن یکی ضریب مهمات هم دارد، پس یگانِ سالمِ کم‌مهمات را
                 //   «تلف‌شده» می‌خواند و یگانِ نصفه‌شده‌ی پرمهمات را سالم.
-                float aLostNow = fa.SoldiersKnocked;
-                for (int mi = 0; mi < fa.ModelKnocked.Length; mi++) aLostNow += fa.ModelKnocked[mi] * 10f;
-                float aBase = fa.SoldiersSent;
-                for (int mi = 0; mi < fa.ModelSent.Length; mi++) aBase += fa.ModelSent[mi] * 10f;
-                float spent = aLostNow / Math.Max(1f, aBase);
-                float quitAt = 0.32f + fa.Cmd.Aggression * 0.18f;
+                //   نکته: نمی‌شود تانک و پیاده را در یک کاسه ریخت. یک لشکر
+                //   معمولی ۱۷ هزار پیاده و ۱۱۰ تانک دارد؛ اگر همه را با هم جمع
+                //   کنیم، پیاده ۹۴٪ وزن را می‌گیرد و از دست دادن *تمام* زره فقط
+                //   ۶٪ خوانده می‌شود. در نبردی که گزارش شد مهاجم ۸۹٪ تانکش را
+                //   باخت و این معیار عدد ۰.۱۹ داد، یعنی هرگز به آستانه نرسید.
+                //   پس هر شاخه جدا سنجیده می‌شود و بدترینشان ملاک است.
+                float aTankBase = 0f, aTankLostNow = 0f;
+                for (int mi = 0; mi < fa.ModelSent.Length; mi++)
+                {
+                    aTankBase += fa.ModelSent[mi];
+                    aTankLostNow += fa.ModelKnocked[mi];
+                }
+                float spentTank = aTankBase > 0f ? aTankLostNow / aTankBase : 0f;
+                float spentInf  = fa.SoldiersSent > 0 ? fa.SoldiersKnocked / fa.SoldiersSent : 0f;
+                float spent = MathF.Max(spentTank, spentInf);
+                float quitAt = 0.42f + fa.Cmd.Aggression * 0.20f;
                 if (spent > quitAt && haltTicks > 12 && contact)
                 {
                     log.Add(tick, 0, LG_CRISIS,
