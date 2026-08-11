@@ -94,8 +94,17 @@ static class WarEngine
     const int   TANK_GROUP = 10;
     const int   SECTORS = 10;
     const float ZOC_R = 2.4f;                 // شعاع منطقه‌ی کنترل (کیلومتر)
-    const float BRAKE_THR = 0.62f;            // آستانه‌ی برتری محلی برای شکستن خط
-    const float BRAKE_SPAN = 0.30f;
+    //  آستانه‌ی برتری محلی برای شکستن خط.
+    //   قبلاً ۰.۶۲ بود، یعنی مهاجم با نیروی *برابر* در محل (فشار ۰.۵) اصلاً
+    //   نمی‌توانست تکان بخورد و برای راه‌افتادن به ۱.۶۳ برابر برتری محلی نیاز
+    //   داشت. اندازه‌گیری روی یک نبرد واقعی نشان داد ۸۰٪ تلاش‌های حرکت مسدود
+    //   می‌شد و ضریب ترمز به‌طور میانگین ۰.۱۳ بود — یعنی پیشروی با ۱۳٪ سرعت.
+    //   حالا در برابری محلی آرام جلو می‌رود و با برتری، سریع.
+    const float BRAKE_THR = 0.42f;
+    const float BRAKE_SPAN = 0.34f;
+    //  کف حرکت: خط دشمن هرگز کاملاً نفوذناپذیر نیست. حتی زیر فشار، گشتی و
+    //   گروه پیشرو رخنه می‌کنند. بدون این کف، نبرد به قفل کامل می‌رسید.
+    const float BRAKE_FLOOR = 0.12f;
     const float SECTOR_DOM = 0.62f;           // برتری لازم در سکتور برای تثبیت زمین
     const float GLOBAL_DOM = 0.42f;           // برتری کلی لازم برای تثبیت رخنه
     const float ENTRENCH = 0.28f;             // کاهش تلفات مدافعِ سنگرگرفته
@@ -1785,7 +1794,8 @@ static class WarEngine
                         own += w * (a.Type == 1 ? a.Units * 1.0f : a.Units * 0.12f);
                     }
                     float pressure = own / Math.Max(0.001f, own + zoc);       // 0..1
-                    float brake = Math.Clamp((pressure - BRAKE_THR) / BRAKE_SPAN, 0f, 1f);
+                    float brake = BRAKE_FLOOR + (1f - BRAKE_FLOOR)
+                                * Math.Clamp((pressure - BRAKE_THR) / BRAKE_SPAN, 0f, 1f);
                     // پوشش زمین به مدافع کمک می‌کند خط را نگه دارد
                     brake *= 1f - TerCover[field.TerrAt(u.X, u.Y)] * 0.35f;
                     step *= brake;
@@ -2575,9 +2585,9 @@ static class WarEngine
 
         // ── اثر روی زمین و اقتصاد ──
         if (bombsOnTroops > 0f)
-            o.CasAtk = 1f + Math.Clamp(bombsOnTroops / MathF.Max(6f, (atk.Soldiers + 1) * 0.0018f), 0f, 0.6f);
+            o.CasAtk = 1f + Math.Clamp(bombsOnTroops / MathF.Max(6f, (atk.Soldiers + 1) * 0.0018f), 0f, 0.30f);
         if (o.Superiority < -0.1f && dFightLeft > 0)
-            o.CasDef = 1f + Math.Clamp(dFightLeft * dFs.BombKg / 1000f / MathF.Max(6f, (def.Soldiers + 1) * 0.002f), 0f, 0.4f);
+            o.CasDef = 1f + Math.Clamp(dFightLeft * dFs.BombKg / 1000f / MathF.Max(6f, (def.Soldiers + 1) * 0.002f), 0f, 0.20f);
 
         if (aAirStrat == 2 && bombsOnTarget > 0f)
         {
@@ -2838,11 +2848,16 @@ static class WarEngine
             AnnounceField(field, log);
 
             float aPow0 = SidePower(fa), dPow0 = SidePower(fd);
+            //  اثر برتری هوایی روی نبرد زمینی.
+            //   قبلاً سه ضریب روی هم سوار می‌شدند: پایه‌ی CasDef تا ۱.۴، بعد
+            //   ضریب برتری تا ۱.۴۵، و بعد کاهش آتش طرف بازنده تا ۰.۸. حاصلش
+            //   ۲.۵ برابر به نفع صاحب آسمان بود که با تقابل زمینی ضرب می‌شد و
+            //   به بیش از ۷ برابر می‌رسید — برای همین نبردی دیده شد که مهاجم
+            //   ۵۷ تانک داد و ۱.۲ کیلومتر جلو رفت.
+            //   هواپیما در ۱۹۳۹ پشتیبانی است، نه تعیین‌کننده‌ی نبرد زمینی.
             float casA = air.CasAtk, casD = air.CasDef;
-            if (air.Superiority > 0.05f) casA *= 1f + Math.Clamp(air.Superiority, 0f, 1f) * 0.45f;
-            else if (air.Superiority < -0.05f) casD *= 1f + Math.Clamp(-air.Superiority, 0f, 1f) * 0.45f;
-            if (air.Superiority > 0.25f) casD *= 1f - Math.Clamp(air.Superiority - 0.25f, 0f, 0.5f) * 0.4f;
-            else if (air.Superiority < -0.25f) casA *= 1f - Math.Clamp(-air.Superiority - 0.25f, 0f, 0.5f) * 0.4f;
+            if (air.Superiority > 0.05f) casA *= 1f + Math.Clamp(air.Superiority, 0f, 1f) * 0.20f;
+            else if (air.Superiority < -0.05f) casD *= 1f + Math.Clamp(-air.Superiority, 0f, 1f) * 0.20f;
             if (defender.Cities <= 0) casD *= 1.5f;
 
             // ابتکار عمل مهاجم: زمان و مکان حمله را او انتخاب کرده است
