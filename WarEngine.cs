@@ -2489,7 +2489,12 @@ static class WarEngine
                     float total = dScore + aScore;
 
                     float burn = MathF.Min(AIR_TICK_MIN * 4f, MathF.Min(d.AmmoSec, tg.AmmoSec));
-                    float intensity = burn * 0.055f;
+                    //  شدت سگ‌جنگی. ضریب ۰.۰۵۵ باعث می‌شد یک درگیری ۱۰۰ به ۱۰۰
+                    //   کمتر از یک فروند تلفات بدهد، یعنی نبرد هوایی عملاً
+                    //   بی‌اثر بود و فرقی نمی‌کرد چه هواپیمایی و چند تا بفرستی.
+                    //   با ۱.۰ تلفات به ۵ تا ۸ درصد می‌رسد که با درگیری‌های
+                    //   واقعی نبرد بریتانیا در همان ابعاد می‌خواند.
+                    float intensity = burn * 1.0f;
                     float aKilled = MathF.Min(tg.Count, intensity * dScore / MathF.Max(1f, total) / MathF.Max(0.4f, aFs.Durability));
                     float dKilled = MathF.Min(d.Count, intensity * aScore / MathF.Max(1f, total) / MathF.Max(0.4f, dFs.Durability));
 
@@ -2577,10 +2582,30 @@ static class WarEngine
         long aBombLeft  = aBomb - aBombLost;
         long dFightLeft = dFight - dFightLost;
 
-        // ── برتری هوایی از توان باقی‌مانده‌ی واقعی ──
-        float atkRemain = aFightLeft * (aFs.GunKgMin / MathF.Max(1f, aFs.TurnSec)) + aBombLeft * 1.2f;
-        float defRemain = dFightLeft * (dFs.GunKgMin / MathF.Max(1f, dFs.TurnSec)) + (aaStrength) * 0.05f;
-        o.Superiority = Math.Clamp((atkRemain - defRemain) / MathF.Max(1f, atkRemain + defRemain), -1f, 1f);
+        // ── برتری هوایی: چه کسی آسمان را نگه داشت ──
+        //   قبلاً این عدد فقط از «وزن آتش تقسیم بر زمان دور زدن» حساب می‌شد و
+        //   بقیه‌ی مشخصات را نادیده می‌گرفت. نتیجه‌اش این بود که Bf 109 با ۴۴
+        //   کیلوگرم آتش در دقیقه ۳.۳ برابر قوی‌تر از P-36 با ۱۲ کیلوگرم رتبه
+        //   می‌گرفت — با اینکه P-36 دو برابر مهمات، بیشترین برد و بهترین دوام
+        //   را دارد. حتی بدتر: کل شبیه‌سازی تیک‌به‌تیک بالا که مهمات و دوام و
+        //   ارتفاع را درست حساب می‌کند، در این خط دور ریخته می‌شد و نتیجه از
+        //   روی مشخصات کاتالوگی دوباره ساخته می‌شد.
+        //
+        //   حالا نتیجه از خودِ نبرد می‌آید: چند فروند هر طرف زنده مانده و
+        //   نسبت تلفات چه بوده. هواپیمایی که مهماتش تمام شده یا سوخته باشد
+        //   دیگر در شمارش نیست، پس همان چیزی اندازه گرفته می‌شود که واقعاً
+        //   در آسمان اتفاق افتاد.
+        float atkRemain = aFightLeft * 1.0f + aBombLeft * 0.5f;
+        float defRemain = dFightLeft * 1.0f + aaStrength * 0.04f;
+        float survScore = (atkRemain - defRemain) / MathF.Max(1f, atkRemain + defRemain);
+
+        //   نسبت تلفات هم مهم است: طرفی که با تلفات کمتر همان تعداد را زده،
+        //   عملاً آسمان را کنترل کرده حتی اگر عددها نزدیک باشد.
+        float aLossR = aFight > 0 ? (float)aFightLost / aFight : 0f;
+        float dLossR = dFight > 0 ? (float)dFightLost / dFight : 0f;
+        float exchScore = (dLossR - aLossR);
+
+        o.Superiority = Math.Clamp(survScore * 0.65f + exchScore * 0.35f, -1f, 1f);
         o.HadAirCombat = anyCombat;
 
         // ── اثر روی زمین و اقتصاد ──
@@ -2858,7 +2883,10 @@ static class WarEngine
             float casA = air.CasAtk, casD = air.CasDef;
             if (air.Superiority > 0.05f) casA *= 1f + Math.Clamp(air.Superiority, 0f, 1f) * 0.20f;
             else if (air.Superiority < -0.05f) casD *= 1f + Math.Clamp(-air.Superiority, 0f, 1f) * 0.20f;
-            if (defender.Cities <= 0) casD *= 1.5f;
+            //  کشوری که شهری ندارد، آخرین خاکش را می‌جنگد. ولی ضریب ۱.۵ روی
+            //   کل آتشش پاداشِ نداشتن بود و مدافعِ ورشکسته را قوی‌تر از مدافعِ
+            //   آباد می‌کرد. ۱.۱۵ به‌اندازه‌ی کافی «آخرین سنگر» را نشان می‌دهد.
+            if (defender.Cities <= 0) casD *= 1.15f;
 
             // ابتکار عمل مهاجم: زمان و مکان حمله را او انتخاب کرده است
             int surpriseTicks = (int)(18 + fa.Cmd.Aggression * 14);
