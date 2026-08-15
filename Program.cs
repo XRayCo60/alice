@@ -299,6 +299,10 @@ class UserSession
     public List<string> DefenseModelNames { get; set; } = new();
     public List<long> DefenseModelCounts { get; set; } = new();
     public List<int> DefenseModelPcts { get; set; } = new();
+    public List<long> DefenseModelAmounts { get; set; } = new();
+    public List<long> DefenseModelMinimums { get; set; } = new();
+    public List<string> DefenseTankModelNamesFinal { get; set; } = new();
+    public List<long> DefenseTankModelAmountsFinal { get; set; } = new();
     public int DefenseModelIndex { get; set; } = 0;
 
     public string AttackCurrentCategory { get; set; } = "";
@@ -618,12 +622,13 @@ static partial class Database
         string battleJobs = @"CREATE TABLE IF NOT EXISTS BattleJobs(BattleId INTEGER PRIMARY KEY, JobType TEXT NOT NULL, RequestJson TEXT NOT NULL, ContextJson TEXT NOT NULL DEFAULT '', Status TEXT NOT NULL DEFAULT 'Pending', ResultJson TEXT NOT NULL DEFAULT '', LastError TEXT NOT NULL DEFAULT '', CreatedAtMs INTEGER NOT NULL, UpdatedAtMs INTEGER NOT NULL);";
         string eqModels = @"CREATE TABLE IF NOT EXISTS EquipmentModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseModels = @"CREATE TABLE IF NOT EXISTS DefenseModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, DefPct INTEGER NOT NULL DEFAULT 100, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
+        string defenseModelAmounts = @"CREATE TABLE IF NOT EXISTS DefenseModelAmounts(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         //  – naval expansion tables
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -966,6 +971,54 @@ static partial class Database
         cmd.Parameters.AddWithValue("@chat", chatId);
         cmd.Parameters.AddWithValue("@cat", category);
         cmd.ExecuteNonQuery();
+    }
+
+    public static Dictionary<string, long> GetDefenseModelAmounts(long ownerId, long chatId,
+        string category)
+    {
+        var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"SELECT ModelName,Count FROM DefenseModelAmounts
+                            WHERE OwnerId=@owner AND ChatId=@chat AND Category=@category";
+        cmd.Parameters.AddWithValue("@owner", ownerId);
+        cmd.Parameters.AddWithValue("@chat", chatId);
+        cmd.Parameters.AddWithValue("@category", category);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result[reader.GetString(0)] = Math.Max(0, reader.GetInt64(1));
+        return result;
+    }
+
+    public static void ReplaceDefenseModelAmounts(long ownerId, long chatId, string category,
+        IReadOnlyDictionary<string, long> amounts)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+        using (var delete = con.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = @"DELETE FROM DefenseModelAmounts
+                                   WHERE OwnerId=@owner AND ChatId=@chat AND Category=@category";
+            delete.Parameters.AddWithValue("@owner", ownerId);
+            delete.Parameters.AddWithValue("@chat", chatId);
+            delete.Parameters.AddWithValue("@category", category);
+            delete.ExecuteNonQuery();
+        }
+        foreach (var item in amounts.Where(x => x.Value > 0))
+        {
+            using var insert = con.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = @"INSERT INTO DefenseModelAmounts
+                (OwnerId,ChatId,Category,ModelName,Count)
+                VALUES(@owner,@chat,@category,@model,@count)";
+            insert.Parameters.AddWithValue("@owner", ownerId);
+            insert.Parameters.AddWithValue("@chat", chatId);
+            insert.Parameters.AddWithValue("@category", category);
+            insert.Parameters.AddWithValue("@model", item.Key);
+            insert.Parameters.AddWithValue("@count", item.Value);
+            insert.ExecuteNonQuery();
+        }
+        transaction.Commit();
     }
 
     public static List<(string ModelName, long Count)> GetEquipmentBreakdownForReconcile(Country c, string resType)
@@ -1848,55 +1901,25 @@ static partial class Database
         var c = GetCountry(ownerId, chatId);
         if (c == null) return;
 
-        //  – per-model defense calculation
-        long dt = 0, ds = 0, df = 0;
-
-        // Tanks – check per-model defense
-        var tankDefModels = GetDefenseModels(ownerId, chatId, "Tanks");
-        if (tankDefModels.Count > 0)
+        // Exact per-model defense. A compulsory 20% reserve is repaired with the
+        // country's factory model first and foreign equipment only for the remainder.
+        long ExactDefenseTotal(string category, string resourceType, long oldTotal)
         {
-            var breakdown = GetEquipmentBreakdownForReconcile(c, "tanks");
-            foreach (var (model, count) in breakdown)
-            {
-                int pct = 100;
-                var dm = tankDefModels.FirstOrDefault(x => x.ModelName == model);
-                if (dm != default) pct = dm.DefPct;
-                else if (c.DefTankPct > 0) pct = c.DefTankPct;
-                dt += (long)Math.Ceiling(count * Math.Clamp(pct, 20, 100) / 100.0);
-            }
-        }
-        else
-        {
-            if (c.DefTankPct > 0) dt = (long)Math.Ceiling(c.Tanks * (c.DefTankPct / 100.0));
-            else if (c.Tanks > 0 && c.DefenseTanks >= c.Tanks) { c.DefTankPct = 100; dt = c.Tanks; }
-            else dt = c.DefenseTanks;
+            var breakdown = GetEquipmentBreakdownForReconcile(c, resourceType);
+            long total = breakdown.Sum(x => x.Count);
+            if (total <= 0) return 0;
+            long mandatory = (long)Math.Ceiling(total * 0.20);
+            var saved = GetDefenseModelAmounts(ownerId, chatId, category);
+            long selected = breakdown.Sum(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName)));
+            if (saved.Count == 0) selected = Math.Max(mandatory, Math.Min(total, oldTotal));
+            return Math.Clamp(selected, mandatory, total);
         }
 
-        // Soldiers – single
+        long dt = ExactDefenseTotal("Tanks", "tanks", c.DefenseTanks);
+        long df = ExactDefenseTotal("Planes", "planes", c.DefenseFighters);
+        long ds;
         if (c.DefSoldierPct > 0) ds = (long)Math.Ceiling(c.Soldiers * (c.DefSoldierPct / 100.0));
-        else if (c.Soldiers > 0 && c.DefenseSoldiers >= c.Soldiers) { c.DefSoldierPct = 100; ds = c.Soldiers; }
         else ds = c.DefenseSoldiers;
-
-        // Planes (fighters) – per-model
-        var planeDefModels = GetDefenseModels(ownerId, chatId, "Planes");
-        if (planeDefModels.Count > 0)
-        {
-            var breakdown = GetEquipmentBreakdownForReconcile(c, "planes");
-            foreach (var (model, count) in breakdown)
-            {
-                int pct = 100;
-                var dm = planeDefModels.FirstOrDefault(x => x.ModelName == model);
-                if (dm != default) pct = dm.DefPct;
-                else if (c.DefFighterPct > 0) pct = c.DefFighterPct;
-                df += (long)Math.Ceiling(count * Math.Clamp(pct, 20, 100) / 100.0);
-            }
-        }
-        else
-        {
-            if (c.DefFighterPct > 0) df = (long)Math.Ceiling(c.Planes * (c.DefFighterPct / 100.0));
-            else if (c.Planes > 0 && c.DefenseFighters >= c.Planes) { c.DefFighterPct = 100; df = c.Planes; }
-            else df = c.DefenseFighters;
-        }
 
         long minTanks = (long)Math.Ceiling(c.Tanks * 0.2);
         long minSoldiers = (long)Math.Ceiling(c.Soldiers * 0.2);
@@ -4719,6 +4742,8 @@ partial class Program
             (sessions.TryGetValue(uid, out var atkSess) && atkSess != null &&
             (atkSess.Step == SessionStep.AttackWaitingGroup ||
              atkSess.Step == SessionStep.TransferWaitingAmount ||
+             atkSess.Step == SessionStep.DefenseWaitingTankModel ||
+             atkSess.Step == SessionStep.DefenseWaitingPlaneModel ||
              atkSess.Step == SessionStep.DeployWaitingTanks ||
              atkSess.Step == SessionStep.DeployWaitingSoldiers ||
              atkSess.Step == SessionStep.DeployWaitingFighters ||
@@ -6327,6 +6352,95 @@ partial class Program
                 return;
             }
 
+            if (sess.Step == SessionStep.DefenseWaitingTankModel)
+            {
+                if (!TryParseLong(txt, out long amount) || amount < 0)
+                { await SendPrompt(uid, uid, "❌ یک تعداد معتبر وارد کنید.", ct: ct); return; }
+                int index = sess.DefenseModelIndex;
+                if (index < 0 || index >= sess.DefenseModelCounts.Count) { EndSession(uid); return; }
+                long minimum = sess.DefenseModelMinimums[index];
+                long available = sess.DefenseModelCounts[index];
+                if (amount < minimum || amount > available)
+                {
+                    await SendPrompt(uid, uid,
+                        $"❌ مقدار مجاز برای {sess.DefenseModelNames[index]} بین {minimum:N0} تا {available:N0} است.", ct: ct);
+                    return;
+                }
+                sess.DefenseModelAmounts[index] = amount;
+                sess.DefenseModelIndex++;
+                if (sess.DefenseModelIndex < sess.DefenseModelNames.Count)
+                {
+                    int next = sess.DefenseModelIndex;
+                    await SendPrompt(uid, uid,
+                        $"🛡 دفاع تانک – مدل {next + 1}/{sess.DefenseModelNames.Count}\n\n🔧 مدل: {sess.DefenseModelNames[next]}\n📊 موجودی: {sess.DefenseModelCounts[next]:N0}\n🛡 مقدار فعلی دفاع: {sess.DefenseModelAmounts[next]:N0}\n🔒 حداقل اجباری: {sess.DefenseModelMinimums[next]:N0}\n\nتعداد دقیق را وارد کنید:", ct: ct);
+                    return;
+                }
+                sess.DefenseTankModelNamesFinal = new List<string>(sess.DefenseModelNames);
+                sess.DefenseTankModelAmountsFinal = new List<long>(sess.DefenseModelAmounts);
+                sess.DefenseTanks = sess.DefenseModelAmounts.Sum();
+                sess.DefTankPct = 100;
+                sess.Step = SessionStep.DefenseWaitingSoldiers;
+                await SendPrompt(uid, uid, $"🪖 درصد دفاع سرباز:\nکل: {Database.GetCountry(uid, sess.AttackChatId)?.Soldiers ?? 0:N0}",
+                    BuildPercentKeyboard("soldier", sess.AttackChatId), ct);
+                return;
+            }
+
+            if (sess.Step == SessionStep.DefenseWaitingPlaneModel)
+            {
+                if (!TryParseLong(txt, out long amount) || amount < 0)
+                { await SendPrompt(uid, uid, "❌ یک تعداد معتبر وارد کنید.", ct: ct); return; }
+                int index = sess.DefenseModelIndex;
+                if (index < 0 || index >= sess.DefenseModelCounts.Count) { EndSession(uid); return; }
+                long minimum = sess.DefenseModelMinimums[index];
+                if (amount < minimum || amount > sess.DefenseModelCounts[index])
+                {
+                    await SendPrompt(uid, uid,
+                        $"❌ مقدار مجاز برای {sess.DefenseModelNames[index]} بین {minimum:N0} تا {sess.DefenseModelCounts[index]:N0} است.", ct: ct);
+                    return;
+                }
+                sess.DefenseModelAmounts[index] = amount;
+                sess.DefenseModelIndex++;
+                if (sess.DefenseModelIndex < sess.DefenseModelNames.Count)
+                {
+                    int next = sess.DefenseModelIndex;
+                    await SendPrompt(uid, uid,
+                        $"✈️ دفاع جنگنده – مدل {next + 1}/{sess.DefenseModelNames.Count}\n\n🔧 مدل: {sess.DefenseModelNames[next]}\n📊 موجودی: {sess.DefenseModelCounts[next]:N0}\n🛡 مقدار فعلی دفاع: {sess.DefenseModelAmounts[next]:N0}\n🔒 حداقل اجباری: {sess.DefenseModelMinimums[next]:N0}\n\nتعداد دقیق را وارد کنید:", ct: ct);
+                    return;
+                }
+                var country = Database.GetCountry(uid, sess.AttackChatId);
+                if (country == null) { EndSession(uid); return; }
+                var tankMap = Enumerable.Range(0, sess.DefenseTankModelNamesFinal.Count)
+                    .Where(i => i < sess.DefenseTankModelAmountsFinal.Count && sess.DefenseTankModelAmountsFinal[i] > 0)
+                    .ToDictionary(i => sess.DefenseTankModelNamesFinal[i], i => sess.DefenseTankModelAmountsFinal[i], StringComparer.OrdinalIgnoreCase);
+                var fighterMap = Enumerable.Range(0, sess.DefenseModelNames.Count)
+                    .Where(i => sess.DefenseModelAmounts[i] > 0)
+                    .ToDictionary(i => sess.DefenseModelNames[i], i => sess.DefenseModelAmounts[i], StringComparer.OrdinalIgnoreCase);
+                bool tanksStillAvailable = tankMap.All(item =>
+                    item.Value <= GetTransferBreakdown(country, "tanks")
+                        .Where(x => x.ModelName.Equals(item.Key, StringComparison.OrdinalIgnoreCase)).Sum(x => x.Count));
+                bool fightersStillAvailable = fighterMap.All(item =>
+                    item.Value <= GetTransferBreakdown(country, "planes")
+                        .Where(x => x.ModelName.Equals(item.Key, StringComparison.OrdinalIgnoreCase)).Sum(x => x.Count));
+                if (!tanksStillAvailable || !fightersStillAvailable)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی مدل‌ها تغییر کرده است؛ تنظیم دفاع را دوباره انجام دهید.", ct: ct);
+                    return;
+                }
+                Database.ReplaceDefenseModelAmounts(uid, sess.AttackChatId, "Tanks", tankMap);
+                Database.ReplaceDefenseModelAmounts(uid, sess.AttackChatId, "Planes", fighterMap);
+                long fighters = sess.DefenseModelAmounts.Sum();
+                Database.UpdateDefenseFull(uid, sess.AttackChatId, sess.DefenseTanks,
+                    sess.DefenseSoldiers, fighters, country.DefenseStrategy, country.DefenseTactic,
+                    100, sess.DefSoldierPct > 0 ? sess.DefSoldierPct : 20, 100);
+                Database.ReconcileDefense(uid, sess.AttackChatId);
+                long defenseChat = sess.AttackChatId;
+                EndSession(uid);
+                await SendTemp(uid, "✅ ترکیب دقیق دفاع تانک و جنگنده ذخیره شد.", ct: ct);
+                await SendDefenseStatus(uid, uid, defenseChat, ct);
+                return;
+            }
+
             if (sess.Step == SessionStep.DeployWaitingTanks)
             {
                 // Legacy total tanks – now redirect to per-model
@@ -6840,7 +6954,7 @@ partial class Program
                 // Legacy fallback – should not happen now, redirect to per-model
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
                 if (atk == null) { EndSession(uid); return; }
-                var breakdown = GetTransferBreakdown(atk, "tanks");
+                var breakdown = GetAttackBreakdown(atk, "tanks");
                 if (breakdown.Count > 0)
                 {
                     sess.AttackModelNames = breakdown.Select(x => x.ModelName).ToList();
@@ -6854,7 +6968,7 @@ partial class Program
                 }
                 sess.AttackTanks = 0;
                 sess.Step = SessionStep.AttackWaitingSoldiers;
-                await SendPrompt(uid, uid, "🪖 تعداد سربازان اعزامی را وارد کنید.\n" + InventoryLine(atk.Soldiers), ct: ct);
+                await SendPrompt(uid, uid, "🪖 تعداد سربازان اعزامی را وارد کنید.\n" + InventoryLine(GetAttackAvailableSoldiers(atk)), ct: ct);
                 return;
             }
 
@@ -7010,7 +7124,7 @@ partial class Program
                 sess.AttackCurrentCategory = "soldiers";
                 sess.Step = SessionStep.AttackWaitingSoldiers;
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
-                await SendPrompt(uid, uid, "🪖 تعداد سربازان اعزامی را وارد کنید.\n" + InventoryLine(atk?.Soldiers ?? 0), ct: ct);
+                await SendPrompt(uid, uid, "🪖 تعداد سربازان اعزامی را وارد کنید.\n" + InventoryLine(atk == null ? 0 : GetAttackAvailableSoldiers(atk)), ct: ct);
                 return;
             }
 
@@ -7019,11 +7133,13 @@ partial class Program
                 if (!TryParseLong(txt, out long soldiers) || soldiers < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
                 if (atk == null) { EndSession(uid); return; }
-                if (soldiers > atk.Soldiers) { await SendPrompt(uid, uid, $"❌ موجودی: {atk.Soldiers}", ct: ct); return; }
+                long availableSoldiers = GetAttackAvailableSoldiers(atk);
+                if (soldiers > availableSoldiers)
+                { await SendPrompt(uid, uid, $"❌ قابل اعزام: {availableSoldiers:N0}؛ حداقل ۲۰٪ در دفاع می‌ماند.", ct: ct); return; }
                 sess.AttackSoldiers = soldiers;
 
                 // Now per-model planes
-                var planeBreakdown = GetTransferBreakdown(atk, "planes");
+                var planeBreakdown = GetAttackBreakdown(atk, "planes");
                 if (planeBreakdown.Count == 0)
                 {
                     sess.Step = SessionStep.AttackWaitingBombers;
@@ -9060,6 +9176,75 @@ partial class Program
             equipment.Total);
     }
 
+    static long[] AllocateModelPriority(IReadOnlyList<(string ModelName, long Count)> models,
+        string defaultModel, long requested)
+    {
+        var allocated = new long[models.Count];
+        long remaining = Math.Min(Math.Max(0, requested), models.Sum(x => Math.Max(0, x.Count)));
+        foreach (int i in Enumerable.Range(0, models.Count)
+                     .OrderBy(i => models[i].ModelName.Equals(defaultModel, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                     .ThenBy(i => i))
+        {
+            long take = Math.Min(remaining, Math.Max(0, models[i].Count));
+            allocated[i] = take;
+            remaining -= take;
+            if (remaining == 0) break;
+        }
+        return allocated;
+    }
+
+    static List<(string ModelName, long Count, long DefenseCount, long MinimumCount)>
+        GetExactDefenseBreakdown(Country c, string resType)
+    {
+        var models = GetTransferBreakdown(c, resType);
+        if (models.Count == 0)
+            return new List<(string, long, long, long)>();
+        string category = resType == "tanks" ? "Tanks" : "Planes";
+        string defaultModel = resType == "tanks"
+            ? Database.GetDefaultTankModel(c.Faction)
+            : Database.GetDefaultPlaneModel(c.Faction);
+        long total = models.Sum(x => x.Count);
+        long mandatoryTotal = (long)Math.Ceiling(total * 0.20);
+        long[] minimums = AllocateModelPriority(models, defaultModel, mandatoryTotal);
+        var saved = Database.GetDefenseModelAmounts(c.OwnerId, c.ChatId, category);
+        var selected = models.Select(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName))).ToArray();
+
+        long fallbackTotal = resType == "tanks"
+            ? Math.Max(mandatoryTotal, Math.Min(total, c.DefenseTanks))
+            : Math.Min(total, c.DefenseFighters);
+        if (saved.Count == 0)
+            selected = AllocateModelPriority(models, defaultModel, fallbackTotal);
+        else if (selected.Sum() < mandatoryTotal)
+        {
+            // A stale/invalid setup is repaired deterministically: domestic factory model first,
+            // then foreign models in inventory order until the compulsory 20% is reached.
+            selected = AllocateModelPriority(models, defaultModel, mandatoryTotal);
+        }
+
+        for (int i = 0; i < selected.Length; i++)
+            selected[i] = Math.Clamp(selected[i], minimums[i], models[i].Count);
+        return models.Select((x, i) =>
+            (x.ModelName, x.Count, DefenseCount: selected[i], MinimumCount: minimums[i])).ToList();
+    }
+
+    static long GetAttackAvailableSoldiers(Country c)
+    {
+        long mandatory = (long)Math.Ceiling(c.Soldiers * 0.20);
+        long reserved = Math.Clamp(Math.Max(mandatory, c.DefenseSoldiers), 0, c.Soldiers);
+        return Math.Max(0, c.Soldiers - reserved);
+    }
+
+    static List<(string ModelName, long Count)> GetAttackBreakdown(Country c, string resType)
+    {
+        var inventory = GetTransferBreakdown(c, resType);
+        if (resType is not ("tanks" or "planes")) return inventory;
+        var defense = GetExactDefenseBreakdown(c, resType)
+            .ToDictionary(x => x.ModelName, x => x.DefenseCount, StringComparer.OrdinalIgnoreCase);
+        return inventory.Select(x =>
+                (x.ModelName, Count: Math.Max(0, x.Count - defense.GetValueOrDefault(x.ModelName))))
+            .Where(x => x.Count > 0).ToList();
+    }
+
     static List<(string ModelName, long Count, int DefPct)> GetDefenseBreakdown(Country c, string resType)
     {
         var transferBreakdown = GetTransferBreakdown(c, resType);
@@ -10061,7 +10246,7 @@ partial class Program
         string forcePrompt;
 
         //  – per-model attack for tanks
-        var tankBreakdown = GetTransferBreakdown(attacker, "tanks");
+        var tankBreakdown = GetAttackBreakdown(attacker, "tanks");
         if (tankBreakdown.Count == 0)
         {
             session.AttackTanks = 0;
@@ -10073,7 +10258,7 @@ partial class Program
             session.Step = SessionStep.AttackWaitingSoldiers;
             forcePrompt =
                 "🪖 تعداد سربازان اعزامی را وارد کنید.\n" +
-                InventoryLine(attacker.Soldiers);
+                InventoryLine(GetAttackAvailableSoldiers(attacker));
         }
         else if (tankBreakdown.Count == 1)
         {
@@ -10308,10 +10493,15 @@ partial class Program
                 Database.GetDefaultBomberModel(attacker.Faction));
             long soldiers = Math.Max(0, sess.AttackSoldiers);
 
-            if (soldiers > attacker.Soldiers || selectedTanks.Sum(x => x.Count) > attacker.Tanks ||
-                selectedFighters.Sum(x => x.Count) > attacker.Planes || selectedBombers.Sum(x => x.Count) > attacker.Bombers)
+            long availableSoldiers = GetAttackAvailableSoldiers(attacker);
+            bool exactModelsAvailable =
+                ModelSelectionFits(selectedTanks, GetAttackBreakdown(attacker, "tanks")) &&
+                ModelSelectionFits(selectedFighters, GetAttackBreakdown(attacker, "planes")) &&
+                ModelSelectionFits(selectedBombers, GetTransferBreakdown(attacker, "bombers"));
+            if (soldiers > availableSoldiers || !exactModelsAvailable)
             {
-                await SendTemp(uid, "❌ موجودی نیروها در طول ثبت فرمان تغییر کرده است. حمله ثبت نشد.", ct: ct);
+                await SendTemp(uid,
+                    "❌ موجودی قابل اعزام تغییر کرده یا بخشی از نیروها در دفاع اجباری است. حمله ثبت نشد.", ct: ct);
                 return;
             }
             if (soldiers + selectedTanks.Sum(x => x.Count) <= 0)
@@ -10424,6 +10614,16 @@ partial class Program
         }
     }
 
+    static bool ModelSelectionFits(IReadOnlyList<ModelAmount> selected,
+        IReadOnlyList<(string ModelName, long Count)> available)
+    {
+        var capacity = available.GroupBy(x => x.ModelName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.Sum(y => y.Count), StringComparer.OrdinalIgnoreCase);
+        foreach (var group in selected.GroupBy(x => x.Model, StringComparer.OrdinalIgnoreCase))
+            if (group.Sum(x => x.Count) > capacity.GetValueOrDefault(group.Key)) return false;
+        return true;
+    }
+
     static List<ModelAmount> SessionModelAmounts(
         List<string> finalNames,
         List<long> finalAmounts,
@@ -10447,11 +10647,11 @@ partial class Program
 
     static BattleParticipant BuildOwnDefenseParticipant(Country country)
     {
-        var tanks = GetDefenseBreakdown(country, "tanks")
-            .Select(x => new ModelAmount(x.ModelName, Math.Min(x.Count, (long)Math.Ceiling(x.Count * x.DefPct / 100.0))))
+        var tanks = GetExactDefenseBreakdown(country, "tanks")
+            .Select(x => new ModelAmount(x.ModelName, x.DefenseCount))
             .Where(x => x.Count > 0).ToList();
-        var fighters = GetDefenseBreakdown(country, "planes")
-            .Select(x => new ModelAmount(x.ModelName, Math.Min(x.Count, (long)Math.Ceiling(x.Count * x.DefPct / 100.0))))
+        var fighters = GetExactDefenseBreakdown(country, "planes")
+            .Select(x => new ModelAmount(x.ModelName, x.DefenseCount))
             .Where(x => x.Count > 0).ToList();
         long soldiers = Math.Min(country.Soldiers,
             Math.Max(country.DefenseSoldiers, (long)Math.Ceiling(country.Soldiers * 0.2)));
@@ -10763,8 +10963,8 @@ partial class Program
             );
 
         // per-model defense breakdown – including naval
-        var tankBreakdown = GetDefenseBreakdown(country, "tanks");
-        var planeBreakdown = GetDefenseBreakdown(country, "planes");
+        var tankBreakdown = GetExactDefenseBreakdown(country, "tanks");
+        var planeBreakdown = GetExactDefenseBreakdown(country, "planes");
         var boatBreakdown = GetDefenseBreakdown(country, "boats");
         var subBreakdown = GetDefenseBreakdown(country, "submarines");
         var bsBreakdown = GetDefenseBreakdown(country, "battleships");
@@ -10774,11 +10974,9 @@ partial class Program
         if (tankBreakdown.Count > 0)
         {
             sbDef.AppendLine("🛡 تانک‌ها:");
-            foreach (var (model, count, pct) in tankBreakdown)
-            {
-                long defCount = (long)Math.Ceiling(count * pct / 100.0);
-                sbDef.AppendLine($"  • {model}: {defCount:N0}/{count:N0} ({pct}%)");
-            }
+            foreach (var (model, count, defCount, minimum) in tankBreakdown)
+                sbDef.AppendLine($"  • {model}: دفاع {defCount:N0} از {count:N0}" +
+                    (minimum > 0 ? $" | اجباری {minimum:N0}" : ""));
         }
         else
         {
@@ -10788,11 +10986,9 @@ partial class Program
         if (planeBreakdown.Count > 0)
         {
             sbDef.AppendLine("✈️ جنگنده‌ها:");
-            foreach (var (model, count, pct) in planeBreakdown)
-            {
-                long defCount = (long)Math.Ceiling(count * pct / 100.0);
-                sbDef.AppendLine($"  • {model}: {defCount:N0}/{count:N0} ({pct}%)");
-            }
+            foreach (var (model, count, defCount, minimum) in planeBreakdown)
+                sbDef.AppendLine($"  • {model}: دفاع {defCount:N0} از {count:N0}" +
+                    (minimum > 0 ? $" | اجباری {minimum:N0}" : ""));
         }
         else
         {
@@ -10956,13 +11152,16 @@ partial class Program
         if (c == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ کشور نیست!", cancellationToken: ct); return; }
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
 
-        //  – per-model defense: start with tank models
-        var tankBreakdown = GetDefenseBreakdown(c, "tanks");
+        // Ground/air defense is configured as exact per-model amounts. The compulsory
+        // tank reserve is 20% overall, allocated to the domestic factory model first.
+        var tankBreakdown = GetExactDefenseBreakdown(c, "tanks");
         if (tankBreakdown.Count == 0)
         {
-            // No tanks, go to soldiers
-            await bot.EditMessageTextAsync(cb.Message.Chat.Id, cb.Message.MessageId, $"🪖 درصد سرباز:\nکل: {c.Soldiers:N0}", replyMarkup: BuildPercentKeyboard("soldier", cid), cancellationToken: ct);
-            sessions[uid] = new UserSession { Step = SessionStep.DefenseWaitingSoldiers, AttackChatId = cid, DefenseTanks = 0, DefTankPct = 100 };
+            await bot.EditMessageTextAsync(cb.Message.Chat.Id, cb.Message.MessageId,
+                $"🪖 درصد سرباز:\nکل: {c.Soldiers:N0}",
+                replyMarkup: BuildPercentKeyboard("soldier", cid), cancellationToken: ct);
+            sessions[uid] = new UserSession
+                { Step = SessionStep.DefenseWaitingSoldiers, AttackChatId = cid, DefenseTanks = 0, DefTankPct = 100 };
             return;
         }
 
@@ -10973,14 +11172,16 @@ partial class Program
             DefenseCurrentCategory = "tanks",
             DefenseModelNames = tankBreakdown.Select(x => x.ModelName).ToList(),
             DefenseModelCounts = tankBreakdown.Select(x => x.Count).ToList(),
-            DefenseModelPcts = tankBreakdown.Select(x => x.DefPct).ToList(),
+            DefenseModelAmounts = tankBreakdown.Select(x => x.DefenseCount).ToList(),
+            DefenseModelMinimums = tankBreakdown.Select(x => x.MinimumCount).ToList(),
             DefenseModelIndex = 0
         };
         sessions[uid] = sess;
 
         var first = tankBreakdown[0];
-        string msg = $"🛡 درصد دفاع تانک – مدل {1}/{tankBreakdown.Count}\n\n🔧 مدل: {first.ModelName}\n📊 موجودی: {first.Count:N0}\n📈 درصد فعلی: {first.DefPct}%\n\nچند درصد از این مدل در دفاع باشد؟ (حداقل 20%)";
-        await bot.EditMessageTextAsync(cb.Message.Chat.Id, cb.Message.MessageId, msg, replyMarkup: BuildModelPercentKeyboard(cid, "tanks", 0), cancellationToken: ct);
+        string msg = $"🛡 دفاع تانک – مدل 1/{tankBreakdown.Count}\n\n🔧 مدل: {first.ModelName}\n📊 موجودی: {first.Count:N0}\n🛡 مقدار فعلی دفاع: {first.DefenseCount:N0}\n🔒 حداقل اجباری این مدل: {first.MinimumCount:N0}\n\nتعداد دقیق این مدل در دفاع را وارد کنید:";
+        DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
+        await SendPrompt(uid, uid, msg, ct: ct);
     }
 
     static async Task HandleDefensePctCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
@@ -11005,12 +11206,18 @@ partial class Program
             if (sessions.TryGetValue(uid, out var s) && s != null && s.AttackChatId == cid) { defT = s.DefenseTanks; dtp = s.DefTankPct > 0 ? s.DefTankPct : 100; }
 
             long ds = (long)Math.Ceiling(c.Soldiers * (pct / 100.0));
-            //  – after soldiers, go to per-model planes
-            var planeBreakdown = GetDefenseBreakdown(c, "planes");
+            var planeBreakdown = GetExactDefenseBreakdown(c, "planes");
+            var currentSession = sessions.TryGetValue(uid, out var existing) && existing != null
+                ? existing : new UserSession();
             if (planeBreakdown.Count == 0)
             {
-                // No planes, finalize
-                Database.UpdateDefenseFull(uid, cid, defT, ds, 0, c.DefenseStrategy, c.DefenseTactic, dtp, pct, 100);
+                var tankMap = Enumerable.Range(0, currentSession.DefenseTankModelNamesFinal.Count)
+                    .Where(i => i < currentSession.DefenseTankModelAmountsFinal.Count && currentSession.DefenseTankModelAmountsFinal[i] > 0)
+                    .ToDictionary(i => currentSession.DefenseTankModelNamesFinal[i],
+                        i => currentSession.DefenseTankModelAmountsFinal[i], StringComparer.OrdinalIgnoreCase);
+                Database.ReplaceDefenseModelAmounts(uid, cid, "Tanks", tankMap);
+                Database.ReplaceDefenseModelAmounts(uid, cid, "Planes", new Dictionary<string, long>());
+                Database.UpdateDefenseFull(uid, cid, defT, ds, 0, c.DefenseStrategy, c.DefenseTactic, 100, pct, 100);
                 EndSession(uid);
                 await bot.AnswerCallbackQueryAsync(cb.Id, $"🪖 {pct}% – ذخیره شد.", cancellationToken: ct);
                 DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
@@ -11018,26 +11225,25 @@ partial class Program
                 return;
             }
 
-            var sessPlane = new UserSession
-            {
-                Step = SessionStep.DefenseWaitingPlaneModel,
-                AttackChatId = cid,
-                DefenseTanks = defT,
-                DefenseSoldiers = ds,
-                DefTankPct = dtp,
-                DefSoldierPct = pct,
-                DefenseCurrentCategory = "planes",
-                DefenseModelNames = planeBreakdown.Select(x => x.ModelName).ToList(),
-                DefenseModelCounts = planeBreakdown.Select(x => x.Count).ToList(),
-                DefenseModelPcts = planeBreakdown.Select(x => x.DefPct).ToList(),
-                DefenseModelIndex = 0
-            };
-            sessions[uid] = sessPlane;
+            currentSession.Step = SessionStep.DefenseWaitingPlaneModel;
+            currentSession.AttackChatId = cid;
+            currentSession.DefenseTanks = defT;
+            currentSession.DefenseSoldiers = ds;
+            currentSession.DefTankPct = 100;
+            currentSession.DefSoldierPct = pct;
+            currentSession.DefenseCurrentCategory = "planes";
+            currentSession.DefenseModelNames = planeBreakdown.Select(x => x.ModelName).ToList();
+            currentSession.DefenseModelCounts = planeBreakdown.Select(x => x.Count).ToList();
+            currentSession.DefenseModelAmounts = planeBreakdown.Select(x => x.DefenseCount).ToList();
+            currentSession.DefenseModelMinimums = planeBreakdown.Select(x => x.MinimumCount).ToList();
+            currentSession.DefenseModelIndex = 0;
+            sessions[uid] = currentSession;
 
             await bot.AnswerCallbackQueryAsync(cb.Id, $"🪖 {pct}%", cancellationToken: ct);
+            DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
             var firstPlane = planeBreakdown[0];
-            string msgPlane = $"✈️ درصد دفاع جنگنده – مدل {1}/{planeBreakdown.Count}\n\n🔧 مدل: {firstPlane.ModelName}\n📊 موجودی: {firstPlane.Count:N0}\n📈 فعلی: {firstPlane.DefPct}%\n\nچند درصد در دفاع باشد؟";
-            await bot.EditMessageTextAsync(cb.Message.Chat.Id, cb.Message.MessageId, msgPlane, replyMarkup: BuildModelPercentKeyboard(cid, "planes", 0), cancellationToken: ct);
+            string msgPlane = $"✈️ دفاع جنگنده – مدل 1/{planeBreakdown.Count}\n\n🔧 مدل: {firstPlane.ModelName}\n📊 موجودی: {firstPlane.Count:N0}\n🛡 مقدار فعلی دفاع: {firstPlane.DefenseCount:N0}\n🔒 حداقل اجباری: {firstPlane.MinimumCount:N0}\n\nتعداد دقیق این مدل در دفاع را وارد کنید:";
+            await SendPrompt(uid, uid, msgPlane, ct: ct);
             return;
         }
         if (kind == "fighter")
