@@ -247,6 +247,9 @@ static class WarEngineV2Core
         public float TgtX, TgtY;
         public short FireTgt;
         public byte Type;
+        // Index of the concrete tank model in this side's model breakdown.
+        // Infantry uses -1. This keeps mixed-faction armor physically distinct in combat.
+        public short ModelIndex;
         public byte Posture;
         public byte Sector;
         public bool Alive;
@@ -394,18 +397,7 @@ static class WarEngineV2Core
             ma += spec.MgAmmo * w;
             rel += spec.Reliab * w;
         }
-        // Even one unit affects – blend already includes small weight, but ensure minimum influence 2% if present
-        // If any model has count 1 but total large, its influence is tiny – boost to 2% minimum if count>0
-        foreach (var (model, cnt) in breakdown)
-        {
-            if (cnt > 0 && cnt / total < 0.02)
-            {
-                var spec = GetTankSpecByModel(model);
-                pen = pen * 0.98 + spec.Pen * 0.02;
-                he = he * 0.98 + spec.He * 0.02;
-                // etc – ensure at least 2% influence for presence
-            }
-        }
+        // Every model contributes strictly in proportion to the number actually deployed.
         return new TankSpec($"Blended({breakdown.Count} models)", (float)pen, (float)he, (float)mg, (float)armor, (float)speed, (float)ca, (float)ma, (float)rel);
     }
 
@@ -872,15 +864,14 @@ static class WarEngineV2Core
 
         if (tankBreakdown != null)
         {
-            foreach (var (model, cnt) in tankBreakdown)
+            for (int modelIndex = 0; modelIndex < tankBreakdown.Count; modelIndex++)
             {
-                long tLeft = cnt;
+                long tLeft = Math.Max(0, tankBreakdown[modelIndex].Count);
                 while (tLeft > 0 && n < MAX_GROUPS)
                 {
                     float u = (float)Math.Min(tLeft, (long)Math.Ceiling(tankGrp));
                     InitGroup(ref g[n], atk, 1, u, strat, tac, ref rng);
-                    // Store model index in Sector extension? Use Signature to encode spec influence
-                    // For simplicity, we keep group but spec blending already done
+                    g[n].ModelIndex = (short)modelIndex;
                     tLeft -= (long)u; n++;
                 }
             }
@@ -896,23 +887,59 @@ static class WarEngineV2Core
         return n;
     }
 
+    static TankSpec TankSpecFor(Group group, List<(string Model, long Count)>? breakdown, TankSpec fallback)
+    {
+        if (group.Type != 1 || breakdown == null ||
+            group.ModelIndex < 0 || group.ModelIndex >= breakdown.Count)
+            return fallback;
+        return GetTankSpecByModel(breakdown[group.ModelIndex].Model);
+    }
+
     static float SidePowerAdvanced(Group[] g, int n, List<(string Model, long Count)> tankBreakdown)
     {
-        // If breakdown exists, use blended spec for power, but also add small bonus for diversity
-        TankSpec blended = tankBreakdown != null && tankBreakdown.Count > 0 ? BlendTankSpecs(tankBreakdown) : SpecUSA;
-        float basePower = SidePower(g, n, blended);
-        // Diversity bonus: having multiple models gives slight adaptability bonus
-        if (tankBreakdown != null && tankBreakdown.Count > 1)
+        TankSpec fallback = tankBreakdown != null && tankBreakdown.Count > 0
+            ? BlendTankSpecs(tankBreakdown) : SpecUSA;
+        float power = 0f;
+        for (int i = 0; i < n; i++)
         {
-            basePower *= 1f + Math.Min(0.08f, (tankBreakdown.Count - 1) * 0.025f);
+            if (!g[i].Alive) continue;
+            float ammo = (g[i].CAmmo + g[i].MAmmo) / Math.Max(0.01f, g[i].Size0 * 2f);
+            float availability = 0.45f + 0.55f * Math.Clamp(ammo * 1.6f, 0f, 1f);
+            if (g[i].Type == 1)
+            {
+                TankSpec spec = TankSpecFor(g[i], tankBreakdown, fallback);
+                power += g[i].Units * (8f + spec.Armor * 0.04f + spec.Pen * 0.04f) * availability;
+            }
+            else power += g[i].Units * 0.85f * availability;
         }
-        return basePower;
+        return power;
     }
 
     static void MoveSideAdvanced(Group[] g, int n, List<(string Model, long Count)> tankBreakdown, bool atk, ref XorRng rng)
     {
-        TankSpec blended = tankBreakdown != null && tankBreakdown.Count > 0 ? BlendTankSpecs(tankBreakdown) : SpecUSA;
-        MoveSide(g, n, blended, atk, ref rng);
+        TankSpec fallback = tankBreakdown != null && tankBreakdown.Count > 0
+            ? BlendTankSpecs(tankBreakdown) : SpecUSA;
+        float wxSpd = WxSpeed[_weather];
+        for (int i = 0; i < n; i++)
+        {
+            ref Group u = ref g[i];
+            if (!u.Alive || u.Posture is P_DEFEND or P_AMBUSH or P_HOLD) continue;
+            TankSpec spec = TankSpecFor(u, tankBreakdown, fallback);
+            float baseKmH = u.Type == 1 ? spec.Speed * 0.32f : 4.2f;
+            if (u.Posture == P_RETREAT) baseKmH *= 1.2f;
+            if (u.Supp > 0.5f) baseKmH *= 0.45f;
+            baseKmH *= 1f - u.Fatigue * 0.3f;
+            float step = baseKmH * TerSpeed[TerrAt(u.X, u.Y)] * wxSpd * (TICK_MIN / 60f);
+            float dx = u.TgtX - u.X, dy = u.TgtY - u.Y;
+            float dist = MathF.Sqrt(dx * dx + dy * dy);
+            if (dist < 0.15f) continue;
+            float move = Math.Min(step, dist);
+            u.X += dx / dist * move; u.Y += dy / dist * move;
+            u.X = Math.Clamp(u.X, 0.2f, FRONT_KM - 0.2f);
+            u.Y = Math.Clamp(u.Y, -6f, DEPTH_KM);
+            if (move > 0.5f) u.Signature = Math.Min(1f, u.Signature + 0.18f);
+            u.Sector = (byte)Math.Clamp((int)(u.X / (FRONT_KM / 10f)), 0, 9);
+        }
     }
 
     static float FireSideAdvanced(Group[] own, int nOwn, List<(string Model, long Count)> ownTankBreakdown,
@@ -922,7 +949,9 @@ static class WarEngineV2Core
     {
         TankSpec ownSpec = ownTankBreakdown != null && ownTankBreakdown.Count > 0 ? BlendTankSpecs(ownTankBreakdown) : SpecUSA;
         TankSpec foeSpec = foeTankBreakdown != null && foeTankBreakdown.Count > 0 ? BlendTankSpecs(foeTankBreakdown) : SpecUSA;
-        return FireSide(own, nOwn, ownSpec, foe, nFoe, foeSpec, ownIntel, foeIntel, atk, strat, tac, foeStrat, encircled, combatMul, accEnv, ref rng, ref evtN, tick, ref contact, ref ambushFired);
+        return FireSide(own, nOwn, ownSpec, foe, nFoe, foeSpec, ownIntel, foeIntel,
+            atk, strat, tac, foeStrat, encircled, combatMul, accEnv, ref rng,
+            ref evtN, tick, ref contact, ref ambushFired, ownTankBreakdown, foeTankBreakdown);
     }
 
     static void BuildReportsAdvanced(
@@ -986,8 +1015,10 @@ static class WarEngineV2Core
         sb.AppendLine($"• استراتژی مهاجم: {aStratName} / {aTacName} – مزیت تاکتیکی: {counterAtk:F2}x");
         sb.AppendLine($"• استراتژی مدافع: {dStratName} / {dTacName}");
         sb.AppendLine($"• کیفیت زرهی مهاجم: {aSpec.Name} (نفوذ {aSpec.Pen}، زره {aSpec.Armor}) vs مدافع {dSpec.Name}");
-        if (attTankBreakdown != null && attTankBreakdown.Count > 1) sb.AppendLine($"• تنوع زرهی مهاجم ({attTankBreakdown.Count} مدل) باعث انعطاف‌پذیری +{(attTankBreakdown.Count - 1) * 2.5:F1}% شد.");
-        if (defTankBreakdown != null && defTankBreakdown.Count > 1) sb.AppendLine($"• مدافع با {defTankBreakdown.Count} مدل مختلف دفاع را لایه‌بندی کرده بود.");
+        if (attTankBreakdown != null && attTankBreakdown.Count > 1)
+            sb.AppendLine($"• مهاجم {attTankBreakdown.Count} مدل زرهی داشت؛ سرعت، نفوذ و زره هر گروه جداگانه محاسبه شد.");
+        if (defTankBreakdown != null && defTankBreakdown.Count > 1)
+            sb.AppendLine($"• مدافع با {defTankBreakdown.Count} مدل مختلف دفاع کرد؛ مشخصات هر مدل مستقل بود.");
 
         string airLine = BuildAirNarrative(air, aFight, aBomb, dFight, dAA, aAirStrat, aAirTac, aFs, aBs, dFs);
         if (airLine != null) sb.AppendLine($"• هوا: {airLine}");
@@ -1494,7 +1525,7 @@ static class WarEngineV2Core
     static void InitGroup(ref Group gr, bool atk, byte type, float units, int strat, int tac, ref XorRng rng)
     {
         gr = default;
-        gr.Type = type; gr.Units = units; gr.Size0 = units; gr.Alive = true;
+        gr.Type = type; gr.ModelIndex = -1; gr.Units = units; gr.Size0 = units; gr.Alive = true;
         gr.Morale = rng.Range(0.85f, 1f);
         gr.CAmmo = units; gr.MAmmo = units;
         gr.Fatigue = 0f; gr.Exp = rng.Range(0f, 0.1f);
@@ -1719,7 +1750,9 @@ static class WarEngineV2Core
     // ═════════════ آتش: زره/مسلسل/HE + پشتیبانی هوایی + محیط + تجربه ════════
     static float FireSide(Group[] own, int nOwn, TankSpec ospec, Group[] foe, int nFoe, TankSpec fspec,
         Intel[] ownIntel, Intel[] foeIntel, bool atk, int strat, int tac, int foeStrat, bool encircled,
-        float combatMul, float accEnv, ref XorRng rng, ref int evtN, int tick, ref bool contact, ref bool ambushFired)
+        float combatMul, float accEnv, ref XorRng rng, ref int evtN, int tick, ref bool contact, ref bool ambushFired,
+        List<(string Model, long Count)>? ownTankBreakdown = null,
+        List<(string Model, long Count)>? foeTankBreakdown = null)
     {
         float duel = 0f;
         for (int i = 0; i < nOwn; i++)
@@ -1752,6 +1785,8 @@ static class WarEngineV2Core
                 if (!ambushFired) { ambushFired = true; AddEvt(ref evtN, tick, E_AMBUSH, u.X, u.Y); }
             }
             ref Group t = ref foe[best];
+            TankSpec activeOwnSpec = TankSpecFor(u, ownTankBreakdown, ospec);
+            TankSpec activeFoeSpec = TankSpecFor(t, foeTankBreakdown, fspec);
             float intelQ = ownIntel[best].Level;
             byte tt = TerrAt(t.X, t.Y);
             float acc = 0.62f * (0.45f + 0.55f * intelQ) * TerAcc[TerrAt(u.X, u.Y)] * accEnv * (1f - u.Supp * 0.5f);
@@ -1771,8 +1806,8 @@ static class WarEngineV2Core
                 {
                     if (u.CAmmo > 0.05f)
                     {
-                        float effArmor = fspec.Armor * (t.Posture is P_DEFEND or P_AMBUSH ? 1.3f : 1f);
-                        float pen = 1f / (1f + MathF.Exp(-(ospec.Pen * rangeMul - effArmor) / 9f));
+                        float effArmor = activeFoeSpec.Armor * (t.Posture is P_DEFEND or P_AMBUSH ? 1.3f : 1f);
+                        float pen = 1f / (1f + MathF.Exp(-(activeOwnSpec.Pen * rangeMul - effArmor) / 9f));
                         float shots = u.Units * 1.6f * k;
                         float kills = shots * 0.32f * pen * (0.9f + rng.NextF() * 0.25f);
                         ApplyDamage(ref t, kills, foeIntel, best);
@@ -1786,11 +1821,11 @@ static class WarEngineV2Core
                 {
                     if (u.MAmmo > 0.05f)
                     {
-                        float mgKill = u.Units * ospec.Mg * 1.05f * k * (1f - cover * 0.85f);
+                        float mgKill = u.Units * activeOwnSpec.Mg * 1.05f * k * (1f - cover * 0.85f);
                         float heKill = 0f;
                         if (u.CAmmo > 0.05f)
                         {
-                            heKill = u.Units * ospec.He * 4.5f * k * (1f - cover * 0.55f);
+                            heKill = u.Units * activeOwnSpec.He * 4.5f * k * (1f - cover * 0.55f);
                             u.CAmmo = Math.Max(0f, u.CAmmo - u.Units * 0.04f);
                             u.Signature = Math.Min(1f, u.Signature + 0.5f);
                         }

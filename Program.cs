@@ -254,9 +254,12 @@ enum SessionStep
     DeployJoinWaitingStrategy,
     DeployJoinWaitingTactic,
     DeployJoinWaitingTanks,
+    DeployJoinWaitingTankModel,
     DeployJoinWaitingSoldiers,
     DeployJoinWaitingFighters,
+    DeployJoinWaitingPlaneModel,
     DeployJoinWaitingBombers,
+    DeployJoinWaitingBomberModel,
 }
 
 class UserSession
@@ -315,6 +318,13 @@ class UserSession
     public List<long> DeployModelCounts { get; set; } = new();
     public List<long> DeployModelAmounts { get; set; } = new();
     public int DeployModelIndex { get; set; } = 0;
+    // Exact per-model composition selected for either creating or joining a deployment.
+    public List<string> DeployTankModelNamesFinal { get; set; } = new();
+    public List<long> DeployTankModelAmountsFinal { get; set; } = new();
+    public List<string> DeployPlaneModelNamesFinal { get; set; } = new();
+    public List<long> DeployPlaneModelAmountsFinal { get; set; } = new();
+    public List<string> DeployBomberModelNamesFinal { get; set; } = new();
+    public List<long> DeployBomberModelAmountsFinal { get; set; } = new();
 
     public Faction Faction { get; set; }
     public string FactionStr { get; set; } = "";
@@ -2550,7 +2560,8 @@ static partial class Database
     }
 
     private static void ReserveContributorModels(SqliteConnection con, SqliteTransaction transaction,
-        long deploymentId, long userId, long chatId, string category, long amount)
+        long deploymentId, long userId, long chatId, string category, long amount,
+        IReadOnlyDictionary<string, long>? selectedModels = null)
     {
         if (amount <= 0) return;
         Faction faction;
@@ -2612,14 +2623,34 @@ static partial class Database
             capacities[defaultModel] = capacities.GetValueOrDefault(defaultModel) +
                                        (availableAggregate - explicitAvailable);
 
-        var models = capacities.Where(x => x.Value > 0).OrderBy(x => x.Key, StringComparer.Ordinal).ToList();
-        if (models.Count == 0) models.Add(new KeyValuePair<string, long>(defaultModel, amount));
-        long[] normalized = AllocateExact(Math.Min(availableAggregate, models.Sum(x => x.Value)),
-            models.Select(x => x.Value).ToArray());
-        long[] selected = AllocateExact(amount, normalized);
-        for (int i = 0; i < models.Count; i++)
+        List<KeyValuePair<string, long>> selected;
+        if (selectedModels != null)
         {
-            if (selected[i] <= 0) continue;
+            selected = selectedModels
+                .Where(x => x.Value > 0)
+                .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(x => new KeyValuePair<string, long>(x.Key, x.Sum(y => y.Value)))
+                .ToList();
+            if (selected.Sum(x => x.Value) != amount)
+                throw new InvalidOperationException($"Selected {category} models do not match deployment total.");
+            foreach (var item in selected)
+                if (item.Value > capacities.GetValueOrDefault(item.Key))
+                    throw new InvalidOperationException($"Insufficient {item.Key} available for deployment.");
+        }
+        else
+        {
+            var models = capacities.Where(x => x.Value > 0)
+                .OrderBy(x => x.Key, StringComparer.Ordinal).ToList();
+            if (models.Count == 0) models.Add(new KeyValuePair<string, long>(defaultModel, amount));
+            long[] normalized = AllocateExact(Math.Min(availableAggregate, models.Sum(x => x.Value)),
+                models.Select(x => x.Value).ToArray());
+            long[] allocated = AllocateExact(amount, normalized);
+            selected = models.Select((x, i) => new KeyValuePair<string, long>(x.Key, allocated[i]))
+                .Where(x => x.Value > 0).ToList();
+        }
+
+        foreach (var item in selected)
+        {
             using var insert = con.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = @"INSERT INTO DeploymentContributorModels
@@ -2628,8 +2659,8 @@ static partial class Database
             insert.Parameters.AddWithValue("@deployment", deploymentId);
             insert.Parameters.AddWithValue("@user", userId);
             insert.Parameters.AddWithValue("@category", category);
-            insert.Parameters.AddWithValue("@model", models[i].Key);
-            insert.Parameters.AddWithValue("@count", selected[i]);
+            insert.Parameters.AddWithValue("@model", item.Key);
+            insert.Parameters.AddWithValue("@count", item.Value);
             insert.ExecuteNonQuery();
         }
     }
@@ -2703,7 +2734,10 @@ static partial class Database
         }
     }
 
-    public static long TryCreateDeploymentWithForces(Deployment deployment)
+    public static long TryCreateDeploymentWithForces(Deployment deployment,
+        IReadOnlyDictionary<string, long>? tankModels = null,
+        IReadOnlyDictionary<string, long>? fighterModels = null,
+        IReadOnlyDictionary<string, long>? bomberModels = null)
     {
         using var con = OpenCon();
         using var transaction = con.BeginTransaction();
@@ -2779,11 +2813,11 @@ static partial class Database
             contributor.ExecuteNonQuery();
         }
         ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
-            deployment.ChatId, "Tanks", deployment.Tanks);
+            deployment.ChatId, "Tanks", deployment.Tanks, tankModels);
         ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
-            deployment.ChatId, "Planes", deployment.Fighters);
+            deployment.ChatId, "Planes", deployment.Fighters, fighterModels);
         ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
-            deployment.ChatId, "Bombers", deployment.Bombers);
+            deployment.ChatId, "Bombers", deployment.Bombers, bomberModels);
 
         transaction.Commit();
         return deploymentId;
@@ -2793,7 +2827,10 @@ static partial class Database
         long deploymentId,
         DeploymentContributor contributor,
         long chatId,
-        long nowMs)
+        long nowMs,
+        IReadOnlyDictionary<string, long>? tankModels = null,
+        IReadOnlyDictionary<string, long>? fighterModels = null,
+        IReadOnlyDictionary<string, long>? bomberModels = null)
     {
         using var con = OpenCon();
         using var transaction = con.BeginTransaction();
@@ -2862,11 +2899,11 @@ static partial class Database
             insert.ExecuteNonQuery();
         }
         ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
-            chatId, "Tanks", contributor.Tanks);
+            chatId, "Tanks", contributor.Tanks, tankModels);
         ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
-            chatId, "Planes", contributor.Fighters);
+            chatId, "Planes", contributor.Fighters, fighterModels);
         ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
-            chatId, "Bombers", contributor.Bombers);
+            chatId, "Bombers", contributor.Bombers, bomberModels);
 
         transaction.Commit();
         return true;
@@ -4216,7 +4253,24 @@ partial class Program
         }
     }
 
-    static async Task<long> TryCreateDeploymentSafely(Deployment deployment, CancellationToken ct)
+    static IReadOnlyDictionary<string, long> SelectedDeploymentModels(
+        IReadOnlyList<string> names, IReadOnlyList<long> amounts,
+        long total, string defaultModel)
+    {
+        var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < names.Count && i < amounts.Count; i++)
+            if (amounts[i] > 0)
+                result[names[i]] = result.GetValueOrDefault(names[i]) + amounts[i];
+        if (result.Count == 0 && total > 0) result[defaultModel] = total;
+        if (result.Values.Sum() != total)
+            throw new InvalidOperationException("Selected deployment model totals are inconsistent.");
+        return result;
+    }
+
+    static async Task<long> TryCreateDeploymentSafely(Deployment deployment, CancellationToken ct,
+        IReadOnlyDictionary<string, long>? tankModels = null,
+        IReadOnlyDictionary<string, long>? fighterModels = null,
+        IReadOnlyDictionary<string, long>? bomberModels = null)
     {
         await deploymentProcessorLock.WaitAsync(ct);
         List<SemaphoreSlim>? locks = null;
@@ -4226,7 +4280,16 @@ partial class Program
                 deployment.ChatId,
                 new[] { deployment.InitiatorId },
                 ct);
-            return Database.TryCreateDeploymentWithForces(deployment);
+            try
+            {
+                return Database.TryCreateDeploymentWithForces(deployment,
+                    tankModels, fighterModels, bomberModels);
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.WriteLine($"[DEPLOYMENT MODEL RESERVATION] {ex.Message}");
+                return 0;
+            }
         }
         finally
         {
@@ -4238,7 +4301,10 @@ partial class Program
     static async Task<bool> TryJoinDeploymentSafely(
         Deployment deployment,
         DeploymentContributor contributor,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyDictionary<string, long>? tankModels = null,
+        IReadOnlyDictionary<string, long>? fighterModels = null,
+        IReadOnlyDictionary<string, long>? bomberModels = null)
     {
         await deploymentProcessorLock.WaitAsync(ct);
         List<SemaphoreSlim>? locks = null;
@@ -4248,11 +4314,20 @@ partial class Program
                 deployment.ChatId,
                 new[] { contributor.UserId },
                 ct);
-            return Database.TryJoinDeploymentWithForces(
-                deployment.Id,
-                contributor,
-                deployment.ChatId,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            try
+            {
+                return Database.TryJoinDeploymentWithForces(
+                    deployment.Id,
+                    contributor,
+                    deployment.ChatId,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    tankModels, fighterModels, bomberModels);
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.WriteLine($"[DEPLOYMENT JOIN MODEL RESERVATION] {ex.Message}");
+                return false;
+            }
         }
         finally
         {
@@ -4648,10 +4723,16 @@ partial class Program
              atkSess.Step == SessionStep.DeployWaitingSoldiers ||
              atkSess.Step == SessionStep.DeployWaitingFighters ||
              atkSess.Step == SessionStep.DeployWaitingBombers ||
+             atkSess.Step == SessionStep.DeployWaitingTankModel ||
+             atkSess.Step == SessionStep.DeployWaitingPlaneModel ||
+             atkSess.Step == SessionStep.DeployWaitingBomberModel ||
              atkSess.Step == SessionStep.DeployJoinWaitingTanks ||
+             atkSess.Step == SessionStep.DeployJoinWaitingTankModel ||
              atkSess.Step == SessionStep.DeployJoinWaitingSoldiers ||
              atkSess.Step == SessionStep.DeployJoinWaitingFighters ||
+             atkSess.Step == SessionStep.DeployJoinWaitingPlaneModel ||
              atkSess.Step == SessionStep.DeployJoinWaitingBombers ||
+             atkSess.Step == SessionStep.DeployJoinWaitingBomberModel ||
              atkSess.Step == SessionStep.AttackWaitingTarget ||
              atkSess.Step == SessionStep.AttackWaitingStrategy ||
              atkSess.Step == SessionStep.AttackWaitingTactic ||
@@ -4659,6 +4740,9 @@ partial class Program
              atkSess.Step == SessionStep.AttackWaitingSoldiers ||
              atkSess.Step == SessionStep.AttackWaitingFighters ||
              atkSess.Step == SessionStep.AttackWaitingBombers ||
+             atkSess.Step == SessionStep.AttackWaitingTankModel ||
+             atkSess.Step == SessionStep.AttackWaitingPlaneModel ||
+             atkSess.Step == SessionStep.AttackWaitingBomberModel ||
              atkSess.Step == SessionStep.AttackWaitingAirStrategy ||
              atkSess.Step == SessionStep.AttackWaitingAirTactic)))
         {
@@ -6279,6 +6363,8 @@ partial class Program
                     return;
                 }
                 sess.DeployTanks = sess.DeployModelAmounts.Sum();
+                sess.DeployTankModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployTankModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
                 sess.Step = SessionStep.DeployWaitingSoldiers;
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 await SendPrompt(uid, uid, $"🪖 سرباز:\nموجود: {c?.Soldiers ?? 0:N0}", ct: ct);
@@ -6323,6 +6409,8 @@ partial class Program
                     return;
                 }
                 sess.DeployFighters = sess.DeployModelAmounts.Sum();
+                sess.DeployPlaneModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployPlaneModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
                 sess.Step = SessionStep.DeployWaitingBombers;
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 await SendPrompt(uid, uid, $"🛩 بمب‌افکن:\nموجود: {c?.Bombers ?? 0:N0}", ct: ct);
@@ -6372,6 +6460,11 @@ partial class Program
                 if (!TryParseLong(txt, out long bom) || bom < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 if (bom > c.Bombers) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Bombers}", ct: ct); return; }
                 sess.DeployBombers = bom;
+                if (bom > 0 && bomberBreakdown.Count == 1)
+                {
+                    sess.DeployBomberModelNamesFinal = new List<string> { bomberBreakdown[0].ModelName };
+                    sess.DeployBomberModelAmountsFinal = new List<long> { bom };
+                }
                 if (!HasAvailableForces(c, sess.DeployTanks, sess.DeploySoldiers, sess.DeployFighters, sess.DeployBombers))
                 {
                     EndSession(uid);
@@ -6391,7 +6484,14 @@ partial class Program
                     Tanks = sess.DeployTanks, Soldiers = sess.DeploySoldiers, Fighters = sess.DeployFighters, Bombers = sess.DeployBombers,
                     CreatedAtMs = nowMs, EndAtMs = endMs, LastWarnMs = nowMs
                 };
-                long depId = await TryCreateDeploymentSafely(dep, ct);
+                var selectedTankModels = SelectedDeploymentModels(sess.DeployTankModelNamesFinal,
+                    sess.DeployTankModelAmountsFinal, sess.DeployTanks, Database.GetDefaultTankModel(c.Faction));
+                var selectedFighterModels = SelectedDeploymentModels(sess.DeployPlaneModelNamesFinal,
+                    sess.DeployPlaneModelAmountsFinal, sess.DeployFighters, Database.GetDefaultPlaneModel(c.Faction));
+                var selectedBomberModels = SelectedDeploymentModels(sess.DeployBomberModelNamesFinal,
+                    sess.DeployBomberModelAmountsFinal, sess.DeployBombers, Database.GetDefaultBomberModel(c.Faction));
+                long depId = await TryCreateDeploymentSafely(dep, ct,
+                    selectedTankModels, selectedFighterModels, selectedBomberModels);
                 if (depId == 0)
                 {
                     EndSession(uid);
@@ -6453,6 +6553,8 @@ partial class Program
                     return;
                 }
                 sess.DeployBombers = sess.DeployModelAmounts.Sum();
+                sess.DeployBomberModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployBomberModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
                 long nowMs2 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 long endMs2 = nowMs2 + sess.DeployDuration * 3600000L;
                 var dep2 = new Deployment
@@ -6473,7 +6575,14 @@ partial class Program
                         ct: ct);
                     return;
                 }
-                long depId2 = await TryCreateDeploymentSafely(dep2, ct);
+                var selectedTankModels2 = SelectedDeploymentModels(sess.DeployTankModelNamesFinal,
+                    sess.DeployTankModelAmountsFinal, sess.DeployTanks, Database.GetDefaultTankModel(c2!.Faction));
+                var selectedFighterModels2 = SelectedDeploymentModels(sess.DeployPlaneModelNamesFinal,
+                    sess.DeployPlaneModelAmountsFinal, sess.DeployFighters, Database.GetDefaultPlaneModel(c2.Faction));
+                var selectedBomberModels2 = SelectedDeploymentModels(sess.DeployBomberModelNamesFinal,
+                    sess.DeployBomberModelAmountsFinal, sess.DeployBombers, Database.GetDefaultBomberModel(c2.Faction));
+                long depId2 = await TryCreateDeploymentSafely(dep2, ct,
+                    selectedTankModels2, selectedFighterModels2, selectedBomberModels2);
                 if (depId2 == 0)
                 {
                     EndSession(uid);
@@ -6512,13 +6621,48 @@ partial class Program
             // DeployJoin steps
             if (sess.Step == SessionStep.DeployJoinWaitingTanks)
             {
-                if (!TryParseLong(txt, out long tnk) || tnk < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 if (c == null) { EndSession(uid); return; }
-                if (tnk > c.Tanks) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Tanks}", ct: ct); return; }
-                sess.DeployJoinTanks = tnk;
+                var breakdown = GetTransferBreakdown(c, "tanks");
+                if (breakdown.Count == 0)
+                {
+                    sess.DeployJoinTanks = 0;
+                    sess.Step = SessionStep.DeployJoinWaitingSoldiers;
+                    await SendPrompt(uid, uid, $"🪖 سرباز:\nموجود: {c.Soldiers:N0}", ct: ct);
+                    return;
+                }
+                sess.DeployModelNames = breakdown.Select(x => x.ModelName).ToList();
+                sess.DeployModelCounts = breakdown.Select(x => x.Count).ToList();
+                sess.DeployModelAmounts = new List<long>(new long[breakdown.Count]);
+                sess.DeployModelIndex = 0;
+                sess.Step = SessionStep.DeployJoinWaitingTankModel;
+                await SendPrompt(uid, uid,
+                    $"🛡 مشارکت – تانک مدل 1/{breakdown.Count}: {breakdown[0].ModelName} – موجودی {breakdown[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+                return;
+            }
+            if (sess.Step == SessionStep.DeployJoinWaitingTankModel)
+            {
+                if (!TryParseLong(txt, out long amount) || amount < 0)
+                { await SendPrompt(uid, uid, "❌ عدد معتبر (0 برای رد).", ct: ct); return; }
+                int index = sess.DeployModelIndex;
+                if (index < 0 || index >= sess.DeployModelCounts.Count) { EndSession(uid); return; }
+                if (amount > sess.DeployModelCounts[index])
+                { await SendPrompt(uid, uid, $"❌ موجودی این مدل: {sess.DeployModelCounts[index]:N0}", ct: ct); return; }
+                sess.DeployModelAmounts[index] = amount;
+                sess.DeployModelIndex++;
+                if (sess.DeployModelIndex < sess.DeployModelNames.Count)
+                {
+                    int next = sess.DeployModelIndex;
+                    await SendPrompt(uid, uid,
+                        $"🛡 مشارکت – تانک مدل {next + 1}/{sess.DeployModelNames.Count}: {sess.DeployModelNames[next]} – موجودی {sess.DeployModelCounts[next]:N0}\nچند تا؟ (0 برای رد)", ct: ct);
+                    return;
+                }
+                sess.DeployJoinTanks = sess.DeployModelAmounts.Sum();
+                sess.DeployTankModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployTankModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
                 sess.Step = SessionStep.DeployJoinWaitingSoldiers;
-                await SendPrompt(uid, uid, $"🪖 سرباز:\nموجود: {c.Soldiers:N0}", ct: ct);
+                var c = Database.GetCountry(uid, sess.DeployChatId);
+                await SendPrompt(uid, uid, $"🪖 سرباز:\nموجود: {c?.Soldiers ?? 0:N0}", ct: ct);
                 return;
             }
             if (sess.Step == SessionStep.DeployJoinWaitingSoldiers)
@@ -6528,24 +6672,127 @@ partial class Program
                 if (c == null) { EndSession(uid); return; }
                 if (sol > c.Soldiers) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Soldiers}", ct: ct); return; }
                 sess.DeployJoinSoldiers = sol;
-                sess.Step = SessionStep.DeployJoinWaitingFighters;
-                await SendPrompt(uid, uid, $"✈️ جنگنده:\nموجود: {c.Planes:N0}", ct: ct);
+                var planes = GetTransferBreakdown(c, "planes");
+                if (planes.Count == 0)
+                {
+                    sess.DeployJoinFighters = 0;
+                    var bombers = GetTransferBreakdown(c, "bombers");
+                    if (bombers.Count == 0)
+                    {
+                        sess.DeployJoinBombers = 0;
+                        sess.Step = SessionStep.DeployJoinWaitingBombers;
+                        await SendPrompt(uid, uid, "🛩 بمب‌افکن ندارید؛ برای ثبت نهایی عدد 0 را ارسال کنید.", ct: ct);
+                        return;
+                    }
+                    sess.DeployModelNames = bombers.Select(x => x.ModelName).ToList();
+                    sess.DeployModelCounts = bombers.Select(x => x.Count).ToList();
+                    sess.DeployModelAmounts = new List<long>(new long[bombers.Count]);
+                    sess.DeployModelIndex = 0;
+                    sess.Step = SessionStep.DeployJoinWaitingBomberModel;
+                    await SendPrompt(uid, uid,
+                        $"🛩 مشارکت – بمب‌افکن مدل 1/{bombers.Count}: {bombers[0].ModelName} – موجودی {bombers[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+                    return;
+                }
+                sess.DeployModelNames = planes.Select(x => x.ModelName).ToList();
+                sess.DeployModelCounts = planes.Select(x => x.Count).ToList();
+                sess.DeployModelAmounts = new List<long>(new long[planes.Count]);
+                sess.DeployModelIndex = 0;
+                sess.Step = SessionStep.DeployJoinWaitingPlaneModel;
+                await SendPrompt(uid, uid,
+                    $"✈️ مشارکت – جنگنده مدل 1/{planes.Count}: {planes[0].ModelName} – موجودی {planes[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
                 return;
             }
             if (sess.Step == SessionStep.DeployJoinWaitingFighters)
             {
-                if (!TryParseLong(txt, out long fig) || fig < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 if (c == null) { EndSession(uid); return; }
-                if (fig > c.Planes) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Planes}", ct: ct); return; }
-                sess.DeployJoinFighters = fig;
+                var breakdown = GetTransferBreakdown(c, "planes");
+                if (breakdown.Count == 0)
+                {
+                    sess.DeployJoinFighters = 0;
+                    sess.Step = SessionStep.DeployJoinWaitingBombers;
+                    await SendPrompt(uid, uid, "🛩 برای انتخاب مدل‌های بمب‌افکن یک عدد ارسال کنید.", ct: ct);
+                    return;
+                }
+                sess.DeployModelNames = breakdown.Select(x => x.ModelName).ToList();
+                sess.DeployModelCounts = breakdown.Select(x => x.Count).ToList();
+                sess.DeployModelAmounts = new List<long>(new long[breakdown.Count]);
+                sess.DeployModelIndex = 0;
+                sess.Step = SessionStep.DeployJoinWaitingPlaneModel;
+                await SendPrompt(uid, uid,
+                    $"✈️ مشارکت – جنگنده مدل 1/{breakdown.Count}: {breakdown[0].ModelName} – موجودی {breakdown[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+                return;
+            }
+            if (sess.Step == SessionStep.DeployJoinWaitingPlaneModel)
+            {
+                if (!TryParseLong(txt, out long amount) || amount < 0)
+                { await SendPrompt(uid, uid, "❌ عدد معتبر (0 برای رد).", ct: ct); return; }
+                int index = sess.DeployModelIndex;
+                if (index < 0 || index >= sess.DeployModelCounts.Count) { EndSession(uid); return; }
+                if (amount > sess.DeployModelCounts[index])
+                { await SendPrompt(uid, uid, $"❌ موجودی این مدل: {sess.DeployModelCounts[index]:N0}", ct: ct); return; }
+                sess.DeployModelAmounts[index] = amount;
+                sess.DeployModelIndex++;
+                if (sess.DeployModelIndex < sess.DeployModelNames.Count)
+                {
+                    int next = sess.DeployModelIndex;
+                    await SendPrompt(uid, uid,
+                        $"✈️ مشارکت – جنگنده مدل {next + 1}/{sess.DeployModelNames.Count}: {sess.DeployModelNames[next]} – موجودی {sess.DeployModelCounts[next]:N0}\nچند تا؟ (0 برای رد)", ct: ct);
+                    return;
+                }
+                sess.DeployJoinFighters = sess.DeployModelAmounts.Sum();
+                sess.DeployPlaneModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployPlaneModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
+                var c = Database.GetCountry(uid, sess.DeployChatId);
+                if (c == null) { EndSession(uid); return; }
+                var bombers = GetTransferBreakdown(c, "bombers");
+                if (bombers.Count == 0)
+                {
+                    sess.DeployJoinBombers = 0;
+                    sess.Step = SessionStep.DeployJoinWaitingBombers;
+                    await SendPrompt(uid, uid, "🛩 بمب‌افکن ندارید؛ برای ثبت نهایی عدد 0 را ارسال کنید.", ct: ct);
+                    return;
+                }
+                sess.DeployModelNames = bombers.Select(x => x.ModelName).ToList();
+                sess.DeployModelCounts = bombers.Select(x => x.Count).ToList();
+                sess.DeployModelAmounts = new List<long>(new long[bombers.Count]);
+                sess.DeployModelIndex = 0;
+                sess.Step = SessionStep.DeployJoinWaitingBomberModel;
+                await SendPrompt(uid, uid,
+                    $"🛩 مشارکت – بمب‌افکن مدل 1/{bombers.Count}: {bombers[0].ModelName} – موجودی {bombers[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+                return;
+            }
+            if (sess.Step == SessionStep.DeployJoinWaitingBomberModel)
+            {
+                if (!TryParseLong(txt, out long amount) || amount < 0)
+                { await SendPrompt(uid, uid, "❌ عدد معتبر (0 برای رد).", ct: ct); return; }
+                int index = sess.DeployModelIndex;
+                if (index < 0 || index >= sess.DeployModelCounts.Count) { EndSession(uid); return; }
+                if (amount > sess.DeployModelCounts[index])
+                { await SendPrompt(uid, uid, $"❌ موجودی این مدل: {sess.DeployModelCounts[index]:N0}", ct: ct); return; }
+                sess.DeployModelAmounts[index] = amount;
+                sess.DeployModelIndex++;
+                if (sess.DeployModelIndex < sess.DeployModelNames.Count)
+                {
+                    int next = sess.DeployModelIndex;
+                    await SendPrompt(uid, uid,
+                        $"🛩 مشارکت – بمب‌افکن مدل {next + 1}/{sess.DeployModelNames.Count}: {sess.DeployModelNames[next]} – موجودی {sess.DeployModelCounts[next]:N0}\nچند تا؟ (0 برای رد)", ct: ct);
+                    return;
+                }
+                sess.DeployJoinBombers = sess.DeployModelAmounts.Sum();
+                sess.DeployBomberModelNamesFinal = new List<string>(sess.DeployModelNames);
+                sess.DeployBomberModelAmountsFinal = new List<long>(sess.DeployModelAmounts);
                 sess.Step = SessionStep.DeployJoinWaitingBombers;
-                await SendPrompt(uid, uid, $"🛩 بمب‌افکن:\nموجود: {c.Bombers:N0}", ct: ct);
+                await SendPrompt(uid, uid, "✅ ترکیب نیرو کامل شد؛ برای ثبت نهایی عدد 0 را ارسال کنید.", ct: ct);
                 return;
             }
             if (sess.Step == SessionStep.DeployJoinWaitingBombers)
             {
-                if (!TryParseLong(txt, out long bom) || bom < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
+                long bom;
+                if (sess.DeployBomberModelAmountsFinal.Count > 0)
+                    bom = sess.DeployBomberModelAmountsFinal.Sum();
+                else if (!TryParseLong(txt, out bom) || bom < 0)
+                { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 if (c == null) { EndSession(uid); return; }
                 if (bom > c.Bombers) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Bombers}", ct: ct); return; }
@@ -6562,7 +6809,14 @@ partial class Program
                     return;
                 }
                 var contrib = new DeploymentContributor { DeploymentId = dep.Id, UserId = uid, Tanks = sess.DeployJoinTanks, Soldiers = sess.DeployJoinSoldiers, Fighters = sess.DeployJoinFighters, Bombers = sess.DeployJoinBombers, Strategy = sess.DeployJoinStrategy, Tactic = sess.DeployJoinTactic };
-                bool joined = await TryJoinDeploymentSafely(dep, contrib, ct);
+                var selectedTankModels = SelectedDeploymentModels(sess.DeployTankModelNamesFinal,
+                    sess.DeployTankModelAmountsFinal, sess.DeployJoinTanks, Database.GetDefaultTankModel(c.Faction));
+                var selectedFighterModels = SelectedDeploymentModels(sess.DeployPlaneModelNamesFinal,
+                    sess.DeployPlaneModelAmountsFinal, sess.DeployJoinFighters, Database.GetDefaultPlaneModel(c.Faction));
+                var selectedBomberModels = SelectedDeploymentModels(sess.DeployBomberModelNamesFinal,
+                    sess.DeployBomberModelAmountsFinal, sess.DeployJoinBombers, Database.GetDefaultBomberModel(c.Faction));
+                bool joined = await TryJoinDeploymentSafely(dep, contrib, ct,
+                    selectedTankModels, selectedFighterModels, selectedBomberModels);
                 if (!joined)
                 {
                     EndSession(uid);
@@ -8180,6 +8434,27 @@ partial class Program
         }
     }
 
+    static async Task BeginDeploymentJoinTankSelection(long uid, UserSession sess, CancellationToken ct)
+    {
+        var country = Database.GetCountry(uid, sess.DeployChatId);
+        if (country == null) { EndSession(uid); return; }
+        var breakdown = GetTransferBreakdown(country, "tanks");
+        if (breakdown.Count == 0)
+        {
+            sess.DeployJoinTanks = 0;
+            sess.Step = SessionStep.DeployJoinWaitingSoldiers;
+            await SendPrompt(uid, uid, $"🪖 سرباز:\nموجود: {country.Soldiers:N0}", ct: ct);
+            return;
+        }
+        sess.DeployModelNames = breakdown.Select(x => x.ModelName).ToList();
+        sess.DeployModelCounts = breakdown.Select(x => x.Count).ToList();
+        sess.DeployModelAmounts = new List<long>(new long[breakdown.Count]);
+        sess.DeployModelIndex = 0;
+        sess.Step = SessionStep.DeployJoinWaitingTankModel;
+        await SendPrompt(uid, uid,
+            $"🛡 مشارکت – تانک مدل 1/{breakdown.Count}: {breakdown[0].ModelName} – موجودی {breakdown[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+    }
+
     static async Task HandleDeploymentCallback(CallbackQuery cb, CancellationToken ct)
     {
         if (cb.Data == null || cb.From == null) return;
@@ -8297,9 +8572,7 @@ partial class Program
             }
             else
             {
-                sessions[uid].Step = SessionStep.DeployJoinWaitingTanks;
-                var c = Database.GetCountry(uid, dep.ChatId);
-                try { await bot.SendTextMessageAsync(uid, $"🤝 مشارکت یکپارچه\n🛡 تانک:\nموجود: {c?.Tanks ?? 0}", cancellationToken: ct); }
+                try { await BeginDeploymentJoinTankSelection(uid, sessions[uid], ct); }
                 catch { await bot.AnswerCallbackQueryAsync(cb.Id, "⚠️ ابتدا ربات را در پیوی استارت کنید.", showAlert: true, cancellationToken: ct); }
             }
             return;
@@ -8322,10 +8595,9 @@ partial class Program
             if (parts.Length < 3 || !TryParseLong(parts[1], out long depId) || !TryParseInt(parts[2], out int tac)) return;
             if (!sessions.TryGetValue(uid, out var sess) || sess == null) return;
             sess.DeployJoinTactic = tac;
-            sess.Step = SessionStep.DeployJoinWaitingTanks;
             await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
-            var c = Database.GetCountry(uid, sess.DeployChatId);
-            if (cb.Message != null) await bot.EditMessageTextAsync(uid, cb.Message.MessageId, $"🛡 تانک:\nموجود: {c?.Tanks ?? 0}", cancellationToken: ct);
+            if (cb.Message != null) DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
+            await BeginDeploymentJoinTankSelection(uid, sess, ct);
             return;
         }
 
