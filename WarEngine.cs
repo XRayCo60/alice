@@ -29,6 +29,9 @@ sealed class BattleParticipant
     public List<ModelAmount> Bombers { get; init; } = new();
     public long AntiAir { get; init; }
     public bool IsHomelandDefender { get; init; }
+    // دارایی قابل غارت مدافع (برای محاسبه غنیمت). صفر = بدون غنیمت.
+    public long Money { get; init; }
+    public long Iron { get; init; }
 }
 
 sealed class BattleOrders
@@ -43,7 +46,7 @@ sealed class BattleRequest
 {
     public long BattleId { get; init; }
     public long ChatId { get; init; }
-    public ulong ScenarioSeed { get; init; }
+    public ulong ScenarioSeed { get; set; }
     public List<BattleParticipant> Attackers { get; init; } = new();
     public List<BattleParticipant> Defenders { get; init; } = new();
     public BattleOrders AttackerOrders { get; init; } = new();
@@ -126,13 +129,25 @@ static class WarEngine
     const float DEPTH_KM = 34f;
     const float WIN_DEPTH = 30f;
     const float FAIL_DEPTH = 3f;
-    const int GRID_W = 80, GRID_H = 68;
+    // شبکه: عرض ۴۰km × دامنه عمق از y=-6 تا y=+34 (روی هم ۴۰km) با سلول ۰٫۵km → ۸۰×۸۰.
+    // قبلاً GRID_H=68 بود و زمین فقط تا عمق ۲۷٫۵km تولید می‌شد؛ بقیه ناحیه به آخرین ردیف گیر می‌کرد.
+    const int GRID_W = 80, GRID_H = 80;
     const float CELL = 0.5f;
     const float TICK_MIN = 6f;
     const int AI_PERIOD = 4;
     const int MAX_GROUPS = 224;
     const int INF_GROUP = 100;
     const int TANK_GROUP = 10;
+
+    // آستانه‌های شکست و پاداش — برای تراز بازی این‌ها را تنظیم کنید
+    const float ATTACKER_BREAK_POWER_FRACTION = 0.13f;    // مهاجم با افت توان زیر این حد از حمله می‌شکند
+    const float DEFENDER_ROUT_POWER_FRACTION = 0.25f;     // مدافع با افت توان زیر این حد + نفوذ بیش از ۶km می‌گسلد
+    const float DEFENDER_COLLAPSE_POWER_FRACTION = 0.10f; // سقوط کامل مدافع (بدون قید عمق)
+    const float PUSH_BOOST_DEPTH = 20f;                   // عمقی که پس از آن، موفقیت با ضریب صعودی محاسبه می‌شود
+    const float HOMELAND_COMBAT_BONUS = 0.08f;            // پاداش دفاع از وطن (کشورهای ۲ شهر یا کمتر)
+    const float LOOT_MONEY_FRACTION = 0.35f;              // سهم پول مدافع در پیروزی کامل مهاجم
+    const float LOOT_IRON_FRACTION = 0.30f;               // سهم آهن مدافع در پیروزی کامل مهاجم
+    const float LOOT_MIN_SUCCESS = 0.15f;                 // کف ضریب غنیمت
 
     const byte T_PLAIN = 0, T_HILL = 1, T_FOREST = 2, T_URBAN = 3, T_MARSH = 4, T_RIDGE = 5;
     static readonly float[] TerSpeed = { 1.00f, 0.72f, 0.55f, 0.60f, 0.40f, 0.65f };
@@ -260,7 +275,7 @@ static class WarEngine
         _elev ??= new float[GRID_W * GRID_H];
         _threatA ??= new float[10];
         _threatD ??= new float[10];
-        _evts ??= new Evt[128];
+        _evts ??= new Evt[512];
         _sb ??= new StringBuilder(4096);
     }
 
@@ -411,6 +426,9 @@ static class WarEngine
             aSpec, dSpec, aTanks, dTanks, aSold, dSold, ref rng);
         AirOutcome air = RunAirPhase(request, aFight, aBomb, dFight, dBomb, dAA,
             aFs, aBs, dFs, dBs, ref rng);
+        // دفاع از وطن: کشورهای در آستانه سقوط (۲ شهر یا کمتر) سخت‌تر می‌جنگند
+        bool homelandDefended = request.Defenders.Any(x => x.IsHomelandDefender);
+        float dHomeMul = homelandDefended ? 1f + HOMELAND_COMBAT_BONUS : 1f;
 
         int nA = BuildSide(_atk!, true, aTanks, aSold, aStrat, aTac, aSpec, ref rng);
         int nD = BuildSide(_def!, false, dTanks, dSold, dStrat, dTac, dSpec, ref rng);
@@ -468,7 +486,7 @@ static class WarEngine
                 aStrat, aTac, dStrat, encircled, air.CasAtk * strategyAdvantage,
                 WxAcc[_weather], ref rng, ref evtN, tick, ref contact, ref ambush);
             float dDuel = FireSide(_def!, nD, dSpec, _atk!, nA, aSpec, _intelD!, false,
-                dStrat, dTac, aStrat, false, air.CasDef,
+                dStrat, dTac, aStrat, false, air.CasDef * dHomeMul,
                 WxAcc[_weather], ref rng, ref evtN, tick, ref contact, ref ambush);
             _ = aDuel + dDuel;
 
@@ -490,8 +508,12 @@ static class WarEngine
             float aPow = SidePower(_atk!, nA, aSpec);
             float dPow = SidePower(_def!, nD, dSpec);
             if (effDepth >= WIN_DEPTH) { tick++; break; }
-            if (aPow < aPow0 * 0.13f) { tick++; break; }
-            if (dPow < dPow0 * 0.10f && effDepth > 6f)
+            if (aPow < aPow0 * ATTACKER_BREAK_POWER_FRACTION) { tick++; break; }
+            // مدافع می‌گسلد اگر: (۱) کاملاً از هم پاشیده باشد، یا (۲) ۷۵٪ توانش را از دست داده
+            // و مهاجم بیش از ۶km نفوذ کرده باشد. قبلاً شرط ۱۰٪+عمق ۶ بود و تقریباً هیچ‌وقت رخ نمی‌داد.
+            bool defenderBroken = dPow < dPow0 * DEFENDER_COLLAPSE_POWER_FRACTION ||
+                (dPow < dPow0 * DEFENDER_ROUT_POWER_FRACTION && effDepth > 6f);
+            if (defenderBroken)
             {
                 effDepth = Math.Min(WIN_DEPTH, effDepth + (WIN_DEPTH - effDepth) * 0.7f);
                 AddEvt(ref evtN, tick, E_ROUT, 1); tick++; break;
@@ -508,7 +530,7 @@ static class WarEngine
         aTankLoss = Math.Min(aTankLoss, aTanks); aSoldLoss = Math.Min(aSoldLoss, aSold);
         dTankLoss = Math.Min(dTankLoss, dTanks); dSoldLoss = Math.Min(dSoldLoss, dSold);
 
-        if (effDepth >= 22f && effDepth < WIN_DEPTH)
+        if (effDepth >= PUSH_BOOST_DEPTH && effDepth < WIN_DEPTH)
             effDepth = Math.Min(WIN_DEPTH, effDepth + (WIN_DEPTH - effDepth) * 0.5f);
         else if (effDepth <= 6f && effDepth > FAIL_DEPTH)
             effDepth = Math.Max(0, effDepth - (effDepth - FAIL_DEPTH) * 0.5f);
@@ -559,6 +581,17 @@ static class WarEngine
         result.AttackerWon = result.OutcomeKind is BattleOutcomeKind.AttackerHeavyVictory or BattleOutcomeKind.AttackerLimitedVictory;
         result.AttackerFailed = result.OutcomeKind is BattleOutcomeKind.AttackerRouted or BattleOutcomeKind.DefenderVictory;
         result.DefenderVictory = result.AttackerFailed;
+        // غنیمت: فقط با پیروزی مهاجم؛ سهمی از پول/آهن مدافع به نسبت موفقیت (این‌ها قبلاً هیچ‌وقت پر نمی‌شدند)
+        long defenderMoney = request.Defenders.Sum(x => Math.Max(0, x.Money));
+        long defenderIron = request.Defenders.Sum(x => Math.Max(0, x.Iron));
+        if (result.AttackerWon)
+        {
+            double gain = Math.Clamp(success / 100.0, LOOT_MIN_SUCCESS, 1.0);
+            result.DefenderMoneyLost = (long)Math.Round(defenderMoney * gain * LOOT_MONEY_FRACTION);
+            result.DefenderIronLost = (long)Math.Round(defenderIron * gain * LOOT_IRON_FRACTION);
+        }
+        result.AttackerMoneyGained = result.DefenderMoneyLost;
+        result.AttackerIronGained = result.DefenderIronLost;
         if (request.AttackerOrders.AirStrategy != 0 && aFight + aBomb > 0)
         {
             string airText = request.AttackerOrders.AirStrategy == 2
@@ -1176,18 +1209,26 @@ static class WarEngine
 
     static float EffectiveDepth(Group[] groups, int n)
     {
+        // عمق مؤثر: عمیق‌ترین گروه زنده که «پشتیبانی» دارد با وزن کامل و بدون پشتیبانی با نصف وزن.
+        // قبلاً گروهِ بدون جفتِ نزدیک (کمتر از ۳٫۵km) اصلاً در عمق حساب نمی‌شد؛ نتیجه این بود که
+        // حتی با نابودی کامل ارتش مدافع، عمق صفر می‌ماند و مهاجم «بازنده» اعلام می‌شد.
+        const float supportDist = 3.5f;
         float best = 0;
         for (int i = 0; i < n; i++)
         {
-            if (!groups[i].Alive || groups[i].Posture == P_RETREAT || groups[i].Y <= best) continue;
-            float power = groups[i].Type == 1 ? groups[i].Units * 10 : groups[i].Units;
+            ref Group g = ref groups[i];
+            if (!g.Alive || g.Posture == P_RETREAT) continue;
+            float power = g.Type == 1 ? g.Units * 10 : g.Units;
             if (power < 25) continue;
+            bool supported = false;
             for (int j = 0; j < n; j++)
             {
                 if (i == j || !groups[j].Alive || groups[j].Posture == P_RETREAT) continue;
                 float dx = groups[i].X - groups[j].X, dy = groups[i].Y - groups[j].Y;
-                if (dx * dx + dy * dy < 12.25f) { best = groups[i].Y; break; }
+                if (dx * dx + dy * dy < supportDist * supportDist) { supported = true; break; }
             }
+            float depth = supported ? g.Y : g.Y * 0.5f;
+            if (depth > best) best = depth;
         }
         return Math.Max(0, best);
     }
@@ -1315,6 +1356,10 @@ static class WarEngine
         sb.AppendLine($"📐 ضریب اجرای تاکتیکی: {strategyAdvantage:F2}x");
         sb.AppendLine($"✈️ {AttackAirDoctrine(request.AttackerOrders)} برابر {DefenseAirDoctrine(request.DefenderOrders)}");
         sb.AppendLine($"🔧 زرهی: {aSpec.Name} برابر {dSpec.Name}");
+        if (request.Defenders.Any(x => x.IsHomelandDefender))
+            sb.AppendLine($"🏠 دفاع از وطن مدافع فعال است (+{(int)(HOMELAND_COMBAT_BONUS * 100)}٪)");
+        if (r.AttackerMoneyGained > 0 || r.AttackerIronGained > 0)
+            sb.AppendLine($"💰 غنیمت: {r.AttackerMoneyGained:N0} پول، {r.AttackerIronGained:N0} آهن");
         for (int i = 0; i < evtN && i < 12; i++)
         {
             string? text = EventText(_evts![i]);
@@ -1336,6 +1381,8 @@ static class WarEngine
         sb.AppendLine(outcome);
         sb.AppendLine($"🌦 {WeatherSummary()} | 🕓 آغاز {TimeName[_startTime]}");
         sb.AppendLine($"🛡 {defenseDoctrine} — {DefenseGroundTactic(request.DefenderOrders)}");
+        if (request.Defenders.Any(x => x.IsHomelandDefender))
+            sb.AppendLine($"🏠 دفاع از وطن: فعال (+{(int)(HOMELAND_COMBAT_BONUS * 100)}٪)");
         sb.AppendLine($"✈️ {DefenseAirDoctrine(request.DefenderOrders)} برابر {AttackAirDoctrine(request.AttackerOrders)}");
         sb.AppendLine($"📍 نفوذ دشمن: {r.EffectiveAdvanceKm:F1}/40km");
         sb.AppendLine($"🔻 تلفات شما: {r.DefenderTanksLost} تانک، {r.DefenderSoldiersLost} سرباز، " +
@@ -1344,6 +1391,8 @@ static class WarEngine
                       $"{r.AttackerFightersLost} جنگنده، {r.AttackerBombersLost} بمب‌افکن");
         if (r.InfrastructureDamage > 0.05)
             sb.AppendLine($"🏭 خسارت زیرساختی: {r.InfrastructureDamage:F1}٪");
+        if (r.DefenderMoneyLost > 0 || r.DefenderIronLost > 0)
+            sb.AppendLine($"💰 غارت‌شده: {r.DefenderMoneyLost:N0} پول، {r.DefenderIronLost:N0} آهن");
         sb.AppendLine($"⏱ مدت: {h} ساعت و {m} دقیقه");
         r.DefenderReport = sb.ToString();
 
@@ -1352,6 +1401,8 @@ static class WarEngine
             $"📍 {r.EffectiveAdvanceKm:F1}km | ⏱ {h}:{m:D2}\n" +
             $"💀 مهاجم: {r.AttackerTanksLost}🛡 {r.AttackerSoldiersLost}🪖 | " +
             $"مدافع: {r.DefenderTanksLost}🛡 {r.DefenderSoldiersLost}🪖";
+        if (r.AttackerMoneyGained > 0 || r.AttackerIronGained > 0)
+            r.GroupAnnouncement += $"\n💰 غنیمت: {r.AttackerMoneyGained:N0} پول، {r.AttackerIronGained:N0} آهن";
         r.ScenarioSummary = $"{WeatherSummary()}، آغاز {TimeName[_startTime]}، شبکه ۵۰۰ متری";
         r.Events.Add(new BattleEvent { Minute = r.DurationMinutes, Code = "END", Text = outcome });
     }
@@ -1455,7 +1506,8 @@ static class WarEngine
         ValidateOrders(request.AttackerOrders);
         ValidateOrders(request.DefenderOrders);
         foreach (var p in request.Attackers.Concat(request.Defenders))
-            if (p.Soldiers < 0 || p.AntiAir < 0 || p.Tanks.Any(x => x.Count < 0) ||
+            if (p.Soldiers < 0 || p.AntiAir < 0 || p.Money < 0 || p.Iron < 0 ||
+                p.Tanks.Any(x => x.Count < 0) ||
                 p.Fighters.Any(x => x.Count < 0) || p.Bombers.Any(x => x.Count < 0))
                 throw new ArgumentException("Negative force count.");
         if (request.Attackers.Sum(x => x.Soldiers + x.Tanks.Sum(t => t.Count)) <= 0)
@@ -1468,6 +1520,196 @@ static class WarEngine
             throw new ArgumentException("Ground strategy and tactic must be 1 or 2.");
         if (orders.AirStrategy is < 0 or > 2 || orders.AirTactic is < 1 or > 2)
             throw new ArgumentException("Air strategy must be 0..2 and tactic 1..2.");
+    }
+
+    // ===================== خودآزمایی موتور نبرد =====================
+    // اجرا: dotnet run -- selftest [تعداد seed]
+    // بدون نیاز به تلگرام اجرا می‌شود: توزیع نتایج، صحت‌سنجی نامتغیرها و تعیین‌پذیری را چک می‌کند.
+    public static void RunSelfTest(int seedsPerCase = 20)
+    {
+        Console.WriteLine("=== WarEngine خودآزمایی ===");
+        Console.WriteLine($"پردازنده‌ها: {Environment.ProcessorCount} | seed در هر سناریو: {seedsPerCase}");
+        Console.WriteLine();
+
+        var scenarios = new (string Name, Func<BattleRequest> Build)[]
+        {
+            ("متوازن ۱:۱", () => Scenario(20000, 2000, 100, 0, 20000, 2000, 100, 200)),
+            ("حمله ۲:۱", () => Scenario(40000, 4000, 200, 0, 20000, 2000, 100, 200)),
+            ("حمله ۳:۱", () => Scenario(60000, 6000, 300, 0, 20000, 2000, 100, 200)),
+            ("حمله ۵:۱", () => Scenario(100000, 10000, 500, 0, 20000, 2000, 100, 200)),
+            ("حمله ضعیف ۱:۳", () => Scenario(10000, 1000, 50, 0, 30000, 3000, 150, 300)),
+            ("زرهی رایش در دفاع", () => Scenario(40000, 4000, 200, 0, 20000, 2000, 100, 200,
+                Faction.Reich, Faction.Reich)),
+            ("برتری هوایی کامل", () => Scenario(40000, 4000, 800, 200, 20000, 2000, 100, 0)),
+            ("بمباران راهبردی", () => Scenario(40000, 4000, 100, 300, 20000, 2000, 100, 300,
+                Faction.USSR, Faction.USSR, false, 2)),
+            ("دفاع از وطن (۲ شهر)", () => Scenario(40000, 4000, 200, 0, 20000, 2000, 100, 200,
+                Faction.USSR, Faction.USSR, true)),
+            ("نیروی تک‌گروهی", () => Scenario(90, 0, 0, 0, 90, 0, 0, 0)),
+            ("بدون مدافع", () => Scenario(5000, 500, 0, 0, 0, 0, 0, 0)),
+        };
+
+        long totalMs = 0;
+        Console.WriteLine($"{"سناریو",-26} {"برد",5} {"سنگین",5} {"بن‌بست",5} {"شکست",5} {"پیشروی",7} " +
+                          $"{"تلفات مهاجم (ت/س)",15} {"تلفات مدافع (ت/س)",15} {"لوت",8} {"مدت",5}");
+        for (int idx = 0; idx < scenarios.Length; idx++)
+        {
+            var (name, build) = scenarios[idx];
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var st = new CaseStats();
+            for (int s = 0; s < seedsPerCase; s++)
+            {
+                ulong seed = 0x9E3779B97F4A7C15UL * (ulong)(idx + 1) + (ulong)(s + 1) + 0x1234567UL;
+                var request = build();
+                request.ScenarioSeed = seed;
+                try
+                {
+                    var r = Resolve(request);
+                    st.Add(r);
+                    if (!VerifyInvariants(request, r)) st.InvariantsBroken++;
+                }
+                catch (Exception ex)
+                {
+                    st.Exceptions++;
+                    Console.WriteLine($"  [EX] {name}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+            sw.Stop();
+            totalMs += sw.ElapsedMilliseconds;
+            Console.WriteLine(st.FormatLine(name));
+        }
+
+        // آزمون تعیین‌پذیری: همان درخواست باید روی نخ‌های مختلف نتیجه یکسان بدهد
+        Console.WriteLine();
+        Console.WriteLine("آزمون تعیین‌پذیری (یک درخواست روی ۸ نخ همزمان):");
+        var baseRequest = Scenario(40000, 4000, 200, 0, 20000, 2000, 100, 200);
+        baseRequest.ScenarioSeed = 0xC0FFEEUL;
+        string baseKey = Summarize(Resolve(baseRequest));
+        var threadResults = new string[8];
+        Parallel.For(0, 8, i => threadResults[i] = Summarize(Resolve(baseRequest)));
+        bool deterministic = threadResults.All(x => x == baseKey);
+        Console.WriteLine(deterministic
+            ? "  ✅ همه نخ‌ها نتیجه یکسان تولید کردند"
+            : "  ❌ نتایج بین نخ‌ها ناهماهنگ است (باگ هم‌رشته‌ای!)");
+        if (!deterministic)
+            foreach (var t in threadResults) Console.WriteLine("  " + t);
+
+        // آزمون صف اجرا
+        Console.WriteLine();
+        Console.WriteLine("آزمون صف اجرا (BattleExecutionScheduler):");
+        try
+        {
+            var queued = Scenario(40000, 4000, 200, 0, 20000, 2000, 100, 200);
+            queued.ScenarioSeed = 0x5EEDUL;
+            var r = BattleExecutionScheduler.EnqueueAsync(queued).GetAwaiter().GetResult();
+            Console.WriteLine($"  ✅ صف کار می‌کند — {r.OutcomeKind} در {r.DurationMinutes} دقیقه");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ❌ صف اجرا خطا داد: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"مجموع زمان شبیه‌سازی: {totalMs}ms");
+        Console.WriteLine("=== پایان خودآزمایی ===");
+    }
+
+    static BattleRequest Scenario(long atkSold, long atkTanks, long atkFight, long atkBomb,
+        long defSold, long defTanks, long defFight, long defAA,
+        Faction atkFaction = Faction.USSR, Faction defFaction = Faction.USSR,
+        bool homeland = false, int atkAirStrategy = 1,
+        long defMoney = 500000, long defIron = 200000)
+    {
+        static List<ModelAmount> Models(long count) => count > 0
+            ? new List<ModelAmount> { new ModelAmount("", count) } : new List<ModelAmount>();
+        return new BattleRequest
+        {
+            BattleId = 1,
+            ChatId = -1001,
+            ScenarioSeed = 0,
+            Attackers = new List<BattleParticipant>
+            {
+                new()
+                {
+                    OwnerId = 10, CountryName = "مهاجم", OwnerName = "مهاجم",
+                    Faction = atkFaction, Soldiers = atkSold,
+                    Tanks = Models(atkTanks), Fighters = Models(atkFight), Bombers = Models(atkBomb)
+                }
+            },
+            Defenders = new List<BattleParticipant>
+            {
+                new()
+                {
+                    OwnerId = 20, CountryName = "مدافع", OwnerName = "مدافع",
+                    Faction = defFaction, Soldiers = defSold,
+                    Tanks = Models(defTanks), Fighters = Models(defFight),
+                    AntiAir = defAA, IsHomelandDefender = homeland,
+                    Money = defMoney, Iron = defIron
+                }
+            },
+            AttackerOrders = new BattleOrders { GroundStrategy = 1, GroundTactic = 1, AirStrategy = atkAirStrategy, AirTactic = 1 },
+            DefenderOrders = new BattleOrders { GroundStrategy = 1, GroundTactic = 1, AirStrategy = 1, AirTactic = 1 }
+        };
+    }
+
+    // نامتغیرهای حسابداری: تلفات تفکیک‌شده باید با تلفات کل و ظرفیت اعزام‌شده یکی باشد
+    static bool VerifyInvariants(BattleRequest request, BattleResult r)
+    {
+        bool ok = true;
+        ok &= r.AttackerTanksDestroyed + r.AttackerTanksDamaged == r.AttackerTanksLost;
+        ok &= r.DefenderTanksDestroyed + r.DefenderTanksDamaged == r.DefenderTanksLost;
+        ok &= r.AttackerSoldiersKilled + r.AttackerSoldiersWounded == r.AttackerSoldiersLost;
+        ok &= r.DefenderSoldiersKilled + r.DefenderSoldiersWounded == r.DefenderSoldiersLost;
+        ok &= r.AttackerParticipantLosses.Values.Sum(x => x.TanksUnavailable.Values.Sum()) == r.AttackerTanksLost;
+        ok &= r.DefenderParticipantLosses.Values.Sum(x => x.TanksUnavailable.Values.Sum()) == r.DefenderTanksLost;
+        ok &= r.AttackerParticipantLosses.Values.Sum(x => x.SoldiersUnavailable) == r.AttackerSoldiersLost;
+        ok &= r.DefenderParticipantLosses.Values.Sum(x => x.SoldiersUnavailable) == r.DefenderSoldiersLost;
+        ok &= r.AttackerTanksLost <= request.Attackers.Sum(p => p.Tanks.Sum(t => t.Count));
+        ok &= r.DefenderTanksLost <= request.Defenders.Sum(p => p.Tanks.Sum(t => t.Count));
+        ok &= r.AttackerSoldiersLost <= request.Attackers.Sum(p => p.Soldiers);
+        ok &= r.DefenderSoldiersLost <= request.Defenders.Sum(p => p.Soldiers);
+        ok &= r.AttackerMoneyGained == r.DefenderMoneyLost;
+        ok &= r.AttackerMoneyGained <= request.Defenders.Sum(p => Math.Max(0, p.Money));
+        return ok;
+    }
+
+    static string Summarize(BattleResult r) =>
+        $"{r.OutcomeKind}|{r.SuccessPercent}|{r.EffectiveAdvanceKm:F2}|{r.AttackerTanksLost}|" +
+        $"{r.AttackerSoldiersLost}|{r.DefenderTanksLost}|{r.DefenderSoldiersLost}|" +
+        $"{r.AttackerFightersLost}|{r.DefenderFightersLost}|{r.DurationMinutes}|{r.AttackerMoneyGained}|" +
+        $"{r.AirSuperiority:F3}|{r.AttackerParticipantLosses.Values.Sum(x => x.TanksUnavailable.Values.Sum())}";
+
+    struct CaseStats
+    {
+        public int Total, Wins, Heavy, Stalemate, DefenderWins, Exceptions, InvariantsBroken;
+        public long AtkTankLoss, AtkSoldLoss, DefTankLoss, DefSoldLoss, DurationMinutes, MoneyLoot;
+        public double AdvanceKm;
+
+        public void Add(BattleResult r)
+        {
+            Total++;
+            if (r.AttackerHeavyVictory) Heavy++;
+            if (r.AttackerWon) Wins++;
+            if (r.OutcomeKind == BattleOutcomeKind.Stalemate) Stalemate++;
+            if (!r.AttackerWon && !r.AttackerFailed) DefenderWins++;
+            AtkTankLoss += r.AttackerTanksLost; AtkSoldLoss += r.AttackerSoldiersLost;
+            DefTankLoss += r.DefenderTanksLost; DefSoldLoss += r.DefenderSoldiersLost;
+            DurationMinutes += r.DurationMinutes;
+            AdvanceKm += r.EffectiveAdvanceKm;
+            MoneyLoot += r.AttackerMoneyGained;
+        }
+
+        public string FormatLine(string name)
+        {
+            int n = Math.Max(1, Total);
+            return $"{name,-26} {Wins * 100 / n,4}٪ {Heavy * 100 / n,4}٪ {Stalemate * 100 / n,4}٪ " +
+                   $"{DefenderWins * 100 / n,4}٪ {AdvanceKm / n,6:F1}km " +
+                   $"{AtkTankLoss / n,6}/{AtkSoldLoss / n,7} " +
+                   $"{DefTankLoss / n,6}/{DefSoldLoss / n,7} " +
+                   $"{MoneyLoot / n,8:N0} {DurationMinutes / n,5}m" +
+                   (Exceptions > 0 ? $" EX={Exceptions}" : "") +
+                   (InvariantsBroken > 0 ? $" INV={InvariantsBroken}" : "");
+        }
     }
 }
 

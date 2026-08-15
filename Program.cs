@@ -3968,8 +3968,16 @@ partial class Program
         }
     }
 
-    static async Task Main()
+    static async Task Main(string[] args)
     {
+        // خودآزمایی موتور نبرد بدون راه‌اندازی ربات: dotnet run -- selftest [تعداد seed]
+        if (args.Length > 0 && args[0].Equals("selftest", StringComparison.OrdinalIgnoreCase))
+        {
+            int seeds = args.Length > 1 && int.TryParse(args[1], out int s)
+                ? Math.Clamp(s, 1, 200) : 20;
+            WarEngine.RunSelfTest(seeds);
+            return;
+        }
         Database.Init();
         Database.InitActivity();
         Database.InitAdminPanel(OWNER_ID);
@@ -9097,6 +9105,19 @@ partial class Program
 
         ApplyDefenderBattleLosses(defender, ownDefense, defenderDeployments,
             defensiveDeployments, result);
+        // غنیمت جنگی در نبرد صف‌آرایی: به کشور آغازگر حمله می‌رسد و از خزانه مدافع کم می‌شود
+        if (result.AttackerWon)
+        {
+            var initiator = Database.GetCountry(deployment.InitiatorId, deployment.ChatId);
+            if (initiator != null)
+            {
+                initiator.Money = Math.Max(0, initiator.Money + result.AttackerMoneyGained);
+                initiator.Iron = Math.Max(0, initiator.Iron + result.AttackerIronGained);
+                Database.UpdateCountryFull(initiator);
+            }
+            defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
+            defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
+        }
         Database.UpdateCountryFull(defender);
         Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
 
@@ -10172,7 +10193,9 @@ partial class Program
             Tanks = tanks,
             Fighters = fighters,
             AntiAir = country.AntiAir,
-            IsHomelandDefender = country.Cities <= 2
+            IsHomelandDefender = country.Cities <= 2,
+            Money = Math.Max(0, country.Money),
+            Iron = Math.Max(0, country.Iron)
         };
     }
 
@@ -10280,6 +10303,15 @@ partial class Program
                 equipmentMutations.Add((ownerId, ownerCountry.Faction, "Planes", loss.FightersUnavailable));
                 equipmentMutations.Add((ownerId, ownerCountry.Faction, "Bombers", loss.BombersUnavailable));
             }
+        }
+
+        // غنیمت جنگی: فقط با پیروزی مهاجم؛ از خزانه مدافع برداشته و به مهاجم داده می‌شود
+        if (result.AttackerWon)
+        {
+            attacker.Money = Math.Max(0, attacker.Money + result.AttackerMoneyGained);
+            attacker.Iron = Math.Max(0, attacker.Iron + result.AttackerIronGained);
+            defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
+            defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
         }
 
         bool applied = Database.ApplyDirectBattleSettlement(battleId, attacker, defender,
