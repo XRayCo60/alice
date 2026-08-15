@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
@@ -124,6 +125,26 @@ class Deployment
     public long LastWarnMs { get; set; }
     // FIX(2): پیام اعلام صف‌آرایی که در گروه پین می‌شود تا هنگام لغو/پایان آنپین و حذف شود
     public int AnnounceMsgId { get; set; } = 0;
+}
+
+class BattleJobContext
+{
+    public long AttackerId { get; set; }
+    public long DefenderId { get; set; }
+    public long ChatId { get; set; }
+    public long DeploymentId { get; set; }
+    public List<long> DefensiveDeploymentIds { get; set; } = new();
+}
+
+class PersistedBattleJob
+{
+    public long BattleId { get; set; }
+    public string JobType { get; set; } = "";
+    public string RequestJson { get; set; } = "";
+    public string ContextJson { get; set; } = "";
+    public string Status { get; set; } = "Pending";
+    public string ResultJson { get; set; } = "";
+    public string LastError { get; set; } = "";
 }
 
 class DeploymentContributor
@@ -347,6 +368,76 @@ static partial class Database
 
     public static SqliteConnection OpenConForAdmin() => OpenCon();
 
+    public static void CreateConsistentBackup(string destinationPath)
+    {
+        string fullPath = System.IO.Path.GetFullPath(destinationPath);
+        if (System.IO.File.Exists(fullPath))
+            System.IO.File.Delete(fullPath);
+
+        using var source = OpenCon();
+        using var destination = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = fullPath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString());
+        destination.Open();
+        source.BackupDatabase(destination);
+    }
+
+    public static bool ValidateDatabaseFile(string path, out string error)
+    {
+        error = "";
+        try
+        {
+            using var con = new SqliteConnection(
+                new SqliteConnectionStringBuilder
+                {
+                    DataSource = System.IO.Path.GetFullPath(path),
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Pooling = false
+                }.ToString());
+            con.Open();
+
+            using (var integrity = con.CreateCommand())
+            {
+                integrity.CommandText = "PRAGMA quick_check;";
+                string result = Convert.ToString(integrity.ExecuteScalar()) ?? "";
+                if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = string.IsNullOrWhiteSpace(result) ? "SQLite integrity check failed." : result;
+                    return false;
+                }
+            }
+
+            using var schema = con.CreateCommand();
+            schema.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='Countries'";
+            if (Convert.ToInt32(schema.ExecuteScalar()) != 1)
+            {
+                error = "جدول Countries در فایل وجود ندارد.";
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    public static void CheckpointAndClearPools()
+    {
+        using (var con = OpenCon())
+        using (var cmd = con.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.ExecuteNonQuery();
+        }
+        SqliteConnection.ClearAllPools();
+    }
+
     public static void Init()
     {
         using var con = OpenCon();
@@ -493,6 +584,15 @@ static partial class Database
             Strategy INTEGER DEFAULT 1,
             Tactic INTEGER DEFAULT 1
         );";
+        string deploymentContributorModels = @"
+        CREATE TABLE IF NOT EXISTS DeploymentContributorModels(
+            DeploymentId INTEGER NOT NULL,
+            UserId INTEGER NOT NULL,
+            Category TEXT NOT NULL,
+            ModelName TEXT NOT NULL,
+            Count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(DeploymentId,UserId,Category,ModelName)
+        );";
     string visionLogs = @"CREATE TABLE IF NOT EXISTS VisionLogs(Id INTEGER PRIMARY KEY AUTOINCREMENT, SourceChatId INTEGER NOT NULL DEFAULT 0, SourceUserId INTEGER NOT NULL DEFAULT 0, DestChatId INTEGER NOT NULL, IsUserMode INTEGER NOT NULL DEFAULT 0, CreatedAtMs INTEGER NOT NULL);";
     string visionMessageMap = @"CREATE TABLE IF NOT EXISTS VisionMessageMap(Id INTEGER PRIMARY KEY AUTOINCREMENT, SourceChatId INTEGER NOT NULL, SourceMessageId INTEGER NOT NULL, SourceUserId INTEGER NOT NULL DEFAULT 0, DestChatId INTEGER NOT NULL, DestMessageId INTEGER NOT NULL, CreatedAtMs INTEGER NOT NULL);";
         string groupLockExemptions = @"
@@ -503,6 +603,9 @@ static partial class Database
         string attackAbandonLocks = @"CREATE TABLE IF NOT EXISTS AttackAbandonLocks(OwnerId INTEGER NOT NULL, LockedUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId));";
         string dailyDefendCounts = @"CREATE TABLE IF NOT EXISTS DailyDefendCounts(DefenderId INTEGER NOT NULL, AttackDate TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(DefenderId,AttackDate));";
         string attackerFlags = @"CREATE TABLE IF NOT EXISTS AttackerFlags(OwnerId INTEGER NOT NULL, AttackDate TEXT NOT NULL, PRIMARY KEY(OwnerId, AttackDate));";
+        string heavyOffensiveWins = @"CREATE TABLE IF NOT EXISTS HeavyOffensiveWins(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
+        string warBattles = @"CREATE TABLE IF NOT EXISTS WarBattles(Id INTEGER PRIMARY KEY AUTOINCREMENT, Timestamp TEXT NOT NULL, ChatId INTEGER, AttackerId INTEGER, DefenderId INTEGER, AttackerName TEXT, DefenderName TEXT, Winner TEXT, PenetrationKm REAL, SuccessPercent INTEGER, AtkTankLoss INTEGER, AtkSoldierLoss INTEGER, DefTankLoss INTEGER, DefSoldierLoss INTEGER, LootMoney INTEGER, LootIron INTEGER, DurationMinutes INTEGER, Report TEXT);";
+        string battleJobs = @"CREATE TABLE IF NOT EXISTS BattleJobs(BattleId INTEGER PRIMARY KEY, JobType TEXT NOT NULL, RequestJson TEXT NOT NULL, ContextJson TEXT NOT NULL DEFAULT '', Status TEXT NOT NULL DEFAULT 'Pending', ResultJson TEXT NOT NULL DEFAULT '', LastError TEXT NOT NULL DEFAULT '', CreatedAtMs INTEGER NOT NULL, UpdatedAtMs INTEGER NOT NULL);";
         string eqModels = @"CREATE TABLE IF NOT EXISTS EquipmentModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseModels = @"CREATE TABLE IF NOT EXISTS DefenseModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, DefPct INTEGER NOT NULL DEFAULT 100, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         //  – naval expansion tables
@@ -510,11 +613,33 @@ static partial class Database
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, eqModels, defenseModels, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
             cmd.ExecuteNonQuery();
+        }
+
+        using (var indexes = con.CreateCommand())
+        {
+            indexes.CommandText = @"
+                CREATE INDEX IF NOT EXISTS IX_Transfers_ArriveAtMs ON Transfers(ArriveAtMs);
+                CREATE INDEX IF NOT EXISTS IX_Deployments_EndAtMs ON Deployments(EndAtMs);
+                CREATE INDEX IF NOT EXISTS IX_DeploymentContributors_DeploymentUser
+                    ON DeploymentContributors(DeploymentId, UserId);
+                CREATE INDEX IF NOT EXISTS IX_AllianceMembers_AllianceId
+                    ON AllianceMembers(AllianceId);
+                CREATE INDEX IF NOT EXISTS IX_AllianceInvites_Target
+                    ON AllianceInvites(ChatId, TargetUserId);
+                CREATE INDEX IF NOT EXISTS IX_VisionLogs_SourceChat
+                    ON VisionLogs(SourceChatId);
+                CREATE INDEX IF NOT EXISTS IX_VisionLogs_SourceUser
+                    ON VisionLogs(SourceUserId);
+                CREATE INDEX IF NOT EXISTS IX_VisionMessageMap_Source
+                    ON VisionMessageMap(SourceChatId, SourceMessageId, DestChatId);
+                CREATE INDEX IF NOT EXISTS IX_VisionMessageMap_Destination
+                    ON VisionMessageMap(DestChatId, DestMessageId);";
+            indexes.ExecuteNonQuery();
         }
 
         EnsureColumn(con, "Countries", "Soldiers", "INTEGER DEFAULT 10000");
@@ -758,7 +883,7 @@ static partial class Database
         var result = new List<EquipmentModel>();
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT ModelName, Count FROM EquipmentModels WHERE OwnerId=@id AND ChatId=@chat AND Category=@cat";
+        cmd.CommandText = "SELECT ModelName, Count FROM EquipmentModels WHERE OwnerId=@id AND ChatId=@chat AND Category=@cat AND Count>0";
         cmd.Parameters.AddWithValue("@id", ownerId);
         cmd.Parameters.AddWithValue("@chat", chatId);
         cmd.Parameters.AddWithValue("@cat", category);
@@ -775,9 +900,12 @@ static partial class Database
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
         cmd.CommandText = @"INSERT INTO EquipmentModels(OwnerId, ChatId, Category, ModelName, Count)
-                             VALUES(@id, @chat, @cat, @model, @amt)
+                             VALUES(@id, @chat, @cat, @model, MAX(0, @amt))
                              ON CONFLICT(OwnerId, ChatId, Category, ModelName)
-                             DO UPDATE SET Count = Count + @amt";
+                             DO UPDATE SET Count = MAX(0, Count + @amt);
+                             DELETE FROM EquipmentModels
+                             WHERE OwnerId=@id AND ChatId=@chat AND Category=@cat
+                               AND ModelName=@model AND Count<=0;";
         cmd.Parameters.AddWithValue("@id", ownerId);
         cmd.Parameters.AddWithValue("@chat", chatId);
         cmd.Parameters.AddWithValue("@cat", category);
@@ -1076,7 +1204,133 @@ static partial class Database
     public static void UpdateCountryFull(Country c)
     {
         using var con = OpenCon();
+        UpdateCountryFull(con, null, c);
+    }
+
+    public static void UpdateCountriesFullAtomically(IEnumerable<Country> countries)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+        foreach (var country in countries
+            .GroupBy(x => (x.ChatId, x.OwnerId))
+            .Select(x => x.Last()))
+        {
+            UpdateCountryFull(con, transaction, country);
+        }
+        transaction.Commit();
+    }
+
+    public static bool ApplyDirectBattleSettlement(
+        long battleId,
+        Country attacker,
+        Country defender,
+        IReadOnlyList<(long OwnerId, Faction Faction, string Category, Dictionary<string, long> Losses)> equipmentLosses,
+        IReadOnlyList<(long ContributorId, long Tanks, long Soldiers, long Fighters, long Bombers)> deploymentLosses,
+        IReadOnlyCollection<long> defensiveDeploymentIds)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+        using (var claim = con.CreateCommand())
+        {
+            claim.Transaction = transaction;
+            claim.CommandText = "SELECT Status FROM BattleJobs WHERE BattleId=@id";
+            claim.Parameters.AddWithValue("@id", battleId);
+            string status = claim.ExecuteScalar()?.ToString() ?? "";
+            if (status is "Settled" or "Completed")
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        foreach (var item in equipmentLosses)
+            DeductEquipmentLosses(con, transaction, item.OwnerId, attacker.ChatId,
+                item.Faction, item.Category, item.Losses);
+
+        foreach (var item in deploymentLosses)
+            ApplyDefensiveDeploymentLosses(con, transaction, defender.ChatId, defender.OwnerId,
+                item.ContributorId, item.Tanks, item.Soldiers, item.Fighters, item.Bombers,
+                defensiveDeploymentIds);
+
+        UpdateCountryFull(con, transaction, attacker);
+        UpdateCountryFull(con, transaction, defender);
+        using (var settle = con.CreateCommand())
+        {
+            settle.Transaction = transaction;
+            settle.CommandText = "UPDATE BattleJobs SET Status='Settled',UpdatedAtMs=@now WHERE BattleId=@id";
+            settle.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            settle.Parameters.AddWithValue("@id", battleId);
+            settle.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        return true;
+    }
+
+    private static void DeductEquipmentLosses(
+        SqliteConnection con,
+        SqliteTransaction transaction,
+        long ownerId,
+        long chatId,
+        Faction faction,
+        string category,
+        IReadOnlyDictionary<string, long> losses)
+    {
+        var stored = new List<(string ModelName, long Count)>();
+        using (var select = con.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = @"SELECT ModelName,Count FROM EquipmentModels
+                                   WHERE OwnerId=@owner AND ChatId=@chat AND Category=@category
+                                   ORDER BY ModelName";
+            select.Parameters.AddWithValue("@owner", ownerId);
+            select.Parameters.AddWithValue("@chat", chatId);
+            select.Parameters.AddWithValue("@category", category);
+            using var reader = select.ExecuteReader();
+            while (reader.Read()) stored.Add((reader.GetString(0), reader.GetInt64(1)));
+        }
+
+        string Canonicalize(string model) => category switch
+        {
+            "Tanks" => WarEngine.CanonicalTankModel(model, faction),
+            "Planes" => WarEngine.CanonicalFighterModel(model, faction),
+            "Bombers" => WarEngine.CanonicalBomberModel(model, faction),
+            _ => model
+        };
+
+        for (int lossIndex = 0; lossIndex < losses.Count; lossIndex++)
+        {
+            var loss = losses.ElementAt(lossIndex);
+            long remaining = Math.Max(0, loss.Value);
+            for (int rowIndex = 0; rowIndex < stored.Count && remaining > 0; rowIndex++)
+            {
+                var row = stored[rowIndex];
+                if (!Canonicalize(row.ModelName).Equals(loss.Key, StringComparison.OrdinalIgnoreCase)) continue;
+                long take = Math.Min(remaining, row.Count);
+                if (take <= 0) continue;
+                using var update = con.CreateCommand();
+                update.Transaction = transaction;
+                update.CommandText = @"UPDATE EquipmentModels SET Count=MAX(0,Count-@take)
+                                       WHERE OwnerId=@owner AND ChatId=@chat
+                                         AND Category=@category AND ModelName=@model";
+                update.Parameters.AddWithValue("@take", take);
+                update.Parameters.AddWithValue("@owner", ownerId);
+                update.Parameters.AddWithValue("@chat", chatId);
+                update.Parameters.AddWithValue("@category", category);
+                update.Parameters.AddWithValue("@model", row.ModelName);
+                update.ExecuteNonQuery();
+                stored[rowIndex] = (row.ModelName, row.Count - take);
+                remaining -= take;
+            }
+        }
+    }
+
+    private static void UpdateCountryFull(
+        SqliteConnection con,
+        SqliteTransaction? transaction,
+        Country c)
+    {
         using var cmd = con.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = @"UPDATE Countries SET Money=@money, Iron=@iron, Population=@pop, Soldiers=@sol,
                             RecruitmentRate=@rr, Welfare=@wf, Tanks=@tanks, Planes=@planes, Bombers=@bombers, AntiAir=@antiair,
                             AirDefStrategy=@ads, AirDefTactic=@adt, Besieged=@bsg, Cities=@cities, DefenseWins=@dwins, TaxRate=@tax, DefTankPct=@dtp, DefSoldierPct=@dsp, DefFighterPct=@dfp,
@@ -1173,6 +1427,7 @@ static partial class Database
                               "DELETE FROM AllianceMembers WHERE ChatId=@cid AND UserId=@oid; " +
                               "DELETE FROM AllianceInvites WHERE ChatId=@cid AND (TargetUserId=@oid OR LeaderId=@oid); " +
                               "DELETE FROM Transfers WHERE ChatId=@cid AND (SenderId=@oid OR ReceiverId=@oid); " +
+                              "DELETE FROM DeploymentContributorModels WHERE UserId=@oid; " +
                               "DELETE FROM DeploymentContributors WHERE UserId=@oid; " +
                               "DELETE FROM Deployments WHERE ChatId=@cid AND (InitiatorId=@oid OR TargetUserId=@oid);";
         delAlly.Parameters.AddWithValue("@cid", chatId);
@@ -1366,6 +1621,127 @@ static partial class Database
         cmd.Parameters.AddWithValue("@c", chatId);
         var res = cmd.ExecuteScalar();
         return (res == null || res == DBNull.Value) ? 0 : Convert.ToInt32(res);
+    }
+
+    public static int IncrementHeavyOffensiveWins(long ownerId, long chatId)
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"INSERT INTO HeavyOffensiveWins(OwnerId,ChatId,Count)
+                            VALUES(@owner,@chat,1)
+                            ON CONFLICT(OwnerId,ChatId) DO UPDATE SET Count=Count+1;
+                            SELECT Count FROM HeavyOffensiveWins WHERE OwnerId=@owner AND ChatId=@chat";
+        cmd.Parameters.AddWithValue("@owner", ownerId);
+        cmd.Parameters.AddWithValue("@chat", chatId);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public static void ResetHeavyOffensiveWins(long ownerId, long chatId)
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "DELETE FROM HeavyOffensiveWins WHERE OwnerId=@owner AND ChatId=@chat";
+        cmd.Parameters.AddWithValue("@owner", ownerId);
+        cmd.Parameters.AddWithValue("@chat", chatId);
+        cmd.ExecuteNonQuery();
+    }
+
+    public static PersistedBattleJob EnsureBattleJob(long battleId, string jobType,
+        string requestJson, string contextJson)
+    {
+        using var con = OpenCon();
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using (var insert = con.CreateCommand())
+        {
+            insert.CommandText = @"INSERT OR IGNORE INTO BattleJobs
+                (BattleId,JobType,RequestJson,ContextJson,Status,CreatedAtMs,UpdatedAtMs)
+                VALUES(@id,@type,@request,@context,'Pending',@now,@now)";
+            insert.Parameters.AddWithValue("@id", battleId);
+            insert.Parameters.AddWithValue("@type", jobType);
+            insert.Parameters.AddWithValue("@request", requestJson);
+            insert.Parameters.AddWithValue("@context", contextJson);
+            insert.Parameters.AddWithValue("@now", now);
+            insert.ExecuteNonQuery();
+        }
+        using var select = con.CreateCommand();
+        select.CommandText = @"SELECT BattleId,JobType,RequestJson,ContextJson,Status,ResultJson,LastError
+                               FROM BattleJobs WHERE BattleId=@id";
+        select.Parameters.AddWithValue("@id", battleId);
+        using var reader = select.ExecuteReader();
+        if (!reader.Read()) throw new InvalidOperationException("Battle job could not be persisted.");
+        return new PersistedBattleJob
+        {
+            BattleId = reader.GetInt64(0), JobType = reader.GetString(1),
+            RequestJson = reader.GetString(2), ContextJson = reader.GetString(3),
+            Status = reader.GetString(4), ResultJson = reader.GetString(5), LastError = reader.GetString(6)
+        };
+    }
+
+    public static List<PersistedBattleJob> GetRecoverableBattleJobs()
+    {
+        var jobs = new List<PersistedBattleJob>();
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"SELECT BattleId,JobType,RequestJson,ContextJson,Status,ResultJson,LastError
+                            FROM BattleJobs WHERE Status IN ('Pending','Running','Resolved','Settled')
+                            ORDER BY CreatedAtMs";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            jobs.Add(new PersistedBattleJob
+            {
+                BattleId = reader.GetInt64(0), JobType = reader.GetString(1),
+                RequestJson = reader.GetString(2), ContextJson = reader.GetString(3),
+                Status = reader.GetString(4), ResultJson = reader.GetString(5), LastError = reader.GetString(6)
+            });
+        return jobs;
+    }
+
+    public static void UpdateBattleJob(long battleId, string status,
+        string resultJson = "", string error = "")
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"UPDATE BattleJobs SET Status=@status,
+                              ResultJson=CASE WHEN @result='' THEN ResultJson ELSE @result END,
+                              LastError=@error, UpdatedAtMs=@now WHERE BattleId=@id";
+        cmd.Parameters.AddWithValue("@status", status);
+        cmd.Parameters.AddWithValue("@result", resultJson);
+        cmd.Parameters.AddWithValue("@error", error);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        cmd.Parameters.AddWithValue("@id", battleId);
+        cmd.ExecuteNonQuery();
+    }
+
+    public static void SaveBattleResult(BattleRequest request, BattleResult result)
+    {
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"INSERT INTO WarBattles
+            (Timestamp,ChatId,AttackerId,DefenderId,AttackerName,DefenderName,Winner,
+             PenetrationKm,SuccessPercent,AtkTankLoss,AtkSoldierLoss,DefTankLoss,DefSoldierLoss,
+             LootMoney,LootIron,DurationMinutes,Report)
+            VALUES(@time,@chat,@attacker,@defender,@an,@dn,@winner,@depth,@success,
+                   @atl,@asl,@dtl,@dsl,@money,@iron,@duration,@report)";
+        var attacker = request.Attackers.First();
+        var defender = request.Defenders.First();
+        cmd.Parameters.AddWithValue("@time", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
+        cmd.Parameters.AddWithValue("@chat", request.ChatId);
+        cmd.Parameters.AddWithValue("@attacker", attacker.OwnerId);
+        cmd.Parameters.AddWithValue("@defender", defender.OwnerId);
+        cmd.Parameters.AddWithValue("@an", attacker.CountryName);
+        cmd.Parameters.AddWithValue("@dn", defender.CountryName);
+        cmd.Parameters.AddWithValue("@winner", result.OutcomeKind.ToString());
+        cmd.Parameters.AddWithValue("@depth", result.EffectiveAdvanceKm);
+        cmd.Parameters.AddWithValue("@success", result.SuccessPercent);
+        cmd.Parameters.AddWithValue("@atl", result.AttackerTanksLost);
+        cmd.Parameters.AddWithValue("@asl", result.AttackerSoldiersLost);
+        cmd.Parameters.AddWithValue("@dtl", result.DefenderTanksLost);
+        cmd.Parameters.AddWithValue("@dsl", result.DefenderSoldiersLost);
+        cmd.Parameters.AddWithValue("@money", result.AttackerMoneyGained);
+        cmd.Parameters.AddWithValue("@iron", result.AttackerIronGained);
+        cmd.Parameters.AddWithValue("@duration", result.DurationMinutes);
+        cmd.Parameters.AddWithValue("@report", result.AttackerReport);
+        cmd.ExecuteNonQuery();
     }
 
     public static void SetBesieged(long ownerId, long chatId, int state)
@@ -1851,6 +2227,111 @@ static partial class Database
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
+    public static bool TryCreateTransfers(
+        long senderId,
+        long chatId,
+        long allianceId,
+        long receiverId,
+        string resourceType,
+        IReadOnlyList<(string ModelName, long Amount)> shipments,
+        long arriveAtMs)
+    {
+        string resourceColumn = resourceType switch
+        {
+            "money" => "Money",
+            "iron" => "Iron",
+            "soldiers" => "Soldiers",
+            "tanks" => "Tanks",
+            "planes" => "Planes",
+            "bombers" => "Bombers",
+            "boats" => "Boats",
+            "submarines" => "Submarines",
+            "battleships" => "Battleships",
+            _ => throw new ArgumentException("Invalid transfer resource type.", nameof(resourceType))
+        };
+        string equipmentCategory = resourceType switch
+        {
+            "tanks" => "Tanks",
+            "planes" => "Planes",
+            "bombers" => "Bombers",
+            "boats" => "Boats",
+            "submarines" => "Submarines",
+            "battleships" => "Battleships",
+            _ => ""
+        };
+
+        var validShipments = shipments
+            .Where(x => x.Amount > 0)
+            .ToList();
+        if (validShipments.Count == 0)
+            return false;
+
+        long totalAmount = checked(validShipments.Sum(x => x.Amount));
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        using (var deduct = con.CreateCommand())
+        {
+            deduct.Transaction = transaction;
+            deduct.CommandText = $@"UPDATE Countries
+                                    SET {resourceColumn}={resourceColumn}-@amount
+                                    WHERE OwnerId=@owner AND ChatId=@chat
+                                      AND {resourceColumn}>=@amount";
+            deduct.Parameters.AddWithValue("@amount", totalAmount);
+            deduct.Parameters.AddWithValue("@owner", senderId);
+            deduct.Parameters.AddWithValue("@chat", chatId);
+            if (deduct.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(equipmentCategory))
+        {
+            foreach (var shipment in validShipments.Where(x => !string.IsNullOrWhiteSpace(x.ModelName)))
+            {
+                using var model = con.CreateCommand();
+                model.Transaction = transaction;
+                model.CommandText = @"UPDATE EquipmentModels
+                                      SET Count=MAX(0, Count-@amount)
+                                      WHERE OwnerId=@owner AND ChatId=@chat
+                                        AND Category=@category AND ModelName=@model;
+                                      DELETE FROM EquipmentModels
+                                      WHERE OwnerId=@owner AND ChatId=@chat
+                                        AND Category=@category AND ModelName=@model
+                                        AND Count<=0;";
+                model.Parameters.AddWithValue("@amount", shipment.Amount);
+                model.Parameters.AddWithValue("@owner", senderId);
+                model.Parameters.AddWithValue("@chat", chatId);
+                model.Parameters.AddWithValue("@category", equipmentCategory);
+                model.Parameters.AddWithValue("@model", shipment.ModelName);
+                model.ExecuteNonQuery();
+            }
+        }
+
+        foreach (var shipment in validShipments)
+        {
+            using var insert = con.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = @"INSERT INTO Transfers
+                (ChatId,AllianceId,SenderId,ReceiverId,ResourceType,ModelName,Amount,ArriveAtMs,Notified)
+                VALUES(@chat,@alliance,@sender,@receiver,@resource,@model,@amount,@arrive,0)";
+            insert.Parameters.AddWithValue("@chat", chatId);
+            insert.Parameters.AddWithValue("@alliance", allianceId);
+            insert.Parameters.AddWithValue("@sender", senderId);
+            insert.Parameters.AddWithValue("@receiver", receiverId);
+            insert.Parameters.AddWithValue("@resource", resourceType);
+            insert.Parameters.AddWithValue("@model", shipment.ModelName ?? "");
+            insert.Parameters.AddWithValue("@amount", shipment.Amount);
+            insert.Parameters.AddWithValue("@arrive", arriveAtMs);
+            insert.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return true;
+    }
+
     public static List<Transfer> GetActiveTransfers()
     {
         var list = new List<Transfer>();
@@ -1915,6 +2396,107 @@ static partial class Database
         cmd.ExecuteNonQuery();
     }
 
+    public static string CompleteTransfer(Transfer transfer, string resolvedModelName)
+    {
+        string resourceColumn = transfer.ResourceType switch
+        {
+            "money" => "Money",
+            "iron" => "Iron",
+            "soldiers" => "Soldiers",
+            "tanks" => "Tanks",
+            "planes" => "Planes",
+            "bombers" => "Bombers",
+            "boats" => "Boats",
+            "submarines" => "Submarines",
+            "battleships" => "Battleships",
+            _ => throw new ArgumentException("Invalid transfer resource type.")
+        };
+        string equipmentCategory = transfer.ResourceType switch
+        {
+            "tanks" => "Tanks",
+            "planes" => "Planes",
+            "bombers" => "Bombers",
+            "boats" => "Boats",
+            "submarines" => "Submarines",
+            "battleships" => "Battleships",
+            _ => ""
+        };
+
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        bool receiverExists;
+        long receiverBattleships = 0;
+        using (var receiver = con.CreateCommand())
+        {
+            receiver.Transaction = transaction;
+            receiver.CommandText = "SELECT Battleships FROM Countries WHERE OwnerId=@owner AND ChatId=@chat";
+            receiver.Parameters.AddWithValue("@owner", transfer.ReceiverId);
+            receiver.Parameters.AddWithValue("@chat", transfer.ChatId);
+            object? value = receiver.ExecuteScalar();
+            receiverExists = value != null && value != DBNull.Value;
+            if (receiverExists)
+                receiverBattleships = Convert.ToInt64(value);
+        }
+
+        bool capacityReturn = transfer.ResourceType == "battleships" &&
+                              receiverExists &&
+                              receiverBattleships + transfer.Amount > 3;
+        long recipientId = receiverExists && !capacityReturn
+            ? transfer.ReceiverId
+            : transfer.SenderId;
+        string outcome = receiverExists && !capacityReturn
+            ? "delivered"
+            : capacityReturn ? "capacity" : "returned";
+
+        int credited;
+        using (var credit = con.CreateCommand())
+        {
+            credit.Transaction = transaction;
+            credit.CommandText = $@"UPDATE Countries
+                                    SET {resourceColumn}={resourceColumn}+@amount
+                                    WHERE OwnerId=@owner AND ChatId=@chat";
+            credit.Parameters.AddWithValue("@amount", transfer.Amount);
+            credit.Parameters.AddWithValue("@owner", recipientId);
+            credit.Parameters.AddWithValue("@chat", transfer.ChatId);
+            credited = credit.ExecuteNonQuery();
+        }
+
+        if (credited == 1 &&
+            !string.IsNullOrEmpty(equipmentCategory) &&
+            !string.IsNullOrWhiteSpace(resolvedModelName))
+        {
+            using var model = con.CreateCommand();
+            model.Transaction = transaction;
+            model.CommandText = @"INSERT INTO EquipmentModels
+                (OwnerId,ChatId,Category,ModelName,Count)
+                VALUES(@owner,@chat,@category,@model,@amount)
+                ON CONFLICT(OwnerId,ChatId,Category,ModelName)
+                DO UPDATE SET Count=MAX(0,Count+@amount)";
+            model.Parameters.AddWithValue("@owner", recipientId);
+            model.Parameters.AddWithValue("@chat", transfer.ChatId);
+            model.Parameters.AddWithValue("@category", equipmentCategory);
+            model.Parameters.AddWithValue("@model", resolvedModelName);
+            model.Parameters.AddWithValue("@amount", transfer.Amount);
+            model.ExecuteNonQuery();
+        }
+
+        using (var delete = con.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM Transfers WHERE Id=@id";
+            delete.Parameters.AddWithValue("@id", transfer.Id);
+            if (delete.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return "already-processed";
+            }
+        }
+
+        transaction.Commit();
+        return credited == 1 ? outcome : "dropped";
+    }
+
     public static long AddDeployment(Deployment d)
     {
         using var con = OpenCon();
@@ -1939,6 +2521,355 @@ static partial class Database
         cmd.Parameters.AddWithValue("@lms", d.LastWarnMs);
         cmd.Parameters.AddWithValue("@amid", d.AnnounceMsgId);
         return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    private static long[] AllocateExact(long requested, long[] capacities)
+    {
+        long capacity = capacities.Sum();
+        long target = Math.Min(Math.Max(0, requested), capacity);
+        var result = new long[capacities.Length];
+        if (target == 0 || capacity == 0) return result;
+        var fractions = new decimal[capacities.Length];
+        long assigned = 0;
+        for (int i = 0; i < capacities.Length; i++)
+        {
+            decimal exact = (decimal)target * capacities[i] / capacity;
+            result[i] = Math.Min(capacities[i], (long)decimal.Floor(exact));
+            fractions[i] = exact - result[i];
+            assigned += result[i];
+        }
+        foreach (int i in Enumerable.Range(0, capacities.Length)
+                     .OrderByDescending(i => fractions[i]).ThenBy(i => i))
+        {
+            if (assigned >= target) break;
+            if (result[i] >= capacities[i]) continue;
+            result[i]++;
+            assigned++;
+        }
+        return result;
+    }
+
+    private static void ReserveContributorModels(SqliteConnection con, SqliteTransaction transaction,
+        long deploymentId, long userId, long chatId, string category, long amount)
+    {
+        if (amount <= 0) return;
+        Faction faction;
+        long availableAggregate;
+        using (var country = con.CreateCommand())
+        {
+            country.Transaction = transaction;
+            string column = category switch { "Tanks" => "Tanks", "Planes" => "Planes", _ => "Bombers" };
+            country.CommandText = $"SELECT Faction,{column} FROM Countries WHERE OwnerId=@owner AND ChatId=@chat";
+            country.Parameters.AddWithValue("@owner", userId);
+            country.Parameters.AddWithValue("@chat", chatId);
+            using var reader = country.ExecuteReader();
+            if (!reader.Read()) throw new InvalidOperationException("Deployment contributor country is missing.");
+            faction = (Faction)reader.GetInt32(0);
+            availableAggregate = reader.GetInt64(1) + amount;
+        }
+
+        var reserved = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = con.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = @"SELECT ModelName,SUM(Count) FROM DeploymentContributorModels dcm
+                                JOIN Deployments d ON d.Id=dcm.DeploymentId
+                                WHERE d.ChatId=@chat AND dcm.UserId=@owner AND dcm.Category=@category
+                                GROUP BY ModelName";
+            cmd.Parameters.AddWithValue("@chat", chatId);
+            cmd.Parameters.AddWithValue("@owner", userId);
+            cmd.Parameters.AddWithValue("@category", category);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) reserved[reader.GetString(0)] = reader.GetInt64(1);
+        }
+
+        var capacities = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = con.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = @"SELECT ModelName,Count FROM EquipmentModels
+                                WHERE OwnerId=@owner AND ChatId=@chat AND Category=@category
+                                ORDER BY ModelName";
+            cmd.Parameters.AddWithValue("@owner", userId);
+            cmd.Parameters.AddWithValue("@chat", chatId);
+            cmd.Parameters.AddWithValue("@category", category);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string model = reader.GetString(0);
+                capacities[model] = Math.Max(0, reader.GetInt64(1) - reserved.GetValueOrDefault(model));
+            }
+        }
+
+        string defaultModel = category switch
+        {
+            "Tanks" => GetDefaultTankModel(faction),
+            "Planes" => GetDefaultPlaneModel(faction),
+            _ => GetDefaultBomberModel(faction)
+        };
+        long explicitAvailable = capacities.Values.Sum();
+        if (explicitAvailable < availableAggregate)
+            capacities[defaultModel] = capacities.GetValueOrDefault(defaultModel) +
+                                       (availableAggregate - explicitAvailable);
+
+        var models = capacities.Where(x => x.Value > 0).OrderBy(x => x.Key, StringComparer.Ordinal).ToList();
+        if (models.Count == 0) models.Add(new KeyValuePair<string, long>(defaultModel, amount));
+        long[] normalized = AllocateExact(Math.Min(availableAggregate, models.Sum(x => x.Value)),
+            models.Select(x => x.Value).ToArray());
+        long[] selected = AllocateExact(amount, normalized);
+        for (int i = 0; i < models.Count; i++)
+        {
+            if (selected[i] <= 0) continue;
+            using var insert = con.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = @"INSERT INTO DeploymentContributorModels
+                (DeploymentId,UserId,Category,ModelName,Count) VALUES(@deployment,@user,@category,@model,@count)
+                ON CONFLICT(DeploymentId,UserId,Category,ModelName) DO UPDATE SET Count=Count+@count";
+            insert.Parameters.AddWithValue("@deployment", deploymentId);
+            insert.Parameters.AddWithValue("@user", userId);
+            insert.Parameters.AddWithValue("@category", category);
+            insert.Parameters.AddWithValue("@model", models[i].Key);
+            insert.Parameters.AddWithValue("@count", selected[i]);
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    public static Dictionary<string, long> GetReservedEquipmentModels(long ownerId, long chatId, string category)
+    {
+        var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"SELECT dcm.ModelName,SUM(dcm.Count) FROM DeploymentContributorModels dcm
+                            JOIN Deployments d ON d.Id=dcm.DeploymentId
+                            WHERE d.ChatId=@chat AND dcm.UserId=@owner AND dcm.Category=@category
+                            GROUP BY dcm.ModelName";
+        cmd.Parameters.AddWithValue("@chat", chatId);
+        cmd.Parameters.AddWithValue("@owner", ownerId);
+        cmd.Parameters.AddWithValue("@category", category);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result[reader.GetString(0)] = reader.GetInt64(1);
+        return result;
+    }
+
+    public static List<ModelAmount> GetDeploymentContributorModels(long deploymentId, long userId,
+        string category)
+    {
+        var result = new List<ModelAmount>();
+        using var con = OpenCon();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"SELECT ModelName,Count FROM DeploymentContributorModels
+                            WHERE DeploymentId=@deployment AND UserId=@user AND Category=@category
+                            ORDER BY ModelName";
+        cmd.Parameters.AddWithValue("@deployment", deploymentId);
+        cmd.Parameters.AddWithValue("@user", userId);
+        cmd.Parameters.AddWithValue("@category", category);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result.Add(new ModelAmount(reader.GetString(0), reader.GetInt64(1)));
+        return result;
+    }
+
+    private static void ReduceContributorModels(SqliteConnection con, SqliteTransaction transaction,
+        long deploymentId, long userId, string category, long loss)
+    {
+        if (loss <= 0) return;
+        var rows = new List<(string Model, long Count)>();
+        using (var select = con.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = @"SELECT ModelName,Count FROM DeploymentContributorModels
+                                   WHERE DeploymentId=@deployment AND UserId=@user AND Category=@category
+                                   ORDER BY ModelName";
+            select.Parameters.AddWithValue("@deployment", deploymentId);
+            select.Parameters.AddWithValue("@user", userId);
+            select.Parameters.AddWithValue("@category", category);
+            using var reader = select.ExecuteReader();
+            while (reader.Read()) rows.Add((reader.GetString(0), reader.GetInt64(1)));
+        }
+        long[] reductions = AllocateExact(loss, rows.Select(x => x.Count).ToArray());
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (reductions[i] <= 0) continue;
+            using var update = con.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = @"UPDATE DeploymentContributorModels SET Count=MAX(0,Count-@loss)
+                                   WHERE DeploymentId=@deployment AND UserId=@user
+                                     AND Category=@category AND ModelName=@model";
+            update.Parameters.AddWithValue("@loss", reductions[i]);
+            update.Parameters.AddWithValue("@deployment", deploymentId);
+            update.Parameters.AddWithValue("@user", userId);
+            update.Parameters.AddWithValue("@category", category);
+            update.Parameters.AddWithValue("@model", rows[i].Model);
+            update.ExecuteNonQuery();
+        }
+    }
+
+    public static long TryCreateDeploymentWithForces(Deployment deployment)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        using (var deduct = con.CreateCommand())
+        {
+            deduct.Transaction = transaction;
+            deduct.CommandText = @"UPDATE Countries SET
+                                      Tanks=Tanks-@tanks,
+                                      Soldiers=Soldiers-@soldiers,
+                                      Planes=Planes-@fighters,
+                                      Bombers=Bombers-@bombers
+                                    WHERE OwnerId=@owner AND ChatId=@chat
+                                      AND Tanks>=@tanks AND Soldiers>=@soldiers
+                                      AND Planes>=@fighters AND Bombers>=@bombers";
+            deduct.Parameters.AddWithValue("@tanks", deployment.Tanks);
+            deduct.Parameters.AddWithValue("@soldiers", deployment.Soldiers);
+            deduct.Parameters.AddWithValue("@fighters", deployment.Fighters);
+            deduct.Parameters.AddWithValue("@bombers", deployment.Bombers);
+            deduct.Parameters.AddWithValue("@owner", deployment.InitiatorId);
+            deduct.Parameters.AddWithValue("@chat", deployment.ChatId);
+            if (deduct.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return 0;
+            }
+        }
+
+        long deploymentId;
+        using (var insert = con.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = @"INSERT INTO Deployments
+                (ChatId,AllianceId,InitiatorId,TargetUserId,Type,DurationHours,FormationType,
+                 Strategy,Tactic,Tanks,Soldiers,Fighters,Bombers,CreatedAtMs,EndAtMs,LastWarnMs,AnnounceMsgId)
+                VALUES(@chat,@alliance,@initiator,@target,@type,@duration,@formation,
+                       @strategy,@tactic,@tanks,@soldiers,@fighters,@bombers,@created,@ends,@warn,@announce);
+                SELECT last_insert_rowid();";
+            insert.Parameters.AddWithValue("@chat", deployment.ChatId);
+            insert.Parameters.AddWithValue("@alliance", deployment.AllianceId);
+            insert.Parameters.AddWithValue("@initiator", deployment.InitiatorId);
+            insert.Parameters.AddWithValue("@target", deployment.TargetUserId);
+            insert.Parameters.AddWithValue("@type", deployment.Type);
+            insert.Parameters.AddWithValue("@duration", deployment.DurationHours);
+            insert.Parameters.AddWithValue("@formation", deployment.FormationType);
+            insert.Parameters.AddWithValue("@strategy", deployment.Strategy);
+            insert.Parameters.AddWithValue("@tactic", deployment.Tactic);
+            insert.Parameters.AddWithValue("@tanks", deployment.Tanks);
+            insert.Parameters.AddWithValue("@soldiers", deployment.Soldiers);
+            insert.Parameters.AddWithValue("@fighters", deployment.Fighters);
+            insert.Parameters.AddWithValue("@bombers", deployment.Bombers);
+            insert.Parameters.AddWithValue("@created", deployment.CreatedAtMs);
+            insert.Parameters.AddWithValue("@ends", deployment.EndAtMs);
+            insert.Parameters.AddWithValue("@warn", deployment.LastWarnMs);
+            insert.Parameters.AddWithValue("@announce", deployment.AnnounceMsgId);
+            deploymentId = Convert.ToInt64(insert.ExecuteScalar());
+        }
+
+        using (var contributor = con.CreateCommand())
+        {
+            contributor.Transaction = transaction;
+            contributor.CommandText = @"INSERT INTO DeploymentContributors
+                (DeploymentId,UserId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
+                VALUES(@deployment,@user,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
+            contributor.Parameters.AddWithValue("@deployment", deploymentId);
+            contributor.Parameters.AddWithValue("@user", deployment.InitiatorId);
+            contributor.Parameters.AddWithValue("@tanks", deployment.Tanks);
+            contributor.Parameters.AddWithValue("@soldiers", deployment.Soldiers);
+            contributor.Parameters.AddWithValue("@fighters", deployment.Fighters);
+            contributor.Parameters.AddWithValue("@bombers", deployment.Bombers);
+            contributor.Parameters.AddWithValue("@strategy", deployment.Strategy);
+            contributor.Parameters.AddWithValue("@tactic", deployment.Tactic);
+            contributor.ExecuteNonQuery();
+        }
+        ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
+            deployment.ChatId, "Tanks", deployment.Tanks);
+        ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
+            deployment.ChatId, "Planes", deployment.Fighters);
+        ReserveContributorModels(con, transaction, deploymentId, deployment.InitiatorId,
+            deployment.ChatId, "Bombers", deployment.Bombers);
+
+        transaction.Commit();
+        return deploymentId;
+    }
+
+    public static bool TryJoinDeploymentWithForces(
+        long deploymentId,
+        DeploymentContributor contributor,
+        long chatId,
+        long nowMs)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        using (var deduct = con.CreateCommand())
+        {
+            deduct.Transaction = transaction;
+            deduct.CommandText = @"UPDATE Countries SET
+                                      Tanks=Tanks-@tanks,
+                                      Soldiers=Soldiers-@soldiers,
+                                      Planes=Planes-@fighters,
+                                      Bombers=Bombers-@bombers
+                                    WHERE OwnerId=@owner AND ChatId=@chat
+                                      AND Tanks>=@tanks AND Soldiers>=@soldiers
+                                      AND Planes>=@fighters AND Bombers>=@bombers";
+            deduct.Parameters.AddWithValue("@tanks", contributor.Tanks);
+            deduct.Parameters.AddWithValue("@soldiers", contributor.Soldiers);
+            deduct.Parameters.AddWithValue("@fighters", contributor.Fighters);
+            deduct.Parameters.AddWithValue("@bombers", contributor.Bombers);
+            deduct.Parameters.AddWithValue("@owner", contributor.UserId);
+            deduct.Parameters.AddWithValue("@chat", chatId);
+            if (deduct.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        using (var update = con.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = @"UPDATE Deployments SET
+                                      Tanks=Tanks+@tanks,
+                                      Soldiers=Soldiers+@soldiers,
+                                      Fighters=Fighters+@fighters,
+                                      Bombers=Bombers+@bombers
+                                    WHERE Id=@deployment AND ChatId=@chat AND EndAtMs>@now";
+            update.Parameters.AddWithValue("@tanks", contributor.Tanks);
+            update.Parameters.AddWithValue("@soldiers", contributor.Soldiers);
+            update.Parameters.AddWithValue("@fighters", contributor.Fighters);
+            update.Parameters.AddWithValue("@bombers", contributor.Bombers);
+            update.Parameters.AddWithValue("@deployment", deploymentId);
+            update.Parameters.AddWithValue("@chat", chatId);
+            update.Parameters.AddWithValue("@now", nowMs);
+            if (update.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        using (var insert = con.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = @"INSERT INTO DeploymentContributors
+                (DeploymentId,UserId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
+                VALUES(@deployment,@user,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
+            insert.Parameters.AddWithValue("@deployment", deploymentId);
+            insert.Parameters.AddWithValue("@user", contributor.UserId);
+            insert.Parameters.AddWithValue("@tanks", contributor.Tanks);
+            insert.Parameters.AddWithValue("@soldiers", contributor.Soldiers);
+            insert.Parameters.AddWithValue("@fighters", contributor.Fighters);
+            insert.Parameters.AddWithValue("@bombers", contributor.Bombers);
+            insert.Parameters.AddWithValue("@strategy", contributor.Strategy);
+            insert.Parameters.AddWithValue("@tactic", contributor.Tactic);
+            insert.ExecuteNonQuery();
+        }
+        ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
+            chatId, "Tanks", contributor.Tanks);
+        ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
+            chatId, "Planes", contributor.Fighters);
+        ReserveContributorModels(con, transaction, deploymentId, contributor.UserId,
+            chatId, "Bombers", contributor.Bombers);
+
+        transaction.Commit();
+        return true;
     }
 
     // FIX(2): ذخیرهٔ MessageId پیام پین‌شدهٔ صف‌آرایی
@@ -2022,7 +2953,7 @@ static partial class Database
     {
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "DELETE FROM DeploymentContributors WHERE DeploymentId=@id; DELETE FROM Deployments WHERE Id=@id;";
+        cmd.CommandText = "DELETE FROM DeploymentContributorModels WHERE DeploymentId=@id; DELETE FROM DeploymentContributors WHERE DeploymentId=@id; DELETE FROM Deployments WHERE Id=@id;";
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
     }
@@ -2037,24 +2968,200 @@ static partial class Database
         cmd.ExecuteNonQuery();
     }
 
-    public static void CancelDeploymentForces(Deployment d)
+    public static bool WithdrawDeploymentContribution(
+        long deploymentId,
+        long userId,
+        long chatId,
+        out long tanks,
+        out long soldiers,
+        out long fighters,
+        out long bombers,
+        out bool deploymentDeleted)
     {
-        var contribs = GetDeploymentContributors(d.Id);
-        //  – defensive no longer touches target assets
-        foreach (var c in contribs)
+        tanks = soldiers = fighters = bombers = 0;
+        deploymentDeleted = false;
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        using (var totals = con.CreateCommand())
         {
-            var cc = GetCountry(c.UserId, d.ChatId);
-            if (cc != null)
+            totals.Transaction = transaction;
+            totals.CommandText = @"SELECT COALESCE(SUM(Tanks),0), COALESCE(SUM(Soldiers),0),
+                                          COALESCE(SUM(Fighters),0), COALESCE(SUM(Bombers),0), COUNT(*)
+                                   FROM DeploymentContributors
+                                   WHERE DeploymentId=@deployment AND UserId=@user";
+            totals.Parameters.AddWithValue("@deployment", deploymentId);
+            totals.Parameters.AddWithValue("@user", userId);
+            using var reader = totals.ExecuteReader();
+            if (!reader.Read() || reader.GetInt64(4) == 0)
             {
-                cc.Tanks += c.Tanks;
-                cc.Soldiers += c.Soldiers;
-                cc.Planes += c.Fighters;
-                cc.Bombers += c.Bombers;
-                UpdateCountryFull(cc);
-                ReconcileDefense(c.UserId, d.ChatId);
+                transaction.Rollback();
+                return false;
+            }
+            tanks = reader.GetInt64(0);
+            soldiers = reader.GetInt64(1);
+            fighters = reader.GetInt64(2);
+            bombers = reader.GetInt64(3);
+        }
+
+        using (var restore = con.CreateCommand())
+        {
+            restore.Transaction = transaction;
+            restore.CommandText = @"UPDATE Countries SET
+                                      Tanks=Tanks+@tanks,
+                                      Soldiers=Soldiers+@soldiers,
+                                      Planes=Planes+@fighters,
+                                      Bombers=Bombers+@bombers
+                                    WHERE OwnerId=@owner AND ChatId=@chat";
+            restore.Parameters.AddWithValue("@tanks", tanks);
+            restore.Parameters.AddWithValue("@soldiers", soldiers);
+            restore.Parameters.AddWithValue("@fighters", fighters);
+            restore.Parameters.AddWithValue("@bombers", bombers);
+            restore.Parameters.AddWithValue("@owner", userId);
+            restore.Parameters.AddWithValue("@chat", chatId);
+            if (restore.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
             }
         }
-        DeleteDeployment(d.Id);
+
+        using (var deleteModels = con.CreateCommand())
+        {
+            deleteModels.Transaction = transaction;
+            deleteModels.CommandText = @"DELETE FROM DeploymentContributorModels
+                                         WHERE DeploymentId=@deployment AND UserId=@user";
+            deleteModels.Parameters.AddWithValue("@deployment", deploymentId);
+            deleteModels.Parameters.AddWithValue("@user", userId);
+            deleteModels.ExecuteNonQuery();
+        }
+
+        using (var deleteContribution = con.CreateCommand())
+        {
+            deleteContribution.Transaction = transaction;
+            deleteContribution.CommandText = @"DELETE FROM DeploymentContributors
+                                               WHERE DeploymentId=@deployment AND UserId=@user";
+            deleteContribution.Parameters.AddWithValue("@deployment", deploymentId);
+            deleteContribution.Parameters.AddWithValue("@user", userId);
+            deleteContribution.ExecuteNonQuery();
+        }
+
+        using (var updateDeployment = con.CreateCommand())
+        {
+            updateDeployment.Transaction = transaction;
+            updateDeployment.CommandText = @"UPDATE Deployments SET
+                                               Tanks=MAX(0,Tanks-@tanks),
+                                               Soldiers=MAX(0,Soldiers-@soldiers),
+                                               Fighters=MAX(0,Fighters-@fighters),
+                                               Bombers=MAX(0,Bombers-@bombers)
+                                             WHERE Id=@deployment";
+            updateDeployment.Parameters.AddWithValue("@tanks", tanks);
+            updateDeployment.Parameters.AddWithValue("@soldiers", soldiers);
+            updateDeployment.Parameters.AddWithValue("@fighters", fighters);
+            updateDeployment.Parameters.AddWithValue("@bombers", bombers);
+            updateDeployment.Parameters.AddWithValue("@deployment", deploymentId);
+            if (updateDeployment.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        using (var remaining = con.CreateCommand())
+        {
+            remaining.Transaction = transaction;
+            remaining.CommandText = "SELECT COUNT(*) FROM DeploymentContributors WHERE DeploymentId=@deployment";
+            remaining.Parameters.AddWithValue("@deployment", deploymentId);
+            deploymentDeleted = Convert.ToInt32(remaining.ExecuteScalar()) == 0;
+        }
+        if (deploymentDeleted)
+        {
+            using var deleteDeployment = con.CreateCommand();
+            deleteDeployment.Transaction = transaction;
+            deleteDeployment.CommandText = "DELETE FROM Deployments WHERE Id=@deployment";
+            deleteDeployment.Parameters.AddWithValue("@deployment", deploymentId);
+            deleteDeployment.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return true;
+    }
+
+    public static bool ReturnDeploymentForcesAndDelete(
+        long deploymentId,
+        long chatId,
+        IReadOnlyList<(long UserId, long Tanks, long Soldiers, long Fighters, long Bombers)> returns)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+
+        using (var claim = con.CreateCommand())
+        {
+            claim.Transaction = transaction;
+            claim.CommandText = "DELETE FROM Deployments WHERE Id=@id";
+            claim.Parameters.AddWithValue("@id", deploymentId);
+            if (claim.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
+        foreach (var item in returns)
+        {
+            using var restore = con.CreateCommand();
+            restore.Transaction = transaction;
+            restore.CommandText = @"UPDATE Countries SET
+                                      Tanks=Tanks+@tanks,
+                                      Soldiers=Soldiers+@soldiers,
+                                      Planes=Planes+@fighters,
+                                      Bombers=Bombers+@bombers
+                                    WHERE OwnerId=@owner AND ChatId=@chat";
+            restore.Parameters.AddWithValue("@tanks", item.Tanks);
+            restore.Parameters.AddWithValue("@soldiers", item.Soldiers);
+            restore.Parameters.AddWithValue("@fighters", item.Fighters);
+            restore.Parameters.AddWithValue("@bombers", item.Bombers);
+            restore.Parameters.AddWithValue("@owner", item.UserId);
+            restore.Parameters.AddWithValue("@chat", chatId);
+            restore.ExecuteNonQuery();
+        }
+
+        using (var contributorModels = con.CreateCommand())
+        {
+            contributorModels.Transaction = transaction;
+            contributorModels.CommandText = "DELETE FROM DeploymentContributorModels WHERE DeploymentId=@id";
+            contributorModels.Parameters.AddWithValue("@id", deploymentId);
+            contributorModels.ExecuteNonQuery();
+        }
+
+        using (var contributors = con.CreateCommand())
+        {
+            contributors.Transaction = transaction;
+            contributors.CommandText = "DELETE FROM DeploymentContributors WHERE DeploymentId=@id";
+            contributors.Parameters.AddWithValue("@id", deploymentId);
+            contributors.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return true;
+    }
+
+    public static void CancelDeploymentForces(Deployment d)
+    {
+        var returns = GetDeploymentContributors(d.Id)
+            .GroupBy(x => x.UserId)
+            .Select(g => (
+                UserId: g.Key,
+                Tanks: g.Sum(x => x.Tanks),
+                Soldiers: g.Sum(x => x.Soldiers),
+                Fighters: g.Sum(x => x.Fighters),
+                Bombers: g.Sum(x => x.Bombers)))
+            .ToList();
+        if (ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns))
+        {
+            foreach (long contributorId in returns.Select(x => x.UserId))
+                ReconcileDefense(contributorId, d.ChatId);
+        }
     }
 
     public static Deployment? GetDeploymentById(long id)
@@ -2085,6 +3192,134 @@ static partial class Database
         cmd.Parameters.AddWithValue("@b", d.Bombers);
         cmd.Parameters.AddWithValue("@id", d.Id);
         cmd.ExecuteNonQuery();
+    }
+
+    public static void ApplyDefensiveDeploymentLosses(
+        long chatId,
+        long targetUserId,
+        long contributorUserId,
+        long tanksLost,
+        long soldiersLost,
+        long fightersLost,
+        long bombersLost,
+        IReadOnlyCollection<long>? deploymentIds = null)
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+        ApplyDefensiveDeploymentLosses(con, transaction, chatId, targetUserId, contributorUserId,
+            tanksLost, soldiersLost, fightersLost, bombersLost, deploymentIds);
+        transaction.Commit();
+    }
+
+    private static void ApplyDefensiveDeploymentLosses(
+        SqliteConnection con,
+        SqliteTransaction transaction,
+        long chatId,
+        long targetUserId,
+        long contributorUserId,
+        long tanksLost,
+        long soldiersLost,
+        long fightersLost,
+        long bombersLost,
+        IReadOnlyCollection<long>? deploymentIds)
+    {
+        if (deploymentIds != null && deploymentIds.Count == 0) return;
+        var rows = new List<(long Id, long DeploymentId, long Tanks, long Soldiers, long Fighters, long Bombers)>();
+        using (var select = con.CreateCommand())
+        {
+            select.Transaction = transaction;
+            string idFilter = "";
+            if (deploymentIds != null)
+            {
+                var parameterNames = deploymentIds.Select((_, i) => $"@deployment{i}").ToArray();
+                idFilter = $" AND d.Id IN ({string.Join(",", parameterNames)})";
+                int i = 0;
+                foreach (long id in deploymentIds)
+                    select.Parameters.AddWithValue($"@deployment{i++}", id);
+            }
+            select.CommandText = @"SELECT dc.Id,dc.DeploymentId,dc.Tanks,dc.Soldiers,dc.Fighters,dc.Bombers
+                                   FROM DeploymentContributors dc
+                                   JOIN Deployments d ON d.Id=dc.DeploymentId
+                                   WHERE d.ChatId=@chat AND d.TargetUserId=@target
+                                     AND d.Type='Defensive' AND dc.UserId=@user" + idFilter +
+                                 " ORDER BY dc.Id";
+            select.Parameters.AddWithValue("@chat", chatId);
+            select.Parameters.AddWithValue("@target", targetUserId);
+            select.Parameters.AddWithValue("@user", contributorUserId);
+            using var reader = select.ExecuteReader();
+            while (reader.Read())
+                rows.Add((reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5)));
+        }
+
+        static long[] AllocateExact(long requestedLoss, long[] amounts)
+        {
+            long total = amounts.Sum();
+            long target = Math.Min(Math.Max(0, requestedLoss), total);
+            var allocated = new long[amounts.Length];
+            if (target == 0 || total == 0) return allocated;
+
+            var remainders = new decimal[amounts.Length];
+            long assigned = 0;
+            for (int i = 0; i < amounts.Length; i++)
+            {
+                decimal exact = (decimal)target * amounts[i] / total;
+                allocated[i] = Math.Min(amounts[i], (long)decimal.Floor(exact));
+                remainders[i] = exact - allocated[i];
+                assigned += allocated[i];
+            }
+            foreach (int i in Enumerable.Range(0, amounts.Length)
+                         .OrderByDescending(i => remainders[i]).ThenBy(i => i))
+            {
+                if (assigned >= target) break;
+                if (allocated[i] >= amounts[i]) continue;
+                allocated[i]++;
+                assigned++;
+            }
+            return allocated;
+        }
+
+        long[] allocatedT = AllocateExact(tanksLost, rows.Select(x => x.Tanks).ToArray());
+        long[] allocatedS = AllocateExact(soldiersLost, rows.Select(x => x.Soldiers).ToArray());
+        long[] allocatedF = AllocateExact(fightersLost, rows.Select(x => x.Fighters).ToArray());
+        long[] allocatedB = AllocateExact(bombersLost, rows.Select(x => x.Bombers).ToArray());
+
+        for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            long lt = allocatedT[rowIndex];
+            long ls = allocatedS[rowIndex];
+            long lf = allocatedF[rowIndex];
+            long lb = allocatedB[rowIndex];
+            ReduceContributorModels(con, transaction, row.DeploymentId, contributorUserId, "Tanks", lt);
+            ReduceContributorModels(con, transaction, row.DeploymentId, contributorUserId, "Planes", lf);
+            ReduceContributorModels(con, transaction, row.DeploymentId, contributorUserId, "Bombers", lb);
+
+            using var updateContributor = con.CreateCommand();
+            updateContributor.Transaction = transaction;
+            updateContributor.CommandText = @"UPDATE DeploymentContributors SET
+                                                 Tanks=MAX(0,Tanks-@t), Soldiers=MAX(0,Soldiers-@s),
+                                                 Fighters=MAX(0,Fighters-@f), Bombers=MAX(0,Bombers-@b)
+                                               WHERE Id=@id";
+            updateContributor.Parameters.AddWithValue("@t", lt);
+            updateContributor.Parameters.AddWithValue("@s", ls);
+            updateContributor.Parameters.AddWithValue("@f", lf);
+            updateContributor.Parameters.AddWithValue("@b", lb);
+            updateContributor.Parameters.AddWithValue("@id", row.Id);
+            updateContributor.ExecuteNonQuery();
+
+            using var updateDeployment = con.CreateCommand();
+            updateDeployment.Transaction = transaction;
+            updateDeployment.CommandText = @"UPDATE Deployments SET
+                                                Tanks=MAX(0,Tanks-@t), Soldiers=MAX(0,Soldiers-@s),
+                                                Fighters=MAX(0,Fighters-@f), Bombers=MAX(0,Bombers-@b)
+                                              WHERE Id=@id";
+            updateDeployment.Parameters.AddWithValue("@t", lt);
+            updateDeployment.Parameters.AddWithValue("@s", ls);
+            updateDeployment.Parameters.AddWithValue("@f", lf);
+            updateDeployment.Parameters.AddWithValue("@b", lb);
+            updateDeployment.Parameters.AddWithValue("@id", row.DeploymentId);
+            updateDeployment.ExecuteNonQuery();
+        }
     }
 
     public static void AddDeploymentContributor(DeploymentContributor c)
@@ -2337,63 +3572,52 @@ static partial class Database
     public static void AddAttackShieldHit(long defenderId, long chatId)
     {
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        const long resetAfterMs = 24 * 3600_000L;
+        const long shieldDurationMs = 16 * 3600_000L;
         using var con = OpenCon();
-        // Get current count
-        using var cmdSel = con.CreateCommand();
-        cmdSel.CommandText = "SELECT AttackCount, ShieldUntilMs FROM AttackShields WHERE OwnerId=@o AND ChatId=@c";
-        cmdSel.Parameters.AddWithValue("@o", defenderId);
-        cmdSel.Parameters.AddWithValue("@c", chatId);
-        int count = 0;
-        long existingUntil = 0;
-        using (var r = cmdSel.ExecuteReader())
-        {
-            if (r.Read())
-            {
-                count = r.IsDBNull(0) ? 0 : r.GetInt32(0);
-                existingUntil = r.IsDBNull(1) ? 0 : r.GetInt64(1);
-            }
-        }
-        // If shield active, don't count? But spec says 5 attacks => 16h shield, so after shield we reset
-        if (existingUntil > now) return; // currently shielded, ignore
-
-        // Check if last attack was more than 24h ago, reset count
-        long lastMs = 0;
-        using (var cmdLast = con.CreateCommand())
-        {
-            cmdLast.CommandText = "SELECT LastAttackMs FROM AttackShields WHERE OwnerId=@o AND ChatId=@c";
-            cmdLast.Parameters.AddWithValue("@o", defenderId);
-            cmdLast.Parameters.AddWithValue("@c", chatId);
-            var v = cmdLast.ExecuteScalar();
-            if (v != null && v != DBNull.Value) lastMs = Convert.ToInt64(v);
-        }
-        if (lastMs > 0 && now - lastMs > 24 * 3600_000L)
-            count = 0;
-
-        count++;
-
-        if (count >= 5)
-        {
-            long shieldUntil = now + 16 * 3600_000L;
-            using var cmdUp = con.CreateCommand();
-            cmdUp.CommandText = @"INSERT INTO AttackShields(OwnerId,ChatId,ShieldUntilMs,AttackCount,LastAttackMs) VALUES(@o,@c,@until,0,@now)
-                                  ON CONFLICT(OwnerId,ChatId) DO UPDATE SET ShieldUntilMs=@until, AttackCount=0, LastAttackMs=@now";
-            cmdUp.Parameters.AddWithValue("@o", defenderId);
-            cmdUp.Parameters.AddWithValue("@c", chatId);
-            cmdUp.Parameters.AddWithValue("@until", shieldUntil);
-            cmdUp.Parameters.AddWithValue("@now", now);
-            cmdUp.ExecuteNonQuery();
-        }
-        else
-        {
-            using var cmdUp = con.CreateCommand();
-            cmdUp.CommandText = @"INSERT INTO AttackShields(OwnerId,ChatId,ShieldUntilMs,AttackCount,LastAttackMs) VALUES(@o,@c,0,@cnt,@now)
-                                  ON CONFLICT(OwnerId,ChatId) DO UPDATE SET AttackCount=@cnt, LastAttackMs=@now";
-            cmdUp.Parameters.AddWithValue("@o", defenderId);
-            cmdUp.Parameters.AddWithValue("@c", chatId);
-            cmdUp.Parameters.AddWithValue("@cnt", count);
-            cmdUp.Parameters.AddWithValue("@now", now);
-            cmdUp.ExecuteNonQuery();
-        }
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO AttackShields(OwnerId,ChatId,ShieldUntilMs,AttackCount,LastAttackMs)
+            VALUES(@owner,@chat,0,1,@now)
+            ON CONFLICT(OwnerId,ChatId) DO UPDATE SET
+                ShieldUntilMs = CASE
+                    WHEN AttackShields.ShieldUntilMs > @now
+                        THEN AttackShields.ShieldUntilMs
+                    WHEN (CASE
+                            WHEN AttackShields.LastAttackMs > 0
+                             AND @now-AttackShields.LastAttackMs > @resetAfter
+                                THEN 1
+                            ELSE AttackShields.AttackCount+1
+                          END) >= 5
+                        THEN @now+@shieldDuration
+                    ELSE 0
+                END,
+                AttackCount = CASE
+                    WHEN AttackShields.ShieldUntilMs > @now
+                        THEN AttackShields.AttackCount
+                    WHEN (CASE
+                            WHEN AttackShields.LastAttackMs > 0
+                             AND @now-AttackShields.LastAttackMs > @resetAfter
+                                THEN 1
+                            ELSE AttackShields.AttackCount+1
+                          END) >= 5
+                        THEN 0
+                    WHEN AttackShields.LastAttackMs > 0
+                     AND @now-AttackShields.LastAttackMs > @resetAfter
+                        THEN 1
+                    ELSE AttackShields.AttackCount+1
+                END,
+                LastAttackMs = CASE
+                    WHEN AttackShields.ShieldUntilMs > @now
+                        THEN AttackShields.LastAttackMs
+                    ELSE @now
+                END;";
+        cmd.Parameters.AddWithValue("@owner", defenderId);
+        cmd.Parameters.AddWithValue("@chat", chatId);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.Parameters.AddWithValue("@resetAfter", resetAfterMs);
+        cmd.Parameters.AddWithValue("@shieldDuration", shieldDurationMs);
+        cmd.ExecuteNonQuery();
     }
 
     public static void ClearAttackShield(long ownerId, long chatId)
@@ -2509,16 +3733,18 @@ static partial class Database
 }
 
 // ============================================================
-//  BattleResult & WarEngine — موتور جنگ (در فایل WarEngine.cs)
+//  Battle orchestration — 1939 ground and air engine
 // ============================================================
 partial class Program
 {
-    static readonly string BOT_TOKEN = Environment.GetEnvironmentVariable("BOT_TOKEN") ?? "8829140567:AAFcOCalUHtKok8Y-QsbZBfChWWNQYy3VJ4";
+    static readonly string BOT_TOKEN = Environment.GetEnvironmentVariable("BOT_TOKEN")
+        ?? throw new InvalidOperationException("BOT_TOKEN environment variable is required.");
     const long OWNER_ID = 8248899977L;
     static TelegramBotClient bot = null!;
     static readonly ConcurrentDictionary<long, UserSession> sessions = new();
     static readonly Random rng = new();
     static readonly ConcurrentDictionary<long, SemaphoreSlim> userLocks = new();
+    static readonly ConcurrentDictionary<(long ChatId, long OwnerId), SemaphoreSlim> countryMutationLocks = new();
     static readonly HashSet<int> processedUpdates = new();
     static readonly object processedLock = new();
 
@@ -2538,6 +3764,16 @@ partial class Program
 
     static Timer? assetUpdateTimer;
     static Timer? transferTimer;
+    static readonly SemaphoreSlim transferProcessorLock = new(1, 1);
+    static readonly SemaphoreSlim deploymentProcessorLock = new(1, 1);
+    static readonly SemaphoreSlim navalProcessorLock = new(1, 1);
+    static readonly JsonSerializerOptions BattleJsonOptions = new()
+    {
+        IncludeFields = true,
+        PropertyNameCaseInsensitive = true
+    };
+    static int databaseMaintenanceRunning = 0;
+    static int activeUpdateHandlers = 0;
     static int assetUpdateRunning = 0;
     static DateTime lastAssetRunUtc = DateTime.MinValue;
 
@@ -2559,8 +3795,6 @@ partial class Program
     static string UpdateMode = "daily";
     static int UpdateValue = 1200;
     static string SpecialPhotoFileId = "";
-
-    static readonly HashSet<long> KnownGroups = new();
 
     static readonly int[] FactoryUpgradeCost = { 0, 5, 12, 30, 80 };
     static readonly int[] PortUpgradeCost = { 0, 13, 25, 50, 75 };
@@ -2602,7 +3836,7 @@ partial class Program
         "• <b>ساخت هواپیما</b> — P-36 / I-16 / Bf 109 + بمب‌افکن B-17 / DB-3 / He 111.\n" +
         "• <b>پدافند</b> — توپ 76mm ضد هوایی.\n" +
         "• در حمله و دفاع می‌توانید برای هر مدل جداگانه تعداد / درصد تعیین کنید.\n" +
-        "• موتور جنگ ترکیب وزنی مدل‌ها با حداقل 2% تاثیر + امتیاز تنوع تا 8% و گزارش هوشمند پویا.\n\n" +
+        "• موتور جنگ هر مدل را با مشخصات واقعی ۱۹۳۹، مهمات و سوخت داخلی همان مدل شبیه‌سازی می‌کند.\n\n" +
 
         "⚓ <b>نیروی دریایی — ناوگان</b>\n" +
         "• دستور: <b>خرید ناو / خرید کشتی / خرید قایق / نیروی دریایی / ناوگان</b>\n" +
@@ -2615,17 +3849,12 @@ partial class Program
         "• <b>آسیب نبردناو</b>: عادی فقط آسیب نه انهدام مگر یک‌طرفه. تعمیر: <b>تعمیر ناو / تعمیر ناوگان</b> هزینه 60% قیمت × درصد آسیب.\n" +
         "• انتقال نبردناو: <b>نمیتوانید به این کشور نبردناو ترنسفر کنید، تعداد نبرد ناو: 3</b>\n\n" +
 
-        "🗡 <b>حمله — زمینی/هوایی و دریایی</b>\n" +
-        "• <b>حمله</b> — هدف (Country (OwnerName)، متحدان حذف) → نوع: ⚔️ زمینی/هوایی یا ⚓ دریایی.\n" +
-        "• زمینی: هجوم منسجم / محاصره و ضربه + تاکتیک مستقیم/سبک/پراکنده/متحرک. هوایی: برتری/بمباران.\n" +
-        "• دریایی:\n" +
-        "  1️⃣ <b>نابودی ناوگان اصلی دشمن</b> — حمله غافلگیرانه به پایگاه‌های دریایی / کشاندن به نبرد تعیین‌کننده\n" +
-        "  2️⃣ <b>عملیات آبی‌خاکی</b> — بمباران دریایی / پیاده‌سازی موجی\n" +
-        "  دفاع: استحکامات و موانع ساحلی / ضدحمله سریع / حمله و عقب‌نشینی / کمین دریایی\n" +
-        "• برای هر مدل قایق/زیر/نبردناو جداگانه تعداد اعزام.\n" +
-        "• <b>تاخیری</b>: ناوگان پس از آپدیت دارایی می‌رسد + اطلاع به مدافع. غنیمت 1.5x زمینی. پیروزی >90% → بندر مدافع -1.\n" +
-        "• قوانین: حمله به <1/4 قدرت شما ممنوع. با نبردناو وقتی دریایی دشمن <3/4 غیرممکن. 5 حمله در 24h → 16h سپر.\n" +
-        "• قفل 30 دقیقه بعد آپدیت + سپر 48h تازه‌ساخت.\n\n" +
+        "🗡 <b>حمله زمینی و هوایی — موتور ۱۹۳۹</b>\n" +
+        "• میدان هر نبرد ۴۰×۴۰ کیلومتر و حداکثر زمان عملیات ۲۴ ساعت است.\n" +
+        "• زمین و آب‌وهوا پس از ثبت فرمان‌ها به‌صورت منسجم تولید می‌شوند.\n" +
+        "• فرماندهان بر اساس استراتژی، تاکتیک، اطلاعات کشف‌شده و وضعیت واقعی میدان تصمیم می‌گیرند.\n" +
+        "• پیروزی سنگین: بیش از ۳۵km پیشروی مؤثر با بازگشت حداقل ۵۰۰۰ سرباز و ۵۰ تانک سالم.\n" +
+        "• موتور دریایی فعلاً غیرفعال است.\n\n" +
 
         "🛡 <b>دفاع — چندمدلی و دریایی</b>\n" +
         "• <b>وضعیت دفاع</b> در پیوی: درصد برای هر مدل تانک/جنگنده/قایق/زیر جداگانه (20-100%). حداقل 20% همیشه در دفاع.\n" +
@@ -2636,7 +3865,7 @@ partial class Program
 
         "🚚 <b>عملیات مشترک — ترنسفر و صف‌آرایی</b>\n" +
         "• <b>ترنسفر</b> — پول/آهن/سرباز/تانک/جنگنده/بمب‌افکن/قایق/زیر/نبردناو به هم‌اتحادی (پیوی). حفظ مدل حتی با تغییر فکشن. هر مدل مقدار جداگانه. نبردناو max3.\n" +
-        "• <b>صف آرایی تهاجمی/دفاعی</b> — همیشه یکپارچه. سازنده استراتژی+تاکتیک.\n" +
+        "• <b>صف‌آرایی تهاجمی/دفاعی</b> فعال است و نیروهای چند کشور در موتور جدید به‌صورت مشارکت‌کننده مستقل محاسبه می‌شوند.\n" +
         "• نیروهای دفاعی در دارایی دیده نمی‌شوند، فقط در <b>جزئیات نظامی → اطلاعات نیروهای صف آرایی</b> گروه‌بندی فکشن با مجموع. پیام گروه فقط مشارکت‌کنندگان + 🎯 استراتژی: X | تاکتیک: Y. پس از join پیام پین ویرایش می‌شود.\n" +
         "• <b>اعزام نیرو</b> / دکمه ⚔️ مشارکت. <b>لغو صف آرایی</b> → آنپین+حذف.\n\n" +
 
@@ -2662,6 +3891,83 @@ partial class Program
         return DateTime.UtcNow.AddHours(3.5);
     }
 
+    static async Task RecoverPersistedBattleJobs(CancellationToken ct)
+    {
+        foreach (var job in Database.GetRecoverableBattleJobs())
+        {
+            if (!job.JobType.Equals("Direct", StringComparison.OrdinalIgnoreCase))
+            {
+                if (job.JobType.Equals("Deployment", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var deploymentContext = JsonSerializer.Deserialize<BattleJobContext>(job.ContextJson, BattleJsonOptions);
+                        if (deploymentContext != null && Database.GetDeploymentById(deploymentContext.DeploymentId) == null)
+                            Database.UpdateBattleJob(job.BattleId, "Completed", job.ResultJson);
+                        else
+                            Database.UpdateBattleJob(job.BattleId, "Pending", job.ResultJson);
+                    }
+                    catch (Exception ex) { Database.UpdateBattleJob(job.BattleId, "Pending", error: ex.Message); }
+                }
+                continue;
+            }
+            try
+            {
+                var request = JsonSerializer.Deserialize<BattleRequest>(job.RequestJson, BattleJsonOptions)
+                    ?? throw new InvalidOperationException("Stored request is invalid.");
+                var context = JsonSerializer.Deserialize<BattleJobContext>(job.ContextJson, BattleJsonOptions)
+                    ?? throw new InvalidOperationException("Stored context is invalid.");
+                BattleResult result;
+                if (!string.IsNullOrWhiteSpace(job.ResultJson))
+                    result = JsonSerializer.Deserialize<BattleResult>(job.ResultJson, BattleJsonOptions)
+                        ?? throw new InvalidOperationException("Stored result is invalid.");
+                else
+                {
+                    Database.UpdateBattleJob(job.BattleId, "Running");
+                    result = await BattleExecutionScheduler.EnqueueAsync(request, ct);
+                    Database.UpdateBattleJob(job.BattleId, "Resolved",
+                        JsonSerializer.Serialize(result, BattleJsonOptions));
+                }
+
+                var attacker = Database.GetCountry(context.AttackerId, context.ChatId);
+                var defender = Database.GetCountry(context.DefenderId, context.ChatId);
+                if (attacker == null || defender == null)
+                {
+                    Database.UpdateBattleJob(job.BattleId, "Failed", error: "Country no longer exists.");
+                    continue;
+                }
+                var ownDefense = request.Defenders.FirstOrDefault(x => x.OwnerId == context.DefenderId)
+                    ?? request.Defenders.First();
+                var deploymentParticipants = request.Defenders.Where(x => !ReferenceEquals(x, ownDefense)).ToList();
+                var defensiveDeployments = context.DefensiveDeploymentIds
+                    .Select(Database.GetDeploymentById).Where(x => x != null).Cast<Deployment>().ToList();
+                bool applied = ApplyDirectBattleLosses(job.BattleId, attacker, defender, ownDefense,
+                    deploymentParticipants, defensiveDeployments, result);
+                if (applied)
+                {
+                    try { Database.SaveBattleResult(request, result); } catch { }
+                    IncAttackCount(context.ChatId, context.AttackerId);
+                    string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
+                    Database.IncDailyDefendCount(context.DefenderId, today);
+                    Database.SetAttackerFlag(context.AttackerId, today);
+                    Database.AddAttackShieldHit(context.DefenderId, context.ChatId);
+                    try { await SendPermanent(context.AttackerId, result.AttackerReport, ct: ct); } catch { }
+                    try { await SendPermanent(context.DefenderId, result.DefenderReport, ct: ct); } catch { }
+                    try { await SendPermanent(context.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
+                    await ProcessStrategicBattleOutcome(context.AttackerId, context.DefenderId,
+                        context.ChatId, result, ct);
+                }
+                Database.UpdateBattleJob(job.BattleId, "Completed",
+                    JsonSerializer.Serialize(result, BattleJsonOptions));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BATTLE RECOVERY ERR] id={job.BattleId}: {ex}");
+                Database.UpdateBattleJob(job.BattleId, "Pending", error: ex.Message);
+            }
+        }
+    }
+
     static async Task Main()
     {
         Database.Init();
@@ -2677,7 +3983,7 @@ partial class Program
                 var proxy = new System.Net.WebProxy(proxyUrl);
                 var httpClient = new HttpClient(new HttpClientHandler { Proxy = proxy, UseProxy = true });
                 bot = new TelegramBotClient(BOT_TOKEN, httpClient);
-                Console.WriteLine($"[BOT] Using proxy {proxyUrl}");
+                Console.WriteLine("[BOT] Using configured proxy");
             }
             else
             {
@@ -2691,6 +3997,7 @@ partial class Program
         }
         Console.WriteLine("Bot starting...");
         using var cts = new CancellationTokenSource();
+        await RecoverPersistedBattleJobs(cts.Token);
         bot.StartReceiving(
             updateHandler: HandleUpdateAsync,
             pollingErrorHandler: HandlePollingErrorAsync,
@@ -2703,6 +4010,111 @@ partial class Program
         StartActivityStatsTimer();
         StartLeaderboardTimer();
         await Task.Delay(-1);
+    }
+
+    static async Task<(bool Success, string Error)> RestoreDatabaseSafely(
+        string uploadedPath,
+        CancellationToken ct)
+    {
+        if (!Database.ValidateDatabaseFile(uploadedPath, out string validationError))
+            return (false, $"فایل دیتابیس معتبر نیست: {validationError}");
+
+        if (Interlocked.CompareExchange(ref databaseMaintenanceRunning, 1, 0) != 0)
+            return (false, "عملیات نگهداری دیگری در حال اجراست.");
+
+        bool transferLocked = false;
+        bool deploymentLocked = false;
+        bool navalLocked = false;
+        string rollbackPath = $"gamedata_pre_restore_{DateTime.UtcNow:yyyyMMdd_HHmmss}.db";
+
+        assetUpdateTimer?.Dispose();
+        transferTimer?.Dispose();
+        activityStatsTimer?.Dispose();
+        leaderboardTimer?.Dispose();
+
+        try
+        {
+            DateTime waitUntil = DateTime.UtcNow.AddMinutes(2);
+            while ((Volatile.Read(ref activeUpdateHandlers) > 1 ||
+                    Volatile.Read(ref assetUpdateRunning) != 0) &&
+                   DateTime.UtcNow < waitUntil)
+            {
+                await Task.Delay(100, ct);
+            }
+            if (Volatile.Read(ref activeUpdateHandlers) > 1 ||
+                Volatile.Read(ref assetUpdateRunning) != 0)
+            {
+                return (false, "ربات هنوز در حال پردازش عملیات دیگری است؛ کمی بعد دوباره تلاش کنید.");
+            }
+
+            await transferProcessorLock.WaitAsync(ct);
+            transferLocked = true;
+            await deploymentProcessorLock.WaitAsync(ct);
+            deploymentLocked = true;
+            await navalProcessorLock.WaitAsync(ct);
+            navalLocked = true;
+
+            Database.CreateConsistentBackup(rollbackPath);
+            Database.CheckpointAndClearPools();
+
+            System.IO.File.Move(uploadedPath, "gamedata.db", true);
+            TryDeleteSqliteSidecar("gamedata.db-wal");
+            TryDeleteSqliteSidecar("gamedata.db-shm");
+
+            try
+            {
+                Database.Init();
+                Database.InitActivity();
+                Database.InitAdminPanel(OWNER_ID);
+                LoadSettings();
+            }
+            catch
+            {
+                SqliteConnection.ClearAllPools();
+                System.IO.File.Copy(rollbackPath, "gamedata.db", true);
+                TryDeleteSqliteSidecar("gamedata.db-wal");
+                TryDeleteSqliteSidecar("gamedata.db-shm");
+                Database.Init();
+                Database.InitActivity();
+                Database.InitAdminPanel(OWNER_ID);
+                LoadSettings();
+                throw;
+            }
+
+            return (true, "");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return (false, "عملیات بازیابی لغو شد.");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+        finally
+        {
+            if (navalLocked) navalProcessorLock.Release();
+            if (deploymentLocked) deploymentProcessorLock.Release();
+            if (transferLocked) transferProcessorLock.Release();
+            Volatile.Write(ref databaseMaintenanceRunning, 0);
+            StartAssetUpdateTimer();
+            StartTransferTimer();
+            StartActivityStatsTimer();
+            StartLeaderboardTimer();
+        }
+    }
+
+    static void TryDeleteSqliteSidecar(string path)
+    {
+        try
+        {
+            if (System.IO.File.Exists(path))
+                System.IO.File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SQLITE SIDECAR CLEANUP ERR] {path}: {ex.Message}");
+        }
     }
 
     static void LoadSettings()
@@ -2735,6 +4147,133 @@ partial class Program
         int.TryParse(NormalizeDigits(s), NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
     static string InventoryLine(long amount) =>
         amount > 0 ? $"موجودی: {amount:N0}" : "⚠️ موجودی نداری";
+
+    static bool HasAvailableForces(
+        Country country,
+        long tanks,
+        long soldiers,
+        long fighters,
+        long bombers) =>
+        tanks >= 0 && soldiers >= 0 && fighters >= 0 && bombers >= 0 &&
+        country.Tanks >= tanks &&
+        country.Soldiers >= soldiers &&
+        country.Planes >= fighters &&
+        country.Bombers >= bombers;
+
+    static string AvailableForcesText(Country country) =>
+        $"🛡 تانک: {country.Tanks:N0}\n" +
+        $"🪖 سرباز: {country.Soldiers:N0}\n" +
+        $"✈️ جنگنده: {country.Planes:N0}\n" +
+        $"🛩 بمب‌افکن: {country.Bombers:N0}";
+
+    static long GetCountryResourceAmount(Country country, string resourceType) => resourceType switch
+    {
+        "money" => country.Money,
+        "iron" => country.Iron,
+        "soldiers" => country.Soldiers,
+        "tanks" => country.Tanks,
+        "planes" => country.Planes,
+        "bombers" => country.Bombers,
+        "boats" => country.Boats,
+        "submarines" => country.Submarines,
+        "battleships" => country.Battleships,
+        _ => 0
+    };
+
+    static async Task<bool> TryCreateTransfersSafely(
+        long senderId,
+        long chatId,
+        long allianceId,
+        long receiverId,
+        string resourceType,
+        IReadOnlyList<(string ModelName, long Amount)> shipments,
+        long arriveAtMs,
+        CancellationToken ct)
+    {
+        var locks = await AcquireCountryMutationLocks(chatId, new[] { senderId }, ct);
+        try
+        {
+            return Database.TryCreateTransfers(
+                senderId,
+                chatId,
+                allianceId,
+                receiverId,
+                resourceType,
+                shipments,
+                arriveAtMs);
+        }
+        finally
+        {
+            ReleaseCountryMutationLocks(locks);
+        }
+    }
+
+    static async Task<long> TryCreateDeploymentSafely(Deployment deployment, CancellationToken ct)
+    {
+        await deploymentProcessorLock.WaitAsync(ct);
+        List<SemaphoreSlim>? locks = null;
+        try
+        {
+            locks = await AcquireCountryMutationLocks(
+                deployment.ChatId,
+                new[] { deployment.InitiatorId },
+                ct);
+            return Database.TryCreateDeploymentWithForces(deployment);
+        }
+        finally
+        {
+            if (locks != null) ReleaseCountryMutationLocks(locks);
+            deploymentProcessorLock.Release();
+        }
+    }
+
+    static async Task<bool> TryJoinDeploymentSafely(
+        Deployment deployment,
+        DeploymentContributor contributor,
+        CancellationToken ct)
+    {
+        await deploymentProcessorLock.WaitAsync(ct);
+        List<SemaphoreSlim>? locks = null;
+        try
+        {
+            locks = await AcquireCountryMutationLocks(
+                deployment.ChatId,
+                new[] { contributor.UserId },
+                ct);
+            return Database.TryJoinDeploymentWithForces(
+                deployment.Id,
+                contributor,
+                deployment.ChatId,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        }
+        finally
+        {
+            if (locks != null) ReleaseCountryMutationLocks(locks);
+            deploymentProcessorLock.Release();
+        }
+    }
+
+    static async Task CancelDeploymentSafely(Deployment deployment, CancellationToken ct)
+    {
+        await deploymentProcessorLock.WaitAsync(ct);
+        List<SemaphoreSlim>? locks = null;
+        try
+        {
+            var contributorIds = Database.GetDeploymentContributors(deployment.Id)
+                .Select(x => x.UserId)
+                .Append(deployment.InitiatorId)
+                .Append(deployment.TargetUserId);
+            locks = await AcquireCountryMutationLocks(deployment.ChatId, contributorIds, ct);
+            await UnpinAndDeleteAnnounce(deployment.ChatId, deployment.AnnounceMsgId, ct);
+            Database.CancelDeploymentForces(deployment);
+        }
+        finally
+        {
+            if (locks != null)
+                ReleaseCountryMutationLocks(locks);
+            deploymentProcessorLock.Release();
+        }
+    }
 
     // Name similarity check – Levenshtein based, >90% considered too similar
     static int LevenshteinDistance(string s, string t)
@@ -2910,12 +4449,61 @@ partial class Program
     static SemaphoreSlim GetUserLock(long uid) =>
         userLocks.GetOrAdd(uid, _ => new SemaphoreSlim(1, 1));
 
+    static Task<List<SemaphoreSlim>> AcquireCountryMutationLocks(
+        long chatId,
+        IEnumerable<long> ownerIds,
+        CancellationToken ct) =>
+        AcquireCountryMutationLocks(ownerIds.Select(ownerId => (chatId, ownerId)), ct);
+
+    static async Task<List<SemaphoreSlim>> AcquireCountryMutationLocks(
+        IEnumerable<(long ChatId, long OwnerId)> countryKeys,
+        CancellationToken ct)
+    {
+        var locks = countryKeys
+            .Distinct()
+            .OrderBy(x => x.ChatId)
+            .ThenBy(x => x.OwnerId)
+            .Select(key => countryMutationLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1)))
+            .ToList();
+        var acquired = new List<SemaphoreSlim>(locks.Count);
+        try
+        {
+            foreach (var item in locks)
+            {
+                await item.WaitAsync(ct);
+                acquired.Add(item);
+            }
+            return acquired;
+        }
+        catch
+        {
+            for (int i = acquired.Count - 1; i >= 0; i--)
+                acquired[i].Release();
+            throw;
+        }
+    }
+
+    static void ReleaseCountryMutationLocks(List<SemaphoreSlim> locks)
+    {
+        for (int i = locks.Count - 1; i >= 0; i--)
+            locks[i].Release();
+    }
+
     static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken ct)
     {
         lock (processedLock)
         {
             if (!processedUpdates.Add(update.Id)) return;
             if (processedUpdates.Count > 5000) processedUpdates.Clear();
+        }
+        if (Volatile.Read(ref databaseMaintenanceRunning) != 0)
+            return;
+
+        Interlocked.Increment(ref activeUpdateHandlers);
+        if (Volatile.Read(ref databaseMaintenanceRunning) != 0)
+        {
+            Interlocked.Decrement(ref activeUpdateHandlers);
+            return;
         }
         try
         {
@@ -2932,12 +4520,27 @@ partial class Program
 
                 var l = GetUserLock(cbUid);
                 await l.WaitAsync(ct);
+                List<SemaphoreSlim>? callbackCountryLocks = null;
                 try
                 {
+                    if (cbChat != null &&
+                        (cbChat.Type == ChatType.Group || cbChat.Type == ChatType.Supergroup) &&
+                        !(update.CallbackQuery.Data?.StartsWith("dep_", StringComparison.Ordinal) ?? false))
+                    {
+                        callbackCountryLocks = await AcquireCountryMutationLocks(
+                            cbChat.Id,
+                            new[] { cbUid },
+                            ct);
+                    }
                     await HandleCallbackAsync(update.CallbackQuery, ct);
                     Database.MarkPlayerActive(cbUid);
                 }
-                finally { l.Release(); }
+                finally
+                {
+                    if (callbackCountryLocks != null)
+                        ReleaseCountryMutationLocks(callbackCountryLocks);
+                    l.Release();
+                }
                 return;
             }
             if (update.Type != UpdateType.Message || update.Message == null)
@@ -2981,6 +4584,10 @@ partial class Program
         catch (Exception ex)
         {
             Console.WriteLine(ex.Message);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref activeUpdateHandlers);
         }
     }
 
@@ -3055,11 +4662,16 @@ partial class Program
         {
             if (msg.Document != null)
             {
+                string uploadPath = $"gamedata.{uid}.upload";
                 var file = await bot.GetFileAsync(msg.Document.FileId, cancellationToken: ct);
-                using (var stream = System.IO.File.OpenWrite("gamedata.db"))
+                using (var stream = new System.IO.FileStream(uploadPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None))
                     await bot.DownloadFileAsync(file.FilePath!, stream, cancellationToken: ct);
+                var restore = await RestoreDatabaseSafely(uploadPath, ct);
                 EndSession(uid);
-                await SendTemp(uid, "✅ دیتابیس جدید با موفقیت جایگزین شد.", ct: ct);
+                TryDeleteSqliteSidecar(uploadPath);
+                await SendTemp(uid,
+                    restore.Success ? "✅ دیتابیس جدید با موفقیت جایگزین شد." : $"❌ بازیابی انجام نشد: {restore.Error}",
+                    ct: ct);
             }
             else
             {
@@ -3351,7 +4963,6 @@ partial class Program
     static async Task HandleGroupMessageAsync(Message msg, User user, Chat chat, CancellationToken ct)
     {
         long uid = user.Id;
-        KnownGroups.Add(chat.Id);
         string txt = msg.Text?.Trim() ?? "";
         if (uid == OWNER_ID && txt == "یک مقصد است اینجا برایمان")
         {
@@ -3401,6 +5012,12 @@ partial class Program
         // بازگشت شخصی نیروها
         if (txt == "بازگشت" || txt == "بازگشت نیرو" || txt == "بازگشت نیروها" || txt == "برگشت")
         {
+            await deploymentProcessorLock.WaitAsync(ct);
+            try
+            {
+            var returnCountryLocks = await AcquireCountryMutationLocks(chat.Id, new[] { uid }, ct);
+            try
+            {
             var activeDepsInChat = Database.GetActiveDeployments().Where(d => d.ChatId == chat.Id).ToList();
             var myDeployments = new List<(Deployment dep, List<DeploymentContributor> myContribs)>();
             foreach (var dep in activeDepsInChat)
@@ -3416,55 +5033,46 @@ partial class Program
             }
             long totalTanks=0, totalSoldiers=0, totalFighters=0, totalBombers=0;
             int returnedDeployments=0;
-            foreach (var (dep, myContribs) in myDeployments)
+            foreach (var (dep, _) in myDeployments)
             {
-                long sumT = myContribs.Sum(c => c.Tanks);
-                long sumS = myContribs.Sum(c => c.Soldiers);
-                long sumF = myContribs.Sum(c => c.Fighters);
-                long sumB = myContribs.Sum(c => c.Bombers);
-                totalTanks += sumT; totalSoldiers += sumS; totalFighters += sumF; totalBombers += sumB;
-                var myCountry = Database.GetCountry(uid, chat.Id);
-                if (myCountry != null)
-                {
-                    myCountry.Tanks += sumT;
-                    myCountry.Soldiers += sumS;
-                    myCountry.Planes += sumF;
-                    myCountry.Bombers += sumB;
-                    Database.UpdateCountryFull(myCountry);
-                    Database.ReconcileDefense(uid, chat.Id);
-                }
-                if (dep.Type == "Defensive")
-                {
-                    var targetCountry = Database.GetCountry(dep.TargetUserId, chat.Id);
-                    if (targetCountry != null)
-                    {
-                        targetCountry.Tanks = Math.Max(0, targetCountry.Tanks - sumT);
-                        targetCountry.Soldiers = Math.Max(0, targetCountry.Soldiers - sumS);
-                        targetCountry.Planes = Math.Max(0, targetCountry.Planes - sumF);
-                        targetCountry.Bombers = Math.Max(0, targetCountry.Bombers - sumB);
-                        targetCountry.DefenseTanks = Math.Max(0, targetCountry.DefenseTanks - sumT);
-                        targetCountry.DefenseSoldiers = Math.Max(0, targetCountry.DefenseSoldiers - sumS);
-                        targetCountry.DefenseFighters = Math.Max(0, targetCountry.DefenseFighters - sumF);
-                        Database.UpdateCountryFull(targetCountry);
-                        Database.ReconcileDefense(targetCountry.OwnerId, chat.Id);
-                    }
-                }
-                foreach (var c in myContribs) { Database.DeleteDeploymentContributorById(c.Id); }
-                dep.Tanks = Math.Max(0, dep.Tanks - sumT);
-                dep.Soldiers = Math.Max(0, dep.Soldiers - sumS);
-                dep.Fighters = Math.Max(0, dep.Fighters - sumF);
-                dep.Bombers = Math.Max(0, dep.Bombers - sumB);
-                var remaining = Database.GetDeploymentContributors(dep.Id);
-                if (remaining.Count == 0)
-                {
+                bool withdrawn = Database.WithdrawDeploymentContribution(
+                    dep.Id,
+                    uid,
+                    chat.Id,
+                    out long sumT,
+                    out long sumS,
+                    out long sumF,
+                    out long sumB,
+                    out bool deploymentDeleted);
+                if (!withdrawn)
+                    continue;
+
+                totalTanks += sumT;
+                totalSoldiers += sumS;
+                totalFighters += sumF;
+                totalBombers += sumB;
+                Database.ReconcileDefense(uid, chat.Id);
+
+                // Defensive forces only exist in Deployments. Nothing is subtracted from
+                // the defended country's own inventory when a contributor withdraws.
+                if (deploymentDeleted)
                     await UnpinAndDeleteAnnounce(dep.ChatId, dep.AnnounceMsgId, ct);
-                    Database.DeleteDeployment(dep.Id);
-                }
-                else { Database.UpdateDeploymentForces(dep); }
+                else
+                    await RefreshDeploymentAnnouncement(dep.Id, ct);
                 returnedDeployments++;
             }
             await SendTemp(chat.Id, $"✅ بازگشت انجام شد!\n👤 از {returnedDeployments} صفآرایی خارج شدید:\n🛡 تانک: {totalTanks:N0}\n🪖 سرباز: {totalSoldiers:N0}\n✈️ جنگنده: {totalFighters:N0}\n🛩 بمبافکن: {totalBombers:N0}", replyTo: msg.MessageId, ct: ct);
             return;
+            }
+            finally
+            {
+                ReleaseCountryMutationLocks(returnCountryLocks);
+            }
+            }
+            finally
+            {
+                deploymentProcessorLock.Release();
+            }
         }
 
 
@@ -3541,56 +5149,6 @@ partial class Program
                     var fid = msg.Document.FileId;
                     string cap = pref + (msg.Caption ?? "");
                     var fname = msg.Document.FileName ?? "file";
-                    if (replyMap!=0) sent = await bot.SendDocumentAsync(destId, new InputOnlineFile(fid), caption: cap, replyToMessageId: replyMap, cancellationToken: ct);
-                    else sent = await bot.SendDocumentAsync(destId, new InputOnlineFile(fid), caption: cap, cancellationToken: ct);
-                }
-                if (sent!=null){
-                    Database.AddVisionMessageMap(chat.Id, msg.MessageId, uid, destId, sent.MessageId);
-                }
-            }
-        } catch (Exception ex){ Console.WriteLine($"[VISION ERR] {ex.Message}"); }
-        // VISION FORWARD - شفاف با اعلامیه
-        try {
-            var logsChat = Database.GetVisionLogsBySourceChat(chat.Id);
-            var logsUser = Database.GetVisionLogsBySourceUser(uid);
-            var logsReply = new List<(long Id, long SourceChatId, long SourceUserId, long DestChatId, int IsUserMode)>();
-            if (msg.ReplyToMessage?.From != null){
-                logsReply = Database.GetVisionLogsBySourceUser(msg.ReplyToMessage.From.Id);
-            }
-            var allLogs = logsChat.Concat(logsUser).Concat(logsReply).GroupBy(x=>x.Id).Select(g=>g.First()).ToList();
-            foreach (var vLog in allLogs){
-                long destId = vLog.DestChatId;
-                if (destId == chat.Id) continue;
-                int replyMap = 0;
-                if (msg.ReplyToMessage != null){
-                    var mm = Database.GetDestMessageId(chat.Id, msg.ReplyToMessage.MessageId, destId);
-                    if (mm != null) replyMap = (int)mm.Value.DestMessageId;
-                }
-                string sName = user.FirstName;
-                string gTitle = chat.Title ?? "";
-                string pref = vLog.IsUserMode==1 ? $"[{gTitle}] {sName}: " : $"{sName}: ";
-                Message sent = null;
-                if (!string.IsNullOrEmpty(msg.Text)){
-                    string t = pref + msg.Text;
-                    if (replyMap!=0) sent = await bot.SendTextMessageAsync(destId, t, replyToMessageId: replyMap, cancellationToken: ct);
-                    else sent = await bot.SendTextMessageAsync(destId, t, cancellationToken: ct);
-                } else if (msg.Photo != null && msg.Photo.Length>0){
-                    var fid = msg.Photo.Last().FileId;
-                    string cap = pref + (msg.Caption ?? "");
-                    if (replyMap!=0) sent = await bot.SendPhotoAsync(destId, new InputOnlineFile(fid), caption: cap, replyToMessageId: replyMap, cancellationToken: ct);
-                    else sent = await bot.SendPhotoAsync(destId, new InputOnlineFile(fid), caption: cap, cancellationToken: ct);
-                } else if (msg.Sticker != null){
-                    if (replyMap!=0) sent = await bot.SendStickerAsync(destId, new InputOnlineFile(msg.Sticker.FileId), replyToMessageId: replyMap, cancellationToken: ct);
-                    else sent = await bot.SendStickerAsync(destId, new InputOnlineFile(msg.Sticker.FileId), cancellationToken: ct);
-                    if (sent!=null){ try { await bot.SendTextMessageAsync(destId, pref.Trim(), replyToMessageId: sent.MessageId, cancellationToken: ct); } catch {} }
-                } else if (msg.Video != null){
-                    var fid = msg.Video.FileId;
-                    string cap = pref + (msg.Caption ?? "");
-                    if (replyMap!=0) sent = await bot.SendVideoAsync(destId, new InputOnlineFile(fid), caption: cap, replyToMessageId: replyMap, cancellationToken: ct);
-                    else sent = await bot.SendVideoAsync(destId, new InputOnlineFile(fid), caption: cap, cancellationToken: ct);
-                } else if (msg.Document != null){
-                    var fid = msg.Document.FileId;
-                    string cap = pref + (msg.Caption ?? "");
                     if (replyMap!=0) sent = await bot.SendDocumentAsync(destId, new InputOnlineFile(fid), caption: cap, replyToMessageId: replyMap, cancellationToken: ct);
                     else sent = await bot.SendDocumentAsync(destId, new InputOnlineFile(fid), caption: cap, cancellationToken: ct);
                 }
@@ -3941,9 +5499,7 @@ partial class Program
             if (myDeps.Count == 0) { await SendTemp(chat.Id, "❌ شما دسترسی لغو این صف‌آرایی‌ها را ندارید.", ct: ct); return; }
             if (myDeps.Count == 1)
             {
-                // FIX(2): ابتدا پیام پین‌شده را آنپین و حذف کن، سپس نیروها را برگردان
-                await UnpinAndDeleteAnnounce(myDeps[0].ChatId, myDeps[0].AnnounceMsgId, ct);
-                Database.CancelDeploymentForces(myDeps[0]);
+                await CancelDeploymentSafely(myDeps[0], ct);
                 await SendTemp(chat.Id, "🚫 **صف‌آرایی لغو شد!**", ct: ct);
             }
             else
@@ -4386,7 +5942,7 @@ partial class Program
         {
             var country = Database.GetCountry(uid, chat.Id);
             if (country == null) { await SendTemp(chat.Id, MsgNoCountryGuide, ct: ct); return; }
-            await SendTemp(chat.Id, "⚔️ برای مشخص کردن هدف به پیوی مراجعه کنید.", replyTo: msg.MessageId, ct: ct);
+            await SendTemp(chat.Id, "⚔️ برای مشخص‌کردن هدف به پیوی مراجعه کنید.", replyTo: msg.MessageId, ct: ct);
             var targets = Database.GetAttackableTargets(chat.Id, uid);
             if (targets.Count == 0) { await SendTemp(uid, "هیچ هدفی در این گروه وجود ندارد.", ct: ct); return; }
             var kb = targets.Select(t => new[] { InlineKeyboardButton.WithCallbackData($"{t.Name} ({t.OwnerName})", $"attack_target:{chat.Id}:{t.OwnerId}") }).ToArray();
@@ -4497,16 +6053,17 @@ partial class Program
                     availSingle = sess.TransferResourceType switch { "money" => c.Money, "iron" => c.Iron, "soldiers" => c.Soldiers, "tanks" => c.Tanks, "planes" => c.Planes, _ => c.Bombers };
                 }
 
-                if (amount > availSingle)
+                long currentResourceTotal = GetCountryResourceAmount(c, sess.TransferResourceType);
+                if (amount > availSingle || amount > currentResourceTotal)
                 {
-                    await SendPrompt(uid, uid, $"❌ موجودی این مدل کافی نیست.\n📊 موجودی: {availSingle:N0}\n🔢 دوباره وارد کنید:", ct: ct);
+                    long availableNow = Math.Min(availSingle, currentResourceTotal);
+                    await SendPrompt(uid, uid, $"❌ موجودی این مدل کافی نیست.\n📊 موجودی فعلی: {availableNow:N0}\n🔢 دوباره وارد کنید:", ct: ct);
                     return;
                 }
 
                 sess.TransferModelAmounts[0] = amount;
 
                 // Finalize single-model transfer
-                long totalDeduct = amount;
                 // Battleship cap check before deduct
                 if (sess.TransferResourceType == "battleships")
                 {
@@ -4518,71 +6075,25 @@ partial class Program
                         return;
                     }
                 }
-                // Deduct from sender
-                switch (sess.TransferResourceType)
-                {
-                    case "money": c.Money -= totalDeduct; break;
-                    case "iron": c.Iron -= totalDeduct; break;
-                    case "soldiers": c.Soldiers -= totalDeduct; break;
-                    case "tanks": c.Tanks -= totalDeduct; break;
-                    case "planes": c.Planes -= totalDeduct; break;
-                    case "bombers": c.Bombers -= totalDeduct; break;
-                    case "boats": c.Boats -= totalDeduct; break;
-                    case "submarines": c.Submarines -= totalDeduct; break;
-                    case "battleships": c.Battleships -= totalDeduct; break;
-                }
-                Database.UpdateCountryFull(c);
-                Database.ReconcileDefense(uid, sess.TransferChatId);
-
-                // Handle equipment model deduction for sender (including naval)
-                if (sess.TransferResourceType is "tanks" or "planes" or "bombers" or "boats" or "submarines" or "battleships")
-                {
-                    string category = sess.TransferResourceType switch { "tanks" => "Tanks", "planes" => "Planes", "bombers" => "Bombers", "boats" => "Boats", "submarines" => "Submarines", "battleships" => "Battleships", _ => "Boats" };
-                    string modelName = sess.TransferModelNames[0];
-                    string defaultModel = sess.TransferResourceType switch
-                    {
-                        "tanks" => Database.GetDefaultTankModel(c.Faction),
-                        "planes" => Database.GetDefaultPlaneModel(c.Faction),
-                        "bombers" => Database.GetDefaultBomberModel(c.Faction),
-                        "boats" => Database.GetDefaultBoatModel(c.Faction),
-                        "submarines" => Database.GetDefaultSubModel(c.Faction),
-                        "battleships" => Database.GetDefaultBattleshipModel(c.Faction),
-                        _ => ""
-                    };
-                    if (!string.IsNullOrWhiteSpace(modelName) && modelName != defaultModel)
-                    {
-                        Database.AddEquipmentModel(uid, sess.TransferChatId, category, modelName, -amount);
-                    }
-                    else if (!string.IsNullOrWhiteSpace(modelName) && modelName == defaultModel)
-                    {
-                        var foreignList = Database.GetEquipmentModels(uid, sess.TransferChatId, category);
-                        var foreignSame = foreignList.FirstOrDefault(f => f.ModelName == modelName);
-                        if (foreignSame != null && foreignSame.Count > 0)
-                        {
-                            long fromForeign = Math.Min(amount, foreignSame.Count);
-                            if (fromForeign > 0)
-                                Database.AddEquipmentModel(uid, sess.TransferChatId, category, modelName, -fromForeign);
-                        }
-                    }
-                }
-
                 bool isTfExempt = Database.HasGroupLockExemption(sess.TransferChatId);
                 long arrMs = isTfExempt ? 0 : DateTimeOffset.UtcNow.AddMinutes(sess.TransferDurationMin).ToUnixTimeMilliseconds();
-
                 string modelToStore = sess.TransferModelNames.Count > 0 ? sess.TransferModelNames[0] : "";
-                var tf = new Transfer
+                bool createdTransfer = await TryCreateTransfersSafely(
+                    uid,
+                    sess.TransferChatId,
+                    myAid,
+                    sess.TransferTargetId,
+                    sess.TransferResourceType,
+                    new List<(string ModelName, long Amount)> { (modelToStore, amount) },
+                    arrMs,
+                    ct);
+                if (!createdTransfer)
                 {
-                    ChatId = sess.TransferChatId,
-                    AllianceId = myAid,
-                    SenderId = uid,
-                    ReceiverId = sess.TransferTargetId,
-                    ResourceType = sess.TransferResourceType,
-                    ModelName = modelToStore,
-                    Amount = amount,
-                    ArriveAtMs = arrMs,
-                    Notified = 0
-                };
-                Database.AddTransfer(tf);
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی تغییر کرده است و انتقال ثبت نشد.", ct: ct);
+                    return;
+                }
+                Database.ReconcileDefense(uid, sess.TransferChatId);
                 IncTransferCount(sess.TransferChatId, uid);
                 EndSession(uid);
 
@@ -4646,6 +6157,15 @@ partial class Program
                     await SendTemp(uid, "✅ انتقال لغو شد (مقداری انتخاب نشد).", ct: ct);
                     return;
                 }
+                long currentResourceTotal = GetCountryResourceAmount(c, sess.TransferResourceType);
+                if (totalAmount > currentResourceTotal)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid,
+                        $"❌ موجودی در طول عملیات تغییر کرده است. انتقال ثبت نشد.\n📊 موجودی فعلی: {currentResourceTotal:N0}",
+                        ct: ct);
+                    return;
+                }
 
                 long myAid = Database.GetUserAllianceId(sess.TransferChatId, uid);
                 if (myAid == 0) { EndSession(uid); await SendTemp(uid, "❌ شما دیگر عضو اتحاد نیستید.", ct: ct); return; }
@@ -4667,86 +6187,29 @@ partial class Program
                         return;
                     }
                 }
-                // Deduct total from sender country
-                switch (sess.TransferResourceType)
-                {
-                    case "money": c.Money -= totalAmount; break;
-                    case "iron": c.Iron -= totalAmount; break;
-                    case "soldiers": c.Soldiers -= totalAmount; break;
-                    case "tanks": c.Tanks -= totalAmount; break;
-                    case "planes": c.Planes -= totalAmount; break;
-                    case "bombers": c.Bombers -= totalAmount; break;
-                    case "boats": c.Boats -= totalAmount; break;
-                    case "submarines": c.Submarines -= totalAmount; break;
-                    case "battleships": c.Battleships -= totalAmount; break;
-                }
-                Database.UpdateCountryFull(c);
-                Database.ReconcileDefense(uid, sess.TransferChatId);
-
-                // Deduct per-model from equipment table for foreign models (including naval)
-                if (sess.TransferResourceType is "tanks" or "planes" or "bombers" or "boats" or "submarines" or "battleships")
-                {
-                    string category = sess.TransferResourceType switch { "tanks" => "Tanks", "planes" => "Planes", "bombers" => "Bombers", "boats" => "Boats", "submarines" => "Submarines", "battleships" => "Battleships", _ => "Boats" };
-                    string defaultModel = sess.TransferResourceType switch
-                    {
-                        "tanks" => Database.GetDefaultTankModel(c.Faction),
-                        "planes" => Database.GetDefaultPlaneModel(c.Faction),
-                        "bombers" => Database.GetDefaultBomberModel(c.Faction),
-                        "boats" => Database.GetDefaultBoatModel(c.Faction),
-                        "submarines" => Database.GetDefaultSubModel(c.Faction),
-                        "battleships" => Database.GetDefaultBattleshipModel(c.Faction),
-                        _ => ""
-                    };
-                    var foreignList = Database.GetEquipmentModels(uid, sess.TransferChatId, category);
-
-                    for (int i = 0; i < sess.TransferModelNames.Count; i++)
-                    {
-                        long amt = sess.TransferModelAmounts[i];
-                        if (amt <= 0) continue;
-                        string modelName = sess.TransferModelNames[i];
-                        if (string.IsNullOrWhiteSpace(modelName)) continue;
-
-                        if (modelName == defaultModel)
-                        {
-                            var foreignSame = foreignList.FirstOrDefault(f => f.ModelName == modelName);
-                            if (foreignSame != null && foreignSame.Count > 0)
-                            {
-                                long fromForeign = Math.Min(amt, foreignSame.Count);
-                                if (fromForeign > 0)
-                                    Database.AddEquipmentModel(uid, sess.TransferChatId, category, modelName, -fromForeign);
-                            }
-                        }
-                        else
-                        {
-                            Database.AddEquipmentModel(uid, sess.TransferChatId, category, modelName, -amt);
-                        }
-                    }
-                }
-
                 bool isTfExempt = Database.HasGroupLockExemption(sess.TransferChatId);
                 long arrMs = isTfExempt ? 0 : DateTimeOffset.UtcNow.AddMinutes(sess.TransferDurationMin).ToUnixTimeMilliseconds();
-
-                // Create multiple transfer records, one per model with amount>0
-                long created = 0;
-                for (int i = 0; i < sess.TransferModelNames.Count; i++)
+                var shipments = Enumerable.Range(0, sess.TransferModelNames.Count)
+                    .Where(i => sess.TransferModelAmounts[i] > 0)
+                    .Select(i => (ModelName: sess.TransferModelNames[i], Amount: sess.TransferModelAmounts[i]))
+                    .ToList();
+                bool createdTransfers = await TryCreateTransfersSafely(
+                    uid,
+                    sess.TransferChatId,
+                    myAid,
+                    sess.TransferTargetId,
+                    sess.TransferResourceType,
+                    shipments,
+                    arrMs,
+                    ct);
+                if (!createdTransfers)
                 {
-                    long amt = sess.TransferModelAmounts[i];
-                    if (amt <= 0) continue;
-                    var tf = new Transfer
-                    {
-                        ChatId = sess.TransferChatId,
-                        AllianceId = myAid,
-                        SenderId = uid,
-                        ReceiverId = sess.TransferTargetId,
-                        ResourceType = sess.TransferResourceType,
-                        ModelName = sess.TransferModelNames[i],
-                        Amount = amt,
-                        ArriveAtMs = arrMs,
-                        Notified = 0
-                    };
-                    Database.AddTransfer(tf);
-                    created++;
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی تغییر کرده است و انتقال ثبت نشد.", ct: ct);
+                    return;
                 }
+                Database.ReconcileDefense(uid, sess.TransferChatId);
+                long created = shipments.Count;
 
                 IncTransferCount(sess.TransferChatId, uid);
                 string summary = "";
@@ -4774,7 +6237,7 @@ partial class Program
 
             if (sess.Step == SessionStep.DeployWaitingTanks)
             {
-                // Legacy total tanks – now redirect to per-model for 
+                // Legacy total tanks – now redirect to per-model
                 var c = Database.GetCountry(uid, sess.DeployChatId);
                 if (c == null) { EndSession(uid); return; }
                 var breakdown = GetTransferBreakdown(c, "tanks");
@@ -4901,6 +6364,15 @@ partial class Program
                 if (!TryParseLong(txt, out long bom) || bom < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
                 if (bom > c.Bombers) { await SendPrompt(uid, uid, $"❌ موجودی: {c.Bombers}", ct: ct); return; }
                 sess.DeployBombers = bom;
+                if (!HasAvailableForces(c, sess.DeployTanks, sess.DeploySoldiers, sess.DeployFighters, sess.DeployBombers))
+                {
+                    EndSession(uid);
+                    await SendTemp(uid,
+                        "❌ موجودی نیروها در طول عملیات تغییر کرده است. صف‌آرایی ثبت نشد.\n\n" +
+                        AvailableForcesText(c),
+                        ct: ct);
+                    return;
+                }
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 long endMs = nowMs + sess.DeployDuration * 3600000L;
                 var dep = new Deployment
@@ -4911,12 +6383,14 @@ partial class Program
                     Tanks = sess.DeployTanks, Soldiers = sess.DeploySoldiers, Fighters = sess.DeployFighters, Bombers = sess.DeployBombers,
                     CreatedAtMs = nowMs, EndAtMs = endMs, LastWarnMs = nowMs
                 };
-                c.Tanks -= sess.DeployTanks; c.Soldiers -= sess.DeploySoldiers; c.Planes -= sess.DeployFighters; c.Bombers -= sess.DeployBombers;
-                Database.UpdateCountryFull(c);
+                long depId = await TryCreateDeploymentSafely(dep, ct);
+                if (depId == 0)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی نیروها تغییر کرده است و صف‌آرایی ثبت نشد.", ct: ct);
+                    return;
+                }
                 Database.ReconcileDefense(uid, sess.DeployChatId);
-                long depId = Database.AddDeployment(dep);
-                var initC = new DeploymentContributor { DeploymentId = depId, UserId = uid, Tanks = sess.DeployTanks, Soldiers = sess.DeploySoldiers, Fighters = sess.DeployFighters, Bombers = sess.DeployBombers, Strategy = sess.DeployStrategy, Tactic = sess.DeployTactic };
-                Database.AddDeploymentContributor(initC);
                 //  – defensive troops should NOT appear in target assets, only in separate deployment details
                 // So we do NOT add to target country anymore
                 EndSession(uid);
@@ -4930,8 +6404,8 @@ partial class Program
                 bool isOff = sess.DeployType == "Offensive";
                 // Formation is always Unified now (MultiFront removed)
                 string bText = isOff ?
-                    $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{allyName}»</b> علیه کشور <b>«{tName}»</b> (مالک: {targetTag}) صف‌آرایی کرد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs)})\n\n💥 <b>نیروهای اولیه:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}" :
-                    $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{allyName}»</b> برای حمایت از کشور <b>«{tName}»</b> (مالک: {targetTag}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs)})\n\n🛡 <b>نیروهای پشتیبان:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}";
+                    $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{HtmlText(allyName)}»</b> علیه کشور <b>«{HtmlText(tName)}»</b> (مالک: {targetTag}) صف‌آرایی کرد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs)})\n\n💥 <b>نیروهای اولیه:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}" :
+                    $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{HtmlText(allyName)}»</b> برای حمایت از کشور <b>«{HtmlText(tName)}»</b> (مالک: {targetTag}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs)})\n\n🛡 <b>نیروهای پشتیبان:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}";
                 string fCat = isOff ? "OffensiveDeploy" : "DefensiveDeploy";
                 var photos = Database.GetFactionFlags(fCat);
                 // FIX(1): دکمهٔ صحیح (dep_join) — قبلاً depjoin بود و کار نمی‌کرد
@@ -4982,15 +6456,23 @@ partial class Program
                     CreatedAtMs = nowMs2, EndAtMs = endMs2, LastWarnMs = nowMs2
                 };
                 var c2 = Database.GetCountry(uid, sess.DeployChatId);
-                if (c2 != null)
+                if (c2 == null || !HasAvailableForces(c2, sess.DeployTanks, sess.DeploySoldiers, sess.DeployFighters, sess.DeployBombers))
                 {
-                    c2.Tanks -= sess.DeployTanks; c2.Soldiers -= sess.DeploySoldiers; c2.Planes -= sess.DeployFighters; c2.Bombers -= sess.DeployBombers;
-                    Database.UpdateCountryFull(c2);
-                    Database.ReconcileDefense(uid, sess.DeployChatId);
+                    EndSession(uid);
+                    string available = c2 == null ? "کشور یافت نشد." : AvailableForcesText(c2);
+                    await SendTemp(uid,
+                        "❌ موجودی نیروها در طول عملیات تغییر کرده است. صف‌آرایی ثبت نشد.\n\n" + available,
+                        ct: ct);
+                    return;
                 }
-                long depId2 = Database.AddDeployment(dep2);
-                var initC2 = new DeploymentContributor { DeploymentId = depId2, UserId = uid, Tanks = sess.DeployTanks, Soldiers = sess.DeploySoldiers, Fighters = sess.DeployFighters, Bombers = sess.DeployBombers, Strategy = sess.DeployStrategy, Tactic = sess.DeployTactic };
-                Database.AddDeploymentContributor(initC2);
+                long depId2 = await TryCreateDeploymentSafely(dep2, ct);
+                if (depId2 == 0)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی نیروها تغییر کرده است و صف‌آرایی ثبت نشد.", ct: ct);
+                    return;
+                }
+                Database.ReconcileDefense(uid, sess.DeployChatId);
                 EndSession(uid);
                 var alliance2 = Database.GetAllianceById(sess.DeployAllianceId);
                 string allyName2 = alliance2?.Name ?? "اتحاد";
@@ -5000,8 +6482,8 @@ partial class Program
                 string targetTag2 = tc2 != null ? HtmlTag(tc2.OwnerName, tc2.OwnerId) : $"کاربر {sess.DeployTargetId}";
                 bool isOff2 = sess.DeployType == "Offensive";
                 string bText2 = isOff2 ?
-                    $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{allyName2}»</b> علیه کشور <b>«{tName2}»</b> (مالک: {targetTag2}) صف‌آرایی کرد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs2)})\n\n💥 <b>نیروهای اولیه:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags2}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}" :
-                    $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{allyName2}»</b> برای حمایت از کشور <b>«{tName2}»</b> (مالک: {targetTag2}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs2)})\n\n🛡 <b>نیروهای پشتیبان:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags2}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}";
+                    $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{HtmlText(allyName2)}»</b> علیه کشور <b>«{HtmlText(tName2)}»</b> (مالک: {targetTag2}) صف‌آرایی کرد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs2)})\n\n💥 <b>نیروهای اولیه:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags2}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}" :
+                    $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{HtmlText(allyName2)}»</b> برای حمایت از کشور <b>«{HtmlText(tName2)}»</b> (مالک: {targetTag2}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{sess.DeployDuration} ساعت</b> (پایان: {FormatTime(endMs2)})\n\n🛡 <b>نیروهای پشتیبان:</b>\n🪖 سرباز: {sess.DeploySoldiers:N0} | 🛡 تانک: {sess.DeployTanks:N0}\n✈️ جنگنده: {sess.DeployFighters:N0} | 🛩 بمب‌افکن: {sess.DeployBombers:N0}\n\n👥 مشارکت‌کنندگان:\n{tags2}\n\n🎯 استراتژی: {sess.DeployStrategy} | تاکتیک: {sess.DeployTactic}";
                 string fCat2 = isOff2 ? "OffensiveDeploy" : "DefensiveDeploy";
                 var photos2 = Database.GetFactionFlags(fCat2);
                 var joinKb2 = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("⚔️ مشارکت و اعزام نیرو", $"dep_join:{depId2}") } });
@@ -5062,13 +6544,24 @@ partial class Program
                 sess.DeployJoinBombers = bom;
                 var dep = Database.GetDeploymentById(sess.DeployJoinId);
                 if (dep == null || dep.EndAtMs <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) { EndSession(uid); await SendTemp(uid, "❌ مهلت پایان یافته.", ct: ct); return; }
-                c.Tanks -= sess.DeployJoinTanks; c.Soldiers -= sess.DeployJoinSoldiers; c.Planes -= sess.DeployJoinFighters; c.Bombers -= sess.DeployJoinBombers;
-                Database.UpdateCountryFull(c);
-                Database.ReconcileDefense(uid, sess.DeployChatId);
-                dep.Tanks += sess.DeployJoinTanks; dep.Soldiers += sess.DeployJoinSoldiers; dep.Fighters += sess.DeployJoinFighters; dep.Bombers += sess.DeployJoinBombers;
-                Database.UpdateDeploymentForces(dep);
+                if (!HasAvailableForces(c, sess.DeployJoinTanks, sess.DeployJoinSoldiers, sess.DeployJoinFighters, sess.DeployJoinBombers))
+                {
+                    EndSession(uid);
+                    await SendTemp(uid,
+                        "❌ موجودی نیروها در طول عملیات تغییر کرده است. اعزام انجام نشد.\n\n" +
+                        AvailableForcesText(c),
+                        ct: ct);
+                    return;
+                }
                 var contrib = new DeploymentContributor { DeploymentId = dep.Id, UserId = uid, Tanks = sess.DeployJoinTanks, Soldiers = sess.DeployJoinSoldiers, Fighters = sess.DeployJoinFighters, Bombers = sess.DeployJoinBombers, Strategy = sess.DeployJoinStrategy, Tactic = sess.DeployJoinTactic };
-                Database.AddDeploymentContributor(contrib);
+                bool joined = await TryJoinDeploymentSafely(dep, contrib, ct);
+                if (!joined)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid, "❌ موجودی نیروها تغییر کرده یا مهلت صف‌آرایی تمام شده است. اعزام انجام نشد.", ct: ct);
+                    return;
+                }
+                Database.ReconcileDefense(uid, sess.DeployChatId);
                 //  – defensive join no longer adds to target assets, only tracked separately
                 // Refresh pinned deployment announcement to list all participants (only participating players)
                 try { await RefreshDeploymentAnnouncement(dep.Id, ct); } catch { }
@@ -5460,7 +6953,6 @@ partial class Program
             }
             else
             {
-                // Optimized: use GetCountriesByChatId per chat already optimized, avoid GetAllCountries
                 var kb = chatIds.Select(cid =>
                 {
                     var country = Database.GetCountry(uid, cid);
@@ -5499,6 +6991,13 @@ partial class Program
     static async Task HandleCallbackAsync(CallbackQuery cb, CancellationToken ct)
     {
         if (cb.Data == null) return;
+
+        if (cb.Data.StartsWith("attack_naval_", StringComparison.Ordinal))
+        {
+            EndSession(cb.From.Id);
+            await bot.AnswerCallbackQueryAsync(cb.Id, "موتور دریایی هنوز فعال نیست.", showAlert: true, cancellationToken: ct);
+            return;
+        }
 
         if (cb.Data.StartsWith("adm:", StringComparison.Ordinal))
         {
@@ -6829,9 +8328,7 @@ partial class Program
             if (dep == null) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ قبلاً خاتمه یافته.", showAlert: true, cancellationToken: ct); return; }
             var alliance = Database.GetAllianceById(dep.AllianceId);
             if (alliance == null || (dep.InitiatorId != uid && alliance.LeaderId != uid)) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ دسترسی ندارید.", showAlert: true, cancellationToken: ct); return; }
-            // FIX(2): آنپین و حذف پیام صف‌آرایی هنگام لغو از طریق دکمه
-            await UnpinAndDeleteAnnounce(dep.ChatId, dep.AnnounceMsgId, ct);
-            Database.CancelDeploymentForces(dep);
+            await CancelDeploymentSafely(dep, ct);
             await bot.AnswerCallbackQueryAsync(cb.Id, "✅ لغو شد.", cancellationToken: ct);
             if (cb.Message != null) DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
             try { await SendPermanent(dep.ChatId, "🚫 صف‌آرایی لغو شد.", ct: ct); } catch { }
@@ -7116,14 +8613,23 @@ partial class Program
         catch { return "نامشخص"; }
     }
 
+    static string HtmlText(string? text) =>
+        (text ?? "")
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;");
+
     static string HtmlTag(string? name, long uid)
     {
-        string clean = (string.IsNullOrEmpty(name) ? $"کاربر {uid}" : name).Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+        string clean = HtmlText(string.IsNullOrEmpty(name) ? $"کاربر {uid}" : name);
         return $"<a href=\"tg://user?id={uid}\">{clean}</a>";
     }
 
-    static async Task RunAssetUpdate()
+    static async Task RunAssetUpdate(bool force = false)
     {
+        if (Volatile.Read(ref databaseMaintenanceRunning) != 0)
+            return;
         if (Interlocked.Exchange(ref assetUpdateRunning, 1) == 1)
         {
             Console.WriteLine("[TIMER] skipped: previous run still in progress");
@@ -7131,7 +8637,7 @@ partial class Program
         }
         try
         {
-            if ((DateTime.UtcNow - lastAssetRunUtc).TotalSeconds < 30)
+            if (!force && (DateTime.UtcNow - lastAssetRunUtc).TotalSeconds < 30)
             {
                 Console.WriteLine("[TIMER] skipped: ran too recently");
                 return;
@@ -7159,124 +8665,119 @@ partial class Program
         _ => resType
     };
 
+    static List<(string ModelName, long Count)> BuildCappedEquipmentBreakdown(
+        Country c,
+        string category,
+        string defaultModel,
+        long total)
+    {
+        if (total <= 0)
+            return new List<(string, long)>();
+
+        var reservedModels = Database.GetReservedEquipmentModels(c.OwnerId, c.ChatId, category);
+        var explicitModels = Database.GetEquipmentModels(c.OwnerId, c.ChatId, category)
+            .Where(x => x.Count > 0 && !string.IsNullOrWhiteSpace(x.ModelName))
+            .GroupBy(x => x.ModelName, StringComparer.Ordinal)
+            .Select(g => (ModelName: g.Key,
+                Count: Math.Max(0, g.Sum(x => x.Count) - reservedModels.GetValueOrDefault(g.Key))))
+            .Where(x => x.Count > 0)
+            .ToList();
+
+        long explicitTotal = explicitModels.Sum(x => x.Count);
+        var result = new List<(string ModelName, long Count)>();
+
+        if (explicitTotal <= total)
+        {
+            // Older countries may have an implicit domestic-model balance that was never
+            // written to EquipmentModels. Keep that balance as the faction's default model.
+            long implicitDefault = total - explicitTotal;
+            long storedDefault = explicitModels
+                .Where(x => x.ModelName == defaultModel)
+                .Sum(x => x.Count);
+            long defaultCount = implicitDefault + storedDefault;
+            if (defaultCount > 0)
+                result.Add((defaultModel, defaultCount));
+
+            foreach (var model in explicitModels.Where(x => x.ModelName != defaultModel))
+                result.Add(model);
+
+            return result;
+        }
+
+        // The model ledger can be older than the aggregate country balance (for example
+        // after an old deployment or battle). Scale it to the real aggregate total so the
+        // UI can never offer more units than the country actually owns.
+        var scaled = explicitModels
+            .Select((model, index) =>
+            {
+                decimal exact = (decimal)model.Count * total / explicitTotal;
+                long count = (long)decimal.Floor(exact);
+                return new
+                {
+                    model.ModelName,
+                    Count = count,
+                    Fraction = exact - count,
+                    Index = index
+                };
+            })
+            .ToList();
+
+        long remaining = total - scaled.Sum(x => x.Count);
+        var extraIndexes = scaled
+            .OrderByDescending(x => x.Fraction)
+            .ThenBy(x => x.Index)
+            .Take((int)Math.Min(remaining, scaled.Count))
+            .Select(x => x.Index)
+            .ToHashSet();
+
+        var normalized = scaled
+            .Select(x => (x.ModelName, Count: x.Count + (extraIndexes.Contains(x.Index) ? 1L : 0L)))
+            .Where(x => x.Count > 0)
+            .ToList();
+
+        var normalizedDefault = normalized.FirstOrDefault(x => x.ModelName == defaultModel);
+        if (normalizedDefault.Count > 0)
+            result.Add(normalizedDefault);
+        result.AddRange(normalized.Where(x => x.ModelName != defaultModel));
+        return result;
+    }
+
     static List<(string ModelName, long Count)> GetTransferBreakdown(Country c, string resType)
     {
-        var dict = new Dictionary<string, long>(StringComparer.Ordinal);
-        if (c == null) return new List<(string, long)>();
+        if (c == null)
+            return new List<(string, long)>();
 
-        if (resType == "money")
+        long scalarTotal = resType switch
         {
-            if (c.Money > 0) return new List<(string, long)> { ("", c.Money) };
-            return new List<(string, long)>();
-        }
-        if (resType == "iron")
-        {
-            if (c.Iron > 0) return new List<(string, long)> { ("", c.Iron) };
-            return new List<(string, long)>();
-        }
-        if (resType == "soldiers")
-        {
-            if (c.Soldiers > 0) return new List<(string, long)> { ("", c.Soldiers) };
-            return new List<(string, long)>();
-        }
-        if (resType == "boats")
-        {
-            if (c.Boats > 0)
-            {
-                var models = Database.GetEquipmentModels(c.OwnerId, c.ChatId, "Boats");
-                if (models.Count > 0)
-                {
-                    var listB = new List<(string, long)>();
-                    foreach (var m in models.Where(x => x.Count > 0)) listB.Add((m.ModelName, m.Count));
-                    long sum = models.Sum(x => x.Count);
-                    long dom = Math.Max(0, c.Boats - sum);
-                    if (dom > 0) listB.Insert(0, (Database.GetDefaultBoatModel(c.Faction), dom));
-                    return listB;
-                }
-                return new List<(string, long)> { (Database.GetDefaultBoatModel(c.Faction), c.Boats) };
-            }
-            return new List<(string, long)>();
-        }
-        if (resType == "submarines")
-        {
-            if (c.Submarines > 0)
-            {
-                var models = Database.GetEquipmentModels(c.OwnerId, c.ChatId, "Submarines");
-                if (models.Count > 0)
-                {
-                    var listS = new List<(string, long)>();
-                    foreach (var m in models.Where(x => x.Count > 0)) listS.Add((m.ModelName, m.Count));
-                    long sum = models.Sum(x => x.Count);
-                    long dom = Math.Max(0, c.Submarines - sum);
-                    if (dom > 0) listS.Insert(0, (Database.GetDefaultSubModel(c.Faction), dom));
-                    return listS;
-                }
-                return new List<(string, long)> { (Database.GetDefaultSubModel(c.Faction), c.Submarines) };
-            }
-            return new List<(string, long)>();
-        }
-        if (resType == "battleships")
-        {
-            if (c.Battleships > 0)
-            {
-                var models = Database.GetEquipmentModels(c.OwnerId, c.ChatId, "Battleships");
-                if (models.Count > 0)
-                {
-                    var listBS = new List<(string, long)>();
-                    foreach (var m in models.Where(x => x.Count > 0)) listBS.Add((m.ModelName, m.Count));
-                    long sum = models.Sum(x => x.Count);
-                    long dom = Math.Max(0, c.Battleships - sum);
-                    if (dom > 0) listBS.Insert(0, (Database.GetDefaultBattleshipModel(c.Faction), dom));
-                    return listBS;
-                }
-                return new List<(string, long)> { (Database.GetDefaultBattleshipModel(c.Faction), c.Battleships) };
-            }
-            return new List<(string, long)>();
-        }
+            "money" => c.Money,
+            "iron" => c.Iron,
+            "soldiers" => c.Soldiers,
+            _ => 0
+        };
+        if (resType is "money" or "iron" or "soldiers")
+            return scalarTotal > 0
+                ? new List<(string, long)> { ("", scalarTotal) }
+                : new List<(string, long)>();
 
-        string category = resType switch { "tanks" => "Tanks", "planes" => "Planes", "bombers" => "Bombers", "boats" => "Boats", "submarines" => "Submarines", "battleships" => "Battleships", _ => "" };
-        if (string.IsNullOrEmpty(category)) return new List<(string, long)>();
-
-        long total = resType switch { "tanks" => c.Tanks, "planes" => c.Planes, "bombers" => c.Bombers, "boats" => c.Boats, "submarines" => c.Submarines, "battleships" => c.Battleships, _ => 0 };
-        if (total <= 0) return new List<(string, long)>();
-
-        var foreign = Database.GetEquipmentModels(c.OwnerId, c.ChatId, category);
-        long sumForeign = foreign.Sum(x => x.Count);
-        long dom2 = Math.Max(0, total - sumForeign);
-
-        string defaultModel = resType switch
+        var equipment = resType switch
         {
-            "tanks" => Database.GetDefaultTankModel(c.Faction),
-            "planes" => Database.GetDefaultPlaneModel(c.Faction),
-            "bombers" => Database.GetDefaultBomberModel(c.Faction),
-            "boats" => Database.GetDefaultBoatModel(c.Faction),
-            "submarines" => Database.GetDefaultSubModel(c.Faction),
-            "battleships" => Database.GetDefaultBattleshipModel(c.Faction),
-            _ => ""
+            "tanks" => (Category: "Tanks", DefaultModel: Database.GetDefaultTankModel(c.Faction), Total: c.Tanks),
+            "planes" => (Category: "Planes", DefaultModel: Database.GetDefaultPlaneModel(c.Faction), Total: c.Planes),
+            "bombers" => (Category: "Bombers", DefaultModel: Database.GetDefaultBomberModel(c.Faction), Total: c.Bombers),
+            "boats" => (Category: "Boats", DefaultModel: Database.GetDefaultBoatModel(c.Faction), Total: c.Boats),
+            "submarines" => (Category: "Submarines", DefaultModel: Database.GetDefaultSubModel(c.Faction), Total: c.Submarines),
+            "battleships" => (Category: "Battleships", DefaultModel: Database.GetDefaultBattleshipModel(c.Faction), Total: c.Battleships),
+            _ => (Category: "", DefaultModel: "", Total: 0L)
         };
 
-        if (dom2 > 0)
-        {
-            if (!dict.ContainsKey(defaultModel)) dict[defaultModel] = 0;
-            dict[defaultModel] += dom2;
-        }
+        if (string.IsNullOrEmpty(equipment.Category))
+            return new List<(string, long)>();
 
-        foreach (var f in foreign.Where(x => x.Count > 0))
-        {
-            if (!dict.ContainsKey(f.ModelName)) dict[f.ModelName] = 0;
-            dict[f.ModelName] += f.Count;
-        }
-
-        var list = new List<(string ModelName, long Count)>();
-        if (dict.ContainsKey(defaultModel))
-        {
-            list.Add((defaultModel, dict[defaultModel]));
-            dict.Remove(defaultModel);
-        }
-        foreach (var kv in dict)
-            list.Add((kv.Key, kv.Value));
-
-        return list;
+        return BuildCappedEquipmentBreakdown(
+            c,
+            equipment.Category,
+            equipment.DefaultModel,
+            equipment.Total);
     }
 
     static List<(string ModelName, long Count, int DefPct)> GetDefenseBreakdown(Country c, string resType)
@@ -7317,6 +8818,20 @@ partial class Program
 
     static async Task ProcessActiveTransfers(CancellationToken ct)
     {
+        await transferProcessorLock.WaitAsync(ct);
+        try
+        {
+            if (Volatile.Read(ref databaseMaintenanceRunning) == 0)
+                await ProcessActiveTransfersCore(ct);
+        }
+        finally
+        {
+            transferProcessorLock.Release();
+        }
+    }
+
+    static async Task ProcessActiveTransfersCore(CancellationToken ct)
+    {
         var transfers = Database.GetActiveTransfers();
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var t in transfers)
@@ -7328,99 +8843,48 @@ partial class Program
             string rn = GetResName(t.ResourceType);
             if (t.ArriveAtMs <= now)
             {
-                if (receiver != null)
+                var mutationLocks = await AcquireCountryMutationLocks(
+                    t.ChatId,
+                    new[] { t.SenderId, t.ReceiverId },
+                    ct);
+                try
                 {
-                    //  – battleship cap check
-                    if (t.ResourceType == "battleships" && receiver.Battleships >= 3)
+                Faction modelFaction = sender?.Faction ?? receiver?.Faction ?? Faction.USA;
+                string resolvedModel = !string.IsNullOrWhiteSpace(t.ModelName)
+                    ? t.ModelName
+                    : t.ResourceType switch
                     {
-                        // Return to sender
-                        if (sender != null)
-                        {
-                            sender.Battleships += t.Amount;
-                            Database.AddEquipmentModel(sender.OwnerId, sender.ChatId, "Battleships", string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultBattleshipModel(sender.Faction) : t.ModelName, t.Amount);
-                            Database.UpdateCountryFull(sender);
-                            try { await bot.SendTextMessageAsync(t.SenderId, $"❌ ترنسفر نبردناو به {rName} ناموفق – گیرنده حداکثر 3 نبردناو دارد (تعداد نبرد ناو: 3). محموله برگشت خورد.", cancellationToken: ct); } catch { }
-                        }
-                        Database.DeleteTransfer(t.Id);
-                        continue;
-                    }
+                        "tanks" => Database.GetDefaultTankModel(modelFaction),
+                        "planes" => Database.GetDefaultPlaneModel(modelFaction),
+                        "bombers" => Database.GetDefaultBomberModel(modelFaction),
+                        "boats" => Database.GetDefaultBoatModel(modelFaction),
+                        "submarines" => Database.GetDefaultSubModel(modelFaction),
+                        "battleships" => Database.GetDefaultBattleshipModel(modelFaction),
+                        _ => ""
+                    };
 
-                    switch (t.ResourceType)
-                    {
-                        case "money": receiver.Money += t.Amount; break;
-                        case "iron": receiver.Iron += t.Amount; break;
-                        case "soldiers": receiver.Soldiers += t.Amount; break;
-                        case "tanks":
-                            receiver.Tanks += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultTankModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Tanks", model, t.Amount);
-                            }
-                            break;
-                        case "planes":
-                            receiver.Planes += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultPlaneModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Planes", model, t.Amount);
-                            }
-                            break;
-                        case "bombers":
-                            receiver.Bombers += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultBomberModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Bombers", model, t.Amount);
-                            }
-                            break;
-                        case "boats":
-                            receiver.Boats += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultBoatModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Boats", model, t.Amount);
-                            }
-                            break;
-                        case "submarines":
-                            receiver.Submarines += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultSubModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Submarines", model, t.Amount);
-                            }
-                            break;
-                        case "battleships":
-                            receiver.Battleships += t.Amount;
-                            {
-                                var model = string.IsNullOrWhiteSpace(t.ModelName) ? Database.GetDefaultBattleshipModel(sender?.Faction ?? receiver.Faction) : t.ModelName;
-                                Database.AddEquipmentModel(t.ReceiverId, t.ChatId, "Battleships", model, t.Amount);
-                            }
-                            break;
-                    }
-                    Database.UpdateCountryFull(receiver);
+                string outcome = Database.CompleteTransfer(t, resolvedModel);
+                string modelInfo = string.IsNullOrWhiteSpace(t.ModelName) ? "" : $" ({t.ModelName})";
+                if (outcome == "delivered")
+                {
                     Database.ReconcileDefense(t.ReceiverId, t.ChatId);
-                    Database.DeleteTransfer(t.Id);
-                    string modelInfo = string.IsNullOrWhiteSpace(t.ModelName) ? "" : $" ({t.ModelName})";
                     try { await bot.SendTextMessageAsync(t.ReceiverId, $"📦 محموله رسید!\n{t.Amount:N0} {rn}{modelInfo} از {sName}", cancellationToken: ct); } catch { }
                     try { await bot.SendTextMessageAsync(t.SenderId, $"✅ محموله به {rName} تحویل شد.", cancellationToken: ct); } catch { }
                 }
-                else
+                else if (outcome == "capacity")
                 {
-                    if (sender != null)
-                    {
-                        switch (t.ResourceType)
-                        {
-                            case "money": sender.Money += t.Amount; break;
-                            case "iron": sender.Iron += t.Amount; break;
-                            case "soldiers": sender.Soldiers += t.Amount; break;
-                            case "tanks": sender.Tanks += t.Amount; break;
-                            case "planes": sender.Planes += t.Amount; break;
-                            case "bombers": sender.Bombers += t.Amount; break;
-                            case "boats": sender.Boats += t.Amount; break;
-                            case "submarines": sender.Submarines += t.Amount; break;
-                            case "battleships": sender.Battleships += t.Amount; break;
-                        }
-                        Database.UpdateCountryFull(sender);
-                        Database.ReconcileDefense(t.SenderId, t.ChatId);
-                        try { await bot.SendTextMessageAsync(t.SenderId, $"↩️ محموله برگشت خورد! گیرنده کشورش را از دست داده بود. {t.Amount:N0} {rn} به انبارت برگشت.", cancellationToken: ct); } catch { }
-                    }
-                    Database.DeleteTransfer(t.Id);
+                    Database.ReconcileDefense(t.SenderId, t.ChatId);
+                    try { await bot.SendTextMessageAsync(t.SenderId, $"❌ ترنسفر نبردناو به {rName} ناموفق بود؛ ظرفیت گیرنده حداکثر ۳ نبردناو است و محموله برگشت خورد.", cancellationToken: ct); } catch { }
+                }
+                else if (outcome == "returned")
+                {
+                    Database.ReconcileDefense(t.SenderId, t.ChatId);
+                    try { await bot.SendTextMessageAsync(t.SenderId, $"↩️ محموله برگشت خورد! گیرنده کشورش را از دست داده بود. {t.Amount:N0} {rn} به انبارت برگشت.", cancellationToken: ct); } catch { }
+                }
+                }
+                finally
+                {
+                    ReleaseCountryMutationLocks(mutationLocks);
                 }
             }
             else if ((t.ArriveAtMs - now) <= 5 * 60 * 1000 && t.Notified == 0)
@@ -7431,6 +8895,20 @@ partial class Program
         }
     }
     static async Task ProcessActiveDeployments(CancellationToken ct)
+    {
+        await deploymentProcessorLock.WaitAsync(ct);
+        try
+        {
+            if (Volatile.Read(ref databaseMaintenanceRunning) == 0)
+                await ProcessActiveDeploymentsCore(ct);
+        }
+        finally
+        {
+            deploymentProcessorLock.Release();
+        }
+    }
+
+    static async Task ProcessActiveDeploymentsCore(CancellationToken ct)
     {
         var deployments = Database.GetActiveDeployments();
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -7445,85 +8923,234 @@ partial class Program
                 // FIX(2): در پایان طبیعی صف‌آرایی هم پیام پین‌شده آنپین و حذف شود
                 await UnpinAndDeleteAnnounce(d.ChatId, d.AnnounceMsgId, ct);
 
+                var participantIds = Database.GetDeploymentContributors(d.Id)
+                    .Select(x => x.UserId)
+                    .Append(d.InitiatorId)
+                    .Append(d.TargetUserId)
+                    .ToList();
+                if (d.Type == "Offensive")
+                {
+                    var defensiveIds = deployments
+                        .Where(x => x.ChatId == d.ChatId && x.Type == "Defensive" &&
+                                    x.TargetUserId == d.TargetUserId && x.EndAtMs > now)
+                        .SelectMany(x => Database.GetDeploymentContributors(x.Id))
+                        .Select(x => x.UserId);
+                    participantIds.AddRange(defensiveIds);
+                }
+                var mutationLocks = await AcquireCountryMutationLocks(d.ChatId, participantIds, ct);
+                try
+                {
                 string gTitle = $"گروه {d.ChatId}";
                 try { var ch = await bot.GetChatAsync(d.ChatId, ct); if (!string.IsNullOrEmpty(ch.Title)) gTitle = ch.Title; } catch { }
                 if (d.Type == "Offensive")
                 {
-                    var attacker = Database.GetCountry(d.InitiatorId, d.ChatId);
-                    var defender = tc;
-                    if (attacker == null || defender == null) { Database.DeleteDeployment(d.Id); try { await SendPermanent(d.ChatId, $"❌ صف‌آرایی «{aName}» علیه «{tName}» لغو شد.", ct: ct); } catch { } continue; }
-                    try { await SendPermanent(d.ChatId, $"⚔️ آغاز تهاجم اتحاد «{aName}» علیه «{tName}»!", ct: ct); } catch { }
-                    attacker.Tanks += d.Tanks; attacker.Soldiers += d.Soldiers; attacker.Planes += d.Fighters; attacker.Bombers += d.Bombers;
-                    var result = WarEngine.RunBattle(attacker, defender, d.Tanks, d.Soldiers, d.Fighters, d.Bombers, d.Strategy, d.Tactic, 0, 0);
-                    attacker.Tanks = Math.Max(0, attacker.Tanks - d.Tanks);
-                    attacker.Soldiers = Math.Max(0, attacker.Soldiers - d.Soldiers);
-                    attacker.Planes = Math.Max(0, attacker.Planes - d.Fighters);
-                    attacker.Bombers = Math.Max(0, attacker.Bombers - d.Bombers);
-                    double tR = d.Tanks > 0 ? (double)Math.Max(0, d.Tanks - result.AttackerTanksLost) / d.Tanks : 0;
-                    double sR = d.Soldiers > 0 ? (double)Math.Max(0, d.Soldiers - result.AttackerSoldiersLost) / d.Soldiers : 0;
-                    double fR = d.Fighters > 0 ? (double)Math.Max(0, d.Fighters - result.AttackerFightersLost) / d.Fighters : 0;
-                    double bR = d.Bombers > 0 ? (double)Math.Max(0, d.Bombers - result.AttackerBombersLost) / d.Bombers : 0;
-                    var contribs = Database.GetDeploymentContributors(d.Id);
-                    foreach (var cbn in contribs)
+                    tc = Database.GetCountry(d.TargetUserId, d.ChatId);
+                    if (tc == null)
                     {
-                        var cc = Database.GetCountry(cbn.UserId, d.ChatId);
-                        if (cc != null)
-                        {
-                            cc.Tanks += (long)Math.Round(cbn.Tanks * tR);
-                            cc.Soldiers += (long)Math.Round(cbn.Soldiers * sR);
-                            cc.Planes += (long)Math.Round(cbn.Fighters * fR);
-                            cc.Bombers += (long)Math.Round(cbn.Bombers * bR);
-                            if (cbn.UserId == d.InitiatorId) { cc.Money += result.AttackerMoneyGained; cc.Iron += result.AttackerIronGained; cc.Welfare += result.AttackerWelfareChange; }
-                            Database.UpdateCountryFull(cc);
-                            Database.ReconcileDefense(cbn.UserId, d.ChatId);
-                        }
+                        Database.CancelDeploymentForces(d);
+                        try { await SendPermanent(d.ChatId, "❌ هدف صف‌آرایی وجود ندارد؛ نیروها بازگشتند.", ct: ct); } catch { }
+                        continue;
                     }
-                    if (!contribs.Any(x => x.UserId == d.InitiatorId))
-                    {
-                        var initC = Database.GetCountry(d.InitiatorId, d.ChatId);
-                        if (initC != null) { initC.Money += result.AttackerMoneyGained; initC.Iron += result.AttackerIronGained; initC.Welfare += result.AttackerWelfareChange; Database.UpdateCountryFull(initC); Database.ReconcileDefense(initC.OwnerId, d.ChatId); }
-                    }
-                    defender.Tanks = Math.Max(0, defender.Tanks - result.DefenderTanksLost);
-                    defender.Soldiers = Math.Max(0, defender.Soldiers - result.DefenderSoldiersLost);
-                    defender.Planes = Math.Max(0, defender.Planes - result.DefenderFightersLost);
-                    defender.AntiAir = Math.Max(0, defender.AntiAir - result.DefenderAntiAirLost);
-                    defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
-                    defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
-                    defender.Welfare += result.DefenderWelfareChange;
-                    Database.UpdateCountryFull(defender);
-                    Database.ReconcileDefense(defender.OwnerId, d.ChatId);
-                    if (!string.IsNullOrEmpty(result.AttackerReport))
-                    {
-                        var allIds = contribs.Select(x => x.UserId).Distinct().ToList();
-                        foreach (var pid in allIds) { try { await bot.SendTextMessageAsync(pid, result.AttackerReport, cancellationToken: ct); } catch { } }
-                    }
-                    if (!string.IsNullOrEmpty(result.DefenderReport)) try { await bot.SendTextMessageAsync(d.TargetUserId, result.DefenderReport, cancellationToken: ct); } catch { }
-                    if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(d.ChatId, result.GroupAnnouncement, ct: ct); } catch { } }
-                    await ProcessSiege(d.InitiatorId, d.TargetUserId, d.ChatId, result, ct);
-                    Database.DeleteDeployment(d.Id);
+                    await ProcessOffensiveDeploymentBattle(d, tc, ct);
                 }
                 else
                 {
                     //  – defensive troops no longer in target assets, just return to contributors
                     var defC = Database.GetDeploymentContributors(d.Id);
-                    long oT = defC.Sum(x => x.Tanks), oS = defC.Sum(x => x.Soldiers), oF = defC.Sum(x => x.Fighters), oB = defC.Sum(x => x.Bombers);
-                    double tr = oT > 0 ? (double)Math.Max(0, d.Tanks) / oT : 1.0;
-                    double sr = oS > 0 ? (double)Math.Max(0, d.Soldiers) / oS : 1.0;
-                    double fr = oF > 0 ? (double)Math.Max(0, d.Fighters) / oF : 1.0;
-                    double br = oB > 0 ? (double)Math.Max(0, d.Bombers) / oB : 1.0;
-                    foreach (var cbn in defC)
+                    long[] returnedTanks = AllocateProportionallyExact(d.Tanks, defC.Select(x => x.Tanks).ToArray());
+                    long[] returnedSoldiers = AllocateProportionallyExact(d.Soldiers, defC.Select(x => x.Soldiers).ToArray());
+                    long[] returnedFighters = AllocateProportionallyExact(d.Fighters, defC.Select(x => x.Fighters).ToArray());
+                    long[] returnedBombers = AllocateProportionallyExact(d.Bombers, defC.Select(x => x.Bombers).ToArray());
+                    var returns = defC.Select((cbn, i) => (
+                        UserId: cbn.UserId,
+                        Tanks: returnedTanks[i],
+                        Soldiers: returnedSoldiers[i],
+                        Fighters: returnedFighters[i],
+                        Bombers: returnedBombers[i]))
+                        .ToList();
+                    if (Database.ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns))
                     {
-                        var cc = Database.GetCountry(cbn.UserId, d.ChatId);
-                        if (cc != null) { cc.Tanks += (long)Math.Round(cbn.Tanks * tr); cc.Soldiers += (long)Math.Round(cbn.Soldiers * sr); cc.Planes += (long)Math.Round(cbn.Fighters * fr); cc.Bombers += (long)Math.Round(cbn.Bombers * br); Database.UpdateCountryFull(cc); Database.ReconcileDefense(cbn.UserId, d.ChatId); }
+                        foreach (long contributorId in returns.Select(x => x.UserId).Distinct())
+                            Database.ReconcileDefense(contributorId, d.ChatId);
                     }
-                    Database.DeleteDeployment(d.Id);
                     try { await SendPermanent(d.ChatId, $"🛡 پایان دفاع اتحاد «{aName}» از «{tName}»", ct: ct); } catch { }
+                }
+                }
+                finally
+                {
+                    ReleaseCountryMutationLocks(mutationLocks);
                 }
             }
             else if (d.Type == "Offensive" && (now - d.LastWarnMs) >= 30 * 60 * 1000 && d.LastWarnMs > 0)
             {
                 Database.UpdateDeploymentWarnMs(d.Id, now);
                 try { await bot.SendTextMessageAsync(d.TargetUserId, $"⚠️ هشدار: صف‌آرایی «{aName}» علیه شما — {FormatRemaining(d.EndAtMs - now)} دیگر", cancellationToken: ct); } catch { }
+            }
+        }
+    }
+
+    static async Task ProcessOffensiveDeploymentBattle(Deployment deployment, Country defender, CancellationToken ct)
+    {
+        var attackerParticipants = BuildDeploymentParticipants(new List<Deployment> { deployment }, deployment.ChatId);
+        if (attackerParticipants.Sum(x => x.Soldiers + x.Tanks.Sum(t => t.Count)) <= 0)
+        {
+            Database.CancelDeploymentForces(deployment);
+            return;
+        }
+
+        var ownDefense = BuildOwnDefenseParticipant(defender);
+        var defensiveDeployments = Database.GetActiveDeployments()
+            .Where(d => d.ChatId == deployment.ChatId && d.Type == "Defensive" &&
+                        d.TargetUserId == defender.OwnerId && d.EndAtMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            .ToList();
+        var defenderDeployments = BuildDeploymentParticipants(defensiveDeployments, deployment.ChatId);
+        var defenders = new List<BattleParticipant> { ownDefense };
+        defenders.AddRange(defenderDeployments);
+        var request = new BattleRequest
+        {
+            BattleId = deployment.Id,
+            ChatId = deployment.ChatId,
+            ScenarioSeed = WarEngine.CreateScenarioSeed(),
+            Attackers = attackerParticipants,
+            Defenders = defenders,
+            AttackerOrders = new BattleOrders
+            {
+                GroundStrategy = deployment.Strategy,
+                GroundTactic = deployment.Tactic,
+                AirStrategy = attackerParticipants.Sum(x => x.Fighters.Sum(f => f.Count) + x.Bombers.Sum(b => b.Count)) > 0 ? 1 : 0,
+                AirTactic = 1
+            },
+            DefenderOrders = new BattleOrders
+            {
+                GroundStrategy = defender.DefenseStrategy,
+                GroundTactic = defender.DefenseTactic,
+                AirStrategy = defender.AirDefStrategy,
+                AirTactic = defender.AirDefTactic
+            }
+        };
+
+        BattleResult result;
+        try
+        {
+            var context = new BattleJobContext
+            {
+                AttackerId = deployment.InitiatorId,
+                DefenderId = defender.OwnerId,
+                ChatId = deployment.ChatId,
+                DeploymentId = deployment.Id,
+                DefensiveDeploymentIds = defensiveDeployments.Select(x => x.Id).ToList()
+            };
+            var persisted = Database.EnsureBattleJob(request.BattleId, "Deployment",
+                JsonSerializer.Serialize(request, BattleJsonOptions),
+                JsonSerializer.Serialize(context, BattleJsonOptions));
+            request = JsonSerializer.Deserialize<BattleRequest>(persisted.RequestJson, BattleJsonOptions)
+                ?? throw new InvalidOperationException("Persisted deployment battle request is invalid.");
+            if (!string.IsNullOrWhiteSpace(persisted.ResultJson))
+                result = JsonSerializer.Deserialize<BattleResult>(persisted.ResultJson, BattleJsonOptions)
+                    ?? throw new InvalidOperationException("Persisted deployment battle result is invalid.");
+            else
+            {
+                Database.UpdateBattleJob(request.BattleId, "Running");
+                result = await BattleExecutionScheduler.EnqueueAsync(request, ct);
+                Database.UpdateBattleJob(request.BattleId, "Resolved",
+                    JsonSerializer.Serialize(result, BattleJsonOptions));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DEPLOYMENT BATTLE ENGINE ERR] {ex}");
+            try { Database.UpdateBattleJob(request.BattleId, "Pending", error: ex.Message); } catch { }
+            try { await SendPermanent(deployment.ChatId, "❌ پردازش صف‌آرایی ناموفق بود؛ نیروها و رکورد عملیات محفوظ ماندند.", ct: ct); } catch { }
+            return;
+        }
+
+        var returns = new List<(long UserId, long Tanks, long Soldiers, long Fighters, long Bombers)>();
+        var attackerEquipmentLosses = new List<(Country Country, ParticipantBattleLoss Loss)>();
+        foreach (var participant in attackerParticipants)
+        {
+            result.AttackerParticipantLosses.TryGetValue(participant.OwnerId, out var loss);
+            long tankLoss = loss?.TanksUnavailable.Values.Sum() ?? 0;
+            long fighterLoss = loss?.FightersUnavailable.Values.Sum() ?? 0;
+            long bomberLoss = loss?.BombersUnavailable.Values.Sum() ?? 0;
+            returns.Add((participant.OwnerId,
+                Math.Max(0, participant.Tanks.Sum(x => x.Count) - tankLoss),
+                Math.Max(0, participant.Soldiers - (loss?.SoldiersUnavailable ?? 0)),
+                Math.Max(0, participant.Fighters.Sum(x => x.Count) - fighterLoss),
+                Math.Max(0, participant.Bombers.Sum(x => x.Count) - bomberLoss)));
+            var country = Database.GetCountry(participant.OwnerId, deployment.ChatId);
+            if (country != null && loss != null)
+                attackerEquipmentLosses.Add((country, loss));
+        }
+
+        if (!Database.ReturnDeploymentForcesAndDelete(deployment.Id, deployment.ChatId, returns))
+            throw new InvalidOperationException("Deployment was already completed by another worker.");
+        foreach (var item in attackerEquipmentLosses)
+        {
+            DeductEquipmentLosses(item.Country, "Tanks", item.Loss.TanksUnavailable, WarEngine.CanonicalTankModel);
+            DeductEquipmentLosses(item.Country, "Planes", item.Loss.FightersUnavailable, WarEngine.CanonicalFighterModel);
+            DeductEquipmentLosses(item.Country, "Bombers", item.Loss.BombersUnavailable, WarEngine.CanonicalBomberModel);
+        }
+        try { Database.SaveBattleResult(request, result); }
+        catch (Exception historyError) { Console.WriteLine($"[BATTLE HISTORY ERR] {historyError}"); }
+        foreach (long ownerId in returns.Select(x => x.UserId).Distinct())
+            Database.ReconcileDefense(ownerId, deployment.ChatId);
+
+        ApplyDefenderBattleLosses(defender, ownDefense, defenderDeployments,
+            defensiveDeployments, result);
+        Database.UpdateCountryFull(defender);
+        Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
+
+        foreach (long ownerId in attackerParticipants.Select(x => x.OwnerId).Distinct())
+        {
+            try { await SendPermanent(ownerId, result.AttackerReport, ct: ct); } catch { }
+        }
+        try { await SendPermanent(defender.OwnerId, result.DefenderReport, ct: ct); } catch { }
+        try { await SendPermanent(deployment.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
+        await ProcessStrategicBattleOutcome(deployment.InitiatorId, defender.OwnerId, deployment.ChatId, result, ct);
+        Database.UpdateBattleJob(request.BattleId, "Completed",
+            JsonSerializer.Serialize(result, BattleJsonOptions));
+    }
+
+    static void ApplyDefenderBattleLosses(Country defender, BattleParticipant ownDefense,
+        List<BattleParticipant> deploymentParticipants, List<Deployment> defensiveDeployments,
+        BattleResult result)
+    {
+        foreach (var (ownerId, loss) in result.DefenderParticipantLosses)
+        {
+            var deployed = deploymentParticipants.Where(x => x.OwnerId == ownerId).ToList();
+            long deployedSoldiers = deployed.Sum(x => x.Soldiers);
+            long deployedTanks = deployed.Sum(x => x.Tanks.Sum(m => m.Count));
+            long deployedFighters = deployed.Sum(x => x.Fighters.Sum(m => m.Count));
+            long deployedBombers = deployed.Sum(x => x.Bombers.Sum(m => m.Count));
+            long ownSoldiers = ownerId == defender.OwnerId ? ownDefense.Soldiers : 0;
+            long ownTanks = ownerId == defender.OwnerId ? ownDefense.Tanks.Sum(x => x.Count) : 0;
+            long ownFighters = ownerId == defender.OwnerId ? ownDefense.Fighters.Sum(x => x.Count) : 0;
+            long totalTankLoss = loss.TanksUnavailable.Values.Sum();
+            long totalFighterLoss = loss.FightersUnavailable.Values.Sum();
+            long totalBomberLoss = loss.BombersUnavailable.Values.Sum();
+            long ownSLoss = ProportionalShare(loss.SoldiersUnavailable, ownSoldiers, deployedSoldiers);
+            long ownTLoss = ProportionalShare(totalTankLoss, ownTanks, deployedTanks);
+            long ownFLoss = ProportionalShare(totalFighterLoss, ownFighters, deployedFighters);
+
+            if (ownerId == defender.OwnerId)
+            {
+                defender.Soldiers = Math.Max(0, defender.Soldiers - ownSLoss);
+                defender.Tanks = Math.Max(0, defender.Tanks - ownTLoss);
+                defender.Planes = Math.Max(0, defender.Planes - ownFLoss);
+                defender.AntiAir = Math.Max(0, defender.AntiAir - loss.AntiAirLost);
+            }
+            Database.ApplyDefensiveDeploymentLosses(defender.ChatId, defender.OwnerId, ownerId,
+                totalTankLoss - ownTLoss,
+                loss.SoldiersUnavailable - ownSLoss,
+                totalFighterLoss - ownFLoss,
+                totalBomberLoss,
+                defensiveDeployments.Select(x => x.Id).ToArray());
+            var ownerCountry = Database.GetCountry(ownerId, defender.ChatId);
+            if (ownerCountry != null)
+            {
+                DeductEquipmentLosses(ownerCountry, "Tanks", loss.TanksUnavailable, WarEngine.CanonicalTankModel);
+                DeductEquipmentLosses(ownerCountry, "Planes", loss.FightersUnavailable, WarEngine.CanonicalFighterModel);
+                DeductEquipmentLosses(ownerCountry, "Bombers", loss.BombersUnavailable, WarEngine.CanonicalBomberModel);
             }
         }
     }
@@ -7553,8 +9180,8 @@ partial class Program
             bool isOff = dep.Type == "Offensive";
             long endMs = dep.EndAtMs;
             string bText = isOff ?
-                $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{allyName}»</b> علیه کشور <b>«{tName}»</b> (مالک: {targetTag}) صف‌آرایی کرد!\n⏱ مدت: <b>{dep.DurationHours} ساعت</b> (پایان: {FormatTime(endMs)})\n\n💥 <b>نیروهای فعلی:</b>\n🪖 سرباز: {dep.Soldiers:N0} | 🛡 تانک: {dep.Tanks:N0}\n✈️ جنگنده: {dep.Fighters:N0} | 🛩 بمب‌افکن: {dep.Bombers:N0}\n\n👥 مشارکت‌کنندگان ({contribs.Count} نفر):\n{tags}\n\n🎯 استراتژی: {dep.Strategy} | تاکتیک: {dep.Tactic}" :
-                $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{allyName}»</b> برای حمایت از کشور <b>«{tName}»</b> (مالک: {targetTag}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{dep.DurationHours} ساعت</b> (پایان: {FormatTime(endMs)})\n\n🛡 <b>نیروهای پشتیبان فعلی:</b>\n🪖 سرباز: {dep.Soldiers:N0} | 🛡 تانک: {dep.Tanks:N0}\n✈️ جنگنده: {dep.Fighters:N0} | 🛩 بمب‌افکن: {dep.Bombers:N0}\n\n👥 مشارکت‌کنندگان ({contribs.Count} نفر):\n{tags}\n\n🎯 استراتژی: {dep.Strategy} | تاکتیک: {dep.Tactic}";
+                $"🚨 <b>اعلان جنگ و صف‌آرایی تهاجمی!</b> ⚔️\n\n👑 اتحاد <b>«{HtmlText(allyName)}»</b> علیه کشور <b>«{HtmlText(tName)}»</b> (مالک: {targetTag}) صف‌آرایی کرد!\n⏱ مدت: <b>{dep.DurationHours} ساعت</b> (پایان: {FormatTime(endMs)})\n\n💥 <b>نیروهای فعلی:</b>\n🪖 سرباز: {dep.Soldiers:N0} | 🛡 تانک: {dep.Tanks:N0}\n✈️ جنگنده: {dep.Fighters:N0} | 🛩 بمب‌افکن: {dep.Bombers:N0}\n\n👥 مشارکت‌کنندگان ({contribs.Count} نفر):\n{tags}\n\n🎯 استراتژی: {dep.Strategy} | تاکتیک: {dep.Tactic}" :
+                $"🛡 <b>اعلام صف‌آرایی دفاعی!</b> 🏰\n\n👑 اتحاد <b>«{HtmlText(allyName)}»</b> برای حمایت از کشور <b>«{HtmlText(tName)}»</b> (مالک: {targetTag}) خط پدافندی تشکیل داد!\n⏱ مدت: <b>{dep.DurationHours} ساعت</b> (پایان: {FormatTime(endMs)})\n\n🛡 <b>نیروهای پشتیبان فعلی:</b>\n🪖 سرباز: {dep.Soldiers:N0} | 🛡 تانک: {dep.Tanks:N0}\n✈️ جنگنده: {dep.Fighters:N0} | 🛩 بمب‌افکن: {dep.Bombers:N0}\n\n👥 مشارکت‌کنندگان ({contribs.Count} نفر):\n{tags}\n\n🎯 استراتژی: {dep.Strategy} | تاکتیک: {dep.Tactic}";
 
             var joinKb = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("⚔️ مشارکت و اعزام نیرو", $"dep_join:{depId}") } });
 
@@ -7582,7 +9209,13 @@ partial class Program
         attackCounts.Clear();
         transferCounts.Clear();
         lastAssetUpdateAt = DateTime.UtcNow;
-        var countries = Database.GetAllCountries();
+        var countryKeys = Database.GetAllCountries()
+            .Select(c => (c.ChatId, c.OwnerId));
+        var mutationLocks = await AcquireCountryMutationLocks(countryKeys, CancellationToken.None);
+        var countries = new List<Country>();
+        try
+        {
+        countries = Database.GetAllCountries();
         Console.WriteLine($"[TIMER] RunAssetUpdate started at {DateTime.Now} — {countries.Count} countries");
         foreach (var c in countries)
         {
@@ -7626,6 +9259,11 @@ partial class Program
 
             Database.UpdateCountryFull(c);
             Database.ReconcileDefense(c.OwnerId, c.ChatId);
+        }
+        }
+        finally
+        {
+            ReleaseCountryMutationLocks(mutationLocks);
         }
 
         string updateCaption =
@@ -7687,185 +9325,46 @@ partial class Program
         }
         Console.WriteLine($"[TIMER] Update sent to {sentGroups} groups, failed {failedGroups}");
 
+        string backupPath = $"gamedata_backup_{DateTime.Now:yyyyMMdd_HHmmss}.db";
         try
         {
-            string backupPath = $"gamedata_backup_{DateTime.Now:yyyyMMdd_HHmmss}.db";
-            System.IO.File.Copy("gamedata.db", backupPath, overwrite: true);
+            Database.CreateConsistentBackup(backupPath);
+            using var backupStream = System.IO.File.OpenRead(backupPath);
             await bot.SendDocumentAsync(OWNER_ID,
-                new InputOnlineFile(System.IO.File.OpenRead(backupPath), backupPath),
+                new InputOnlineFile(backupStream, System.IO.Path.GetFileName(backupPath)),
                 caption: $"📦 بک‌آپ دیتابیس — {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n👥 تعداد کشورها: {countries.Count}",
                 cancellationToken: CancellationToken.None);
-            Console.WriteLine($"[TIMER] DB backup sent to owner");
+            Console.WriteLine("[TIMER] DB backup sent to owner");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[BACKUP ERR] {ex.Message}");
-            try
-            {
-                await bot.SendDocumentAsync(OWNER_ID,
-                    new InputOnlineFile(System.IO.File.OpenRead("gamedata.db"), "gamedata.db"),
-                    caption: "📦 دیتابیس (fallback)",
-                    cancellationToken: CancellationToken.None);
-            }
-            catch { }
+        }
+        finally
+        {
+            TryDeleteSqliteSidecar(backupPath);
         }
     }
 
     static async Task ProcessNavalInvasions(CancellationToken ct)
     {
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var pending = Database.GetPendingNavalInvasions(now);
-        if (pending.Count == 0) return;
-        Console.WriteLine($"[NAVAL] Processing {pending.Count} pending invasions");
-        foreach (var inv in pending)
+        await navalProcessorLock.WaitAsync(ct);
+        try
         {
-            try
-            {
-                var attacker = Database.GetCountry(inv.AttackerId, inv.ChatId);
-                var defender = Database.GetCountry(inv.DefenderId, inv.ChatId);
-                if (attacker == null || defender == null)
-                {
-                    // Return at-sea fleet to attacker if attacker exists
-                    if (attacker != null)
-                    {
-                        attacker.Boats += inv.Boats;
-                        attacker.Submarines += inv.Submarines;
-                        attacker.Battleships += inv.Battleships;
-                        attacker.BoatsAtSea = Math.Max(0, attacker.BoatsAtSea - inv.Boats);
-                        attacker.SubmarinesAtSea = Math.Max(0, attacker.SubmarinesAtSea - inv.Submarines);
-                        attacker.BattleshipsAtSea = Math.Max(0, attacker.BattleshipsAtSea - inv.Battleships);
-                        Database.UpdateCountryFull(attacker);
-                    }
-                    Database.MarkNavalInvasionProcessed(inv.Id);
-                    Database.DeleteNavalInvasion(inv.Id);
-                    continue;
-                }
-
-                // Reconstruct breakdowns from stored strings
-                List<(string Model, long Count)> attBoatBreak = new();
-                List<(string Model, long Count)> attSubBreak = new();
-                List<(string Model, long Count)> attBSBreak = new();
-                List<(string Model, long Count)> defBoatBreak = new();
-                List<(string Model, long Count)> defSubBreak = new();
-                List<(string Model, long Count)> defBSBreak = new();
-
-                // Attacker breakdowns
-                if (!string.IsNullOrWhiteSpace(inv.BoatModels))
-                {
-                    foreach (var part in inv.BoatModels.Split(';', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var sp = part.Split(':');
-                        if (sp.Length == 2 && long.TryParse(sp[1], out long cnt)) attBoatBreak.Add((sp[0], cnt));
-                    }
-                }
-                else if (inv.Boats > 0) attBoatBreak.Add((Database.GetDefaultBoatModel(attacker.Faction), inv.Boats));
-
-                if (!string.IsNullOrWhiteSpace(inv.SubModels))
-                {
-                    foreach (var part in inv.SubModels.Split(';', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var sp = part.Split(':');
-                        if (sp.Length == 2 && long.TryParse(sp[1], out long cnt)) attSubBreak.Add((sp[0], cnt));
-                    }
-                }
-                else if (inv.Submarines > 0) attSubBreak.Add((Database.GetDefaultSubModel(attacker.Faction), inv.Submarines));
-
-                if (!string.IsNullOrWhiteSpace(inv.BattleshipModels))
-                {
-                    foreach (var part in inv.BattleshipModels.Split(';', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var sp = part.Split(':');
-                        if (sp.Length == 2 && long.TryParse(sp[1], out long cnt)) attBSBreak.Add((sp[0], cnt));
-                    }
-                }
-                else if (inv.Battleships > 0) attBSBreak.Add((Database.GetDefaultBattleshipModel(attacker.Faction), inv.Battleships));
-
-                // Defender breakdowns from current fleet
-                var defBoatModels = Database.GetEquipmentModels(defender.OwnerId, defender.ChatId, "Boats");
-                if (defBoatModels.Count > 0) foreach (var m in defBoatModels) defBoatBreak.Add((m.ModelName, m.Count));
-                else if (defender.Boats > 0) defBoatBreak.Add((Database.GetDefaultBoatModel(defender.Faction), defender.Boats));
-
-                var defSubModels = Database.GetEquipmentModels(defender.OwnerId, defender.ChatId, "Submarines");
-                if (defSubModels.Count > 0) foreach (var m in defSubModels) defSubBreak.Add((m.ModelName, m.Count));
-                else if (defender.Submarines > 0) defSubBreak.Add((Database.GetDefaultSubModel(defender.Faction), defender.Submarines));
-
-                var defBSModels = Database.GetEquipmentModels(defender.OwnerId, defender.ChatId, "Battleships");
-                if (defBSModels.Count > 0) foreach (var m in defBSModels) defBSBreak.Add((m.ModelName, m.Count));
-                else if (defender.Battleships > 0) defBSBreak.Add((Database.GetDefaultBattleshipModel(defender.Faction), defender.Battleships));
-
-                // Run naval battle – use defender's ground defense as naval defense (port level influences inside engine)
-                int defStrat = defender.DefenseStrategy > 0 ? defender.DefenseStrategy : 1;
-                int defTac = defender.DefenseTactic > 0 ? defender.DefenseTactic : 1;
-                var result = WarEngine.RunNavalBattleAdvanced(attacker, defender, attBoatBreak, attSubBreak, attBSBreak, defBoatBreak, defSubBreak, defBSBreak, inv.Strategy, inv.Tactic, defStrat, defTac);
-
-                // Apply attacker surviving returns
-                attacker.BoatsAtSea = Math.Max(0, attacker.BoatsAtSea - inv.Boats);
-                attacker.SubmarinesAtSea = Math.Max(0, attacker.SubmarinesAtSea - inv.Submarines);
-                attacker.BattleshipsAtSea = Math.Max(0, attacker.BattleshipsAtSea - inv.Battleships);
-
-                attacker.Boats += result.AttackerBoatsSurvived;
-                attacker.Submarines += result.AttackerSubsSurvived;
-                attacker.Battleships += result.AttackerBattleshipsSurvived;
-                attacker.BattleshipDamage += result.AttackerBattleshipDamage;
-                // fuel consumed
-                attacker.BoatsFuel = 0;
-                attacker.SubmarinesFuel = Math.Max(0, attacker.SubmarinesFuel - 30);
-                Database.SetBoatFuelPct(attacker.OwnerId, attacker.ChatId, 0);
-                attacker.Boats += 0; // already added survivors
-
-                // Apply defender losses
-                // For simplicity, deduct from total counts proportionally to breakdowns
-                long defBoatLoss = result.DefenderBoatsLost;
-                long defSubLoss = result.DefenderSubsLost;
-                long defBSLoss = result.DefenderBattleshipsLost;
-                defender.Boats = Math.Max(0, defender.Boats - defBoatLoss);
-                defender.Submarines = Math.Max(0, defender.Submarines - defSubLoss);
-                defender.Battleships = Math.Max(0, defender.Battleships - defBSLoss);
-                defender.BattleshipDamage += result.DefenderBattleshipDamage;
-
-                // If success >=90, port level -1
-                if (result.SuccessPercent >= 90)
-                {
-                    defender.PortLevel = Math.Max(1, defender.PortLevel - 1);
-                }
-
-                // Loot
-                defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
-                defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
-                attacker.Money += result.AttackerMoneyGained;
-                attacker.Iron += result.AttackerIronGained;
-
-                Database.UpdateCountryFull(attacker);
-                Database.UpdateCountryFull(defender);
-                Database.ReconcileDefense(attacker.OwnerId, attacker.ChatId);
-                Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
-
-                // Shield hit counting
-                Database.AddAttackShieldHit(defender.OwnerId, defender.ChatId);
-                // Check if shield triggered now
-                if (Database.IsAttackShieldActive(defender.OwnerId, defender.ChatId))
-                {
-                    long until = Database.GetAttackShieldUntilMs(defender.OwnerId, defender.ChatId);
-                    string fmt = FormatTime(until);
-                    try { await bot.SendTextMessageAsync(inv.ChatId, $"🛡 {defender.Name} به دلیل 5 حمله دریایی متوالی، به مدت 16 ساعت سپر گرفت! تا {fmt} قابل حمله نیست.", cancellationToken: ct); } catch { }
-                }
-
-                // Notifications – attacker private, defender private, group
-                try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
-                try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
-                try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
-
-                Database.MarkNavalInvasionProcessed(inv.Id);
-                Database.DeleteNavalInvasion(inv.Id);
-
-                await Task.Delay(100, ct);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[NAVAL INV {inv.Id} ERR] {ex.Message}");
-                try { Database.MarkNavalInvasionProcessed(inv.Id); Database.DeleteNavalInvasion(inv.Id); } catch { }
-            }
+            if (Volatile.Read(ref databaseMaintenanceRunning) == 0)
+                await ProcessNavalInvasionsCore(ct);
         }
+        finally
+        {
+            navalProcessorLock.Release();
+        }
+    }
+
+    static async Task ProcessNavalInvasionsCore(CancellationToken ct)
+    {
+        // Naval resolution is outside version one. Delayed invasions remain pending so
+        // no fleet, resource, or database record is consumed accidentally.
+        await Task.CompletedTask;
     }
 
     static async Task HandleAttackGroupCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
@@ -7996,6 +9495,16 @@ partial class Program
         session.AttackChatId = cid;
         session.AttackTargetId = tid;
         session.AttackIsNaval = type == "naval";
+
+        if (session.AttackIsNaval)
+        {
+            EndSession(uid);
+            await bot.AnswerCallbackQueryAsync(cb.Id,
+                "🚧 موتور دریایی در نسخه فعلی هنوز طراحی نشده است.",
+                showAlert: true,
+                cancellationToken: ct);
+            return;
+        }
 
         if (session.AttackIsNaval)
         {
@@ -8399,264 +9908,505 @@ partial class Program
     }
 
     static async Task RunAttackBattle(long uid, UserSession sess, CancellationToken ct)
-{
-        if (Database.HasAttackAbandonLock(uid))
-        {
-            var lkUntil = DateTimeOffset.FromUnixTimeMilliseconds(Database.GetAttackAbandonLockUntilMs(uid)).ToOffset(TimeSpan.FromHours(3.5));
-            await SendTemp(sess.AttackChatId, $"🔒 کشور شما به دلیل انصراف و حذف کشور پس از حمله (بزن‌دررو)، تا <b>{lkUntil:yyyy/MM/dd HH:mm}</b> (تهران) در همه گروه‌ها از حمله کردن قفل است.", parseMode: ParseMode.Html, ct: ct);
-            return;
-        }
-        var attacker = Database.GetCountry(uid, sess.AttackChatId);
-        var defender = Database.GetCountry(sess.AttackTargetId, sess.AttackChatId);
-        long cid = sess.AttackChatId;
-        long tid = sess.AttackTargetId;
-        int aStr = sess.AttackStrategy; int aTac = sess.AttackTactic;
-        long aTnk = sess.AttackTanks; long aSol = sess.AttackSoldiers;
-        long aFig = sess.AttackFighters; long aBom = sess.AttackBombers;
-        int aAirStr = sess.AttackAirStrategy; int aAirTac = sess.AttackAirTactic;
-        // Per-model breakdowns from session ()
-        var attTankBreakdown = new List<(string Model, long Count)>();
-        for (int i = 0; i < sess.AttackTankModelNamesFinal.Count && i < sess.AttackTankModelAmountsFinal.Count; i++)
-        {
-            if (sess.AttackTankModelAmountsFinal[i] > 0)
-                attTankBreakdown.Add((sess.AttackTankModelNamesFinal[i], sess.AttackTankModelAmountsFinal[i]));
-        }
-        if (attTankBreakdown.Count == 0 && aTnk > 0)
-        {
-            // Fallback to generic from AttackModel if final not set
-            if (sess.AttackModelNames.Count > 0 && sess.AttackModelAmounts.Count == sess.AttackModelNames.Count)
-            {
-                for (int i = 0; i < sess.AttackModelNames.Count; i++)
-                    if (sess.AttackModelAmounts[i] > 0) attTankBreakdown.Add((sess.AttackModelNames[i], sess.AttackModelAmounts[i]));
-            }
-            if (attTankBreakdown.Count == 0) attTankBreakdown.Add((Database.GetDefaultTankModel(attacker?.Faction ?? Faction.USA), aTnk));
-        }
-
-        var attPlaneBreakdown = new List<(string Model, long Count)>();
-        for (int i = 0; i < sess.AttackPlaneModelNamesFinal.Count && i < sess.AttackPlaneModelAmountsFinal.Count; i++)
-            if (sess.AttackPlaneModelAmountsFinal[i] > 0) attPlaneBreakdown.Add((sess.AttackPlaneModelNamesFinal[i], sess.AttackPlaneModelAmountsFinal[i]));
-        if (attPlaneBreakdown.Count == 0 && aFig > 0)
-            attPlaneBreakdown.Add((Database.GetDefaultPlaneModel(attacker?.Faction ?? Faction.USA), aFig));
-
-        var attBomberBreakdown = new List<(string Model, long Count)>();
-        for (int i = 0; i < sess.AttackBomberModelNamesFinal.Count && i < sess.AttackBomberModelAmountsFinal.Count; i++)
-            if (sess.AttackBomberModelAmountsFinal[i] > 0) attBomberBreakdown.Add((sess.AttackBomberModelNamesFinal[i], sess.AttackBomberModelAmountsFinal[i]));
-        if (attBomberBreakdown.Count == 0 && aBom > 0)
-            attBomberBreakdown.Add((Database.GetDefaultBomberModel(attacker?.Faction ?? Faction.USA), aBom));
-
+    {
+        long chatId = sess.AttackChatId;
+        long defenderId = sess.AttackTargetId;
         EndSession(uid);
-        if (attacker == null || defender == null) { await SendTemp(cid, "❌ کشور یافت نشد.", ct: ct); return; }
-        if (lastAssetUpdateAt != DateTime.MinValue)
+
+        bool deploymentLockHeld = false;
+        var defensiveDeployments = Database.GetActiveDeployments()
+            .Where(d => d.ChatId == chatId && d.Type == "Defensive" &&
+                        d.TargetUserId == defenderId && d.EndAtMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            .ToList();
+        if (defensiveDeployments.Count > 0)
         {
-            double sinceMin = (DateTime.UtcNow - lastAssetUpdateAt).TotalMinutes;
-            if (sinceMin < ATTACK_LOCK_MINUTES && !Database.HasGroupLockExemption(cid))
+            await deploymentProcessorLock.WaitAsync(ct);
+            deploymentLockHeld = true;
+            try
             {
-                int left = (int)Math.Ceiling(ATTACK_LOCK_MINUTES - sinceMin);
-                await SendTemp(cid, $"⛔ تا {left} دقیقه دیگر حمله ممکن نیست.", ct: ct);
+                defensiveDeployments = Database.GetActiveDeployments()
+                    .Where(d => d.ChatId == chatId && d.Type == "Defensive" &&
+                                d.TargetUserId == defenderId && d.EndAtMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                    .ToList();
+            }
+            catch
+            {
+                deploymentProcessorLock.Release();
+                throw;
+            }
+        }
+        var participantIds = defensiveDeployments
+            .SelectMany(d => Database.GetDeploymentContributors(d.Id))
+            .Select(x => x.UserId)
+            .Append(uid)
+            .Append(defenderId);
+        List<SemaphoreSlim> locks;
+        try
+        {
+            locks = await AcquireCountryMutationLocks(chatId, participantIds, ct);
+        }
+        catch
+        {
+            if (deploymentLockHeld) deploymentProcessorLock.Release();
+            throw;
+        }
+        bool resultApplied = false;
+        long queuedBattleId = 0;
+        try
+        {
+            if (Database.HasAttackAbandonLock(uid))
+            {
+                await SendTemp(uid, "⛔ به‌دلیل قفل بزن‌دررو فعلاً امکان حمله ندارید.", ct: ct);
                 return;
             }
-        }
-        if (GetAttackCount(cid, uid) >= MAX_ATTACKS_PER_UPDATE && !Database.HasGroupLockExemption(cid))
-        { await SendTemp(cid, $"⛔ سهمیه تمام شد ({MAX_ATTACKS_PER_UPDATE}).", ct: ct); return; }
-        if (defender.CreatedAtMs > 0 && !Database.HasShieldExemption(defender.OwnerId, defender.ChatId) && !Database.HasGroupLockExemption(defender.ChatId))
-        {
-            double ageH = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - defender.CreatedAtMs) / 3600000.0;
-            if (ageH < SHIELD_HOURS) { int leftH = (int)Math.Ceiling(SHIELD_HOURS - ageH); await SendTemp(cid, $"🛡 سپر! {leftH} ساعت دیگر", ct: ct); return; }
-        }
-        IncAttackCount(cid, uid);
-        // FIX(3): ثبت حمله دریافتی برای مدافع
-        string todayTehranInc = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
-        Database.IncDailyDefendCount(defender.OwnerId, todayTehranInc);
-        // FIX(1b): ثبت اینکه حمله‌کننده امروز حمله واقعی زده
-        Database.SetAttackerFlag(uid, todayTehranInc);
-        //  – 5 attacks => 16h shield counting for ground too
-        Database.AddAttackShieldHit(defender.OwnerId, defender.ChatId);
-        if (Database.IsAttackShieldActive(defender.OwnerId, defender.ChatId))
-        {
-            long until = Database.GetAttackShieldUntilMs(defender.OwnerId, defender.ChatId);
-            string fmt = FormatTime(until);
-            try { await SendPermanent(cid, $"🛡 {defender.Name} به دلیل 5 حمله متوالی، به مدت 16 ساعت سپر گرفت! تا {fmt} قابل حمله نیست.", ct: ct); } catch { }
-        }
-        await SendTemp(cid, "⚔️ در حال پردازش نبرد...", ct: ct);
 
-        //  – include defensive deployment forces (not in assets anymore)
-        var defDeployments = Database.GetActiveDeployments().Where(d => d.ChatId == cid && d.Type == "Defensive" && d.TargetUserId == defender.OwnerId).ToList();
-        long depTanks = defDeployments.Sum(d => d.Tanks);
-        long depSoldiers = defDeployments.Sum(d => d.Soldiers);
-        long depFighters = defDeployments.Sum(d => d.Fighters);
-        long depBombers = defDeployments.Sum(d => d.Bombers);
-
-        // Build defender breakdown including own defense + deployment forces
-        var defTankBreakdownOwn = GetDefenseBreakdown(defender, "tanks");
-        var defTankBreakdown = new List<(string Model, long Count)>();
-        foreach (var (model, count, pct) in defTankBreakdownOwn)
-        {
-            long defCount = (long)Math.Ceiling(count * pct / 100.0);
-            if (defCount > 0) defTankBreakdown.Add((model, defCount));
-        }
-        // Add deployment tanks grouped by faction default model
-        if (depTanks > 0)
-        {
-            // Group deployment contributors by faction for more accurate model preservation
-            var depContribs = new List<DeploymentContributor>();
-            foreach (var dd in defDeployments) depContribs.AddRange(Database.GetDeploymentContributors(dd.Id));
-            var groupedByFaction = depContribs.GroupBy(c =>
+            var attacker = Database.GetCountry(uid, chatId);
+            var defender = Database.GetCountry(defenderId, chatId);
+            if (attacker == null || defender == null)
             {
-                var cc = Database.GetCountry(c.UserId, cid);
-                return cc?.Faction ?? Faction.USA;
-            });
-            foreach (var g in groupedByFaction)
-            {
-                long gTanks = g.Sum(x => x.Tanks);
-                if (gTanks > 0)
-                {
-                    string model = Database.GetDefaultTankModel(g.Key);
-                    defTankBreakdown.Add((model + " (صف آرایی)", gTanks));
-                }
+                await SendTemp(uid, "❌ کشور مهاجم یا مدافع یافت نشد.", ct: ct);
+                return;
             }
-            if (defTankBreakdown.Count == 0) defTankBreakdown.Add(("صف آرایی", depTanks));
-        }
-
-        var defPlaneBreakdownOwn = GetDefenseBreakdown(defender, "planes");
-        var defPlaneBreakdown = new List<(string Model, long Count)>();
-        foreach (var (model, count, pct) in defPlaneBreakdownOwn)
-        {
-            long defCount = (long)Math.Ceiling(count * pct / 100.0);
-            if (defCount > 0) defPlaneBreakdown.Add((model, defCount));
-        }
-        if (depFighters > 0)
-        {
-            var depContribs = new List<DeploymentContributor>();
-            foreach (var dd in defDeployments) depContribs.AddRange(Database.GetDeploymentContributors(dd.Id));
-            var groupedByFaction = depContribs.GroupBy(c =>
+            if (lastAssetUpdateAt != DateTime.MinValue &&
+                (DateTime.UtcNow - lastAssetUpdateAt).TotalMinutes < ATTACK_LOCK_MINUTES &&
+                !Database.HasGroupLockExemption(chatId))
             {
-                var cc = Database.GetCountry(c.UserId, cid);
-                return cc?.Faction ?? Faction.USA;
-            });
-            foreach (var g in groupedByFaction)
-            {
-                long gFighters = g.Sum(x => x.Fighters);
-                if (gFighters > 0)
-                {
-                    string model = Database.GetDefaultPlaneModel(g.Key);
-                    defPlaneBreakdown.Add((model + " (صف آرایی)", gFighters));
-                }
+                int left = (int)Math.Ceiling(ATTACK_LOCK_MINUTES - (DateTime.UtcNow - lastAssetUpdateAt).TotalMinutes);
+                await SendTemp(uid, $"⛔ تا {left} دقیقه دیگر حمله ممکن نیست.", ct: ct);
+                return;
             }
-        }
-
-        long defSoldiersEffective = defender.DefenseSoldiers + depSoldiers;
-
-        // Use advanced war engine with per-model breakdowns
-        var result = WarEngine.RunBattleAdvanced(
-            attacker, defender,
-            attTankBreakdown, aSol,
-            attPlaneBreakdown, attBomberBreakdown,
-            defTankBreakdown, defSoldiersEffective,
-            defPlaneBreakdown,
-            aStr, aTac, aAirStr, aAirTac);
-        attacker.Tanks = Math.Max(0, attacker.Tanks - result.AttackerTanksLost);
-        attacker.Soldiers = Math.Max(0, attacker.Soldiers - result.AttackerSoldiersLost);
-        attacker.Planes = Math.Max(0, attacker.Planes - result.AttackerFightersLost);
-        attacker.Bombers = Math.Max(0, attacker.Bombers - result.AttackerBombersLost);
-        attacker.Money += result.AttackerMoneyGained;
-        attacker.Iron += result.AttackerIronGained;
-        attacker.Welfare += result.AttackerWelfareChange;
-        // Apply losses to all defensive deployments (since they participated but not in assets)
-        var allDefDeps = Database.GetActiveDeployments().Where(d => d.ChatId == cid && d.Type == "Defensive" && d.TargetUserId == defender.OwnerId).ToList();
-        if (allDefDeps.Count > 0)
-        {
-            long totalEffTanks = defender.DefenseTanks + depTanks;
-            long totalEffSoldiers = defender.DefenseSoldiers + depSoldiers;
-            long totalEffFighters = defender.DefenseFighters + depFighters;
-
-            foreach (var dep in allDefDeps)
+            if (GetAttackCount(chatId, uid) >= MAX_ATTACKS_PER_UPDATE && !Database.HasGroupLockExemption(chatId))
             {
-                if (totalEffTanks > 0 && dep.Tanks > 0)
-                    dep.Tanks = Math.Max(0, dep.Tanks - (long)Math.Round((double)dep.Tanks / totalEffTanks * result.DefenderTanksLost));
-                if (totalEffSoldiers > 0 && dep.Soldiers > 0)
-                    dep.Soldiers = Math.Max(0, dep.Soldiers - (long)Math.Round((double)dep.Soldiers / totalEffSoldiers * result.DefenderSoldiersLost));
-                if (totalEffFighters > 0 && dep.Fighters > 0)
-                    dep.Fighters = Math.Max(0, dep.Fighters - (long)Math.Round((double)dep.Fighters / totalEffFighters * result.DefenderFightersLost));
-                Database.UpdateDeploymentForces(dep);
+                await SendTemp(uid, $"⛔ سهمیه حمله تمام شده است ({MAX_ATTACKS_PER_UPDATE}).", ct: ct);
+                return;
             }
-        }
-        defender.Tanks = Math.Max(0, defender.Tanks - result.DefenderTanksLost);
-        defender.Soldiers = Math.Max(0, defender.Soldiers - result.DefenderSoldiersLost);
-        defender.Planes = Math.Max(0, defender.Planes - result.DefenderFightersLost);
-        defender.AntiAir = Math.Max(0, defender.AntiAir - result.DefenderAntiAirLost);
-        defender.Money = Math.Max(0, defender.Money - result.DefenderMoneyLost);
-        defender.Iron = Math.Max(0, defender.Iron - result.DefenderIronLost);
-        defender.Welfare += result.DefenderWelfareChange;
-        Database.UpdateCountryFull(attacker);
-        Database.UpdateCountryFull(defender);
-        Database.ReconcileDefense(attacker.OwnerId, attacker.ChatId);
-        Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
-        if (!string.IsNullOrEmpty(result.AttackerReport)) await SendPermanent(uid, result.AttackerReport, ct: ct);
-        if (!string.IsNullOrEmpty(result.DefenderReport)) { try { await SendPermanent(tid, result.DefenderReport, ct: ct); } catch { } }
-        if (!string.IsNullOrEmpty(result.GroupAnnouncement)) { try { await SendPermanent(cid, result.GroupAnnouncement, ct: ct); } catch { } }
-        await ProcessSiege(uid, tid, cid, result, ct);
-    }
-
-    static async Task ProcessSiege(long attackerId, long defenderId, long chatId, BattleResult result, CancellationToken ct)
-    {
-        var atkAfter = Database.GetCountry(attackerId, chatId);
-        var def = Database.GetCountry(defenderId, chatId);
-        if (def == null) return;
-        bool routDefeat = result.AttackerWon && atkAfter != null && atkAfter.Soldiers >= 5000 && atkAfter.Tanks >= 50;
-        string atkName = atkAfter?.Name ?? "دشمن";
-        if (routDefeat)
-        {
-            Database.SetDefenseWins(defenderId, chatId, 0);
-            int cnt = Database.AddRoutDefeat(defenderId, chatId, attackerId, +1);
-            if (cnt % 5 == 0)
+            if (Database.IsAttackShieldActive(defenderId, chatId))
             {
-                int newCities = Math.Max(0, def.Cities - 1);
-                Database.SetCities(defenderId, chatId, newCities);
-                bool gained = Database.AddCityToAttacker(attackerId, chatId);
-                string gm = gained ? "" : "\n(سقف ۲۰ شهر)";
-                if (cnt == 5 && def.Besieged < 1) Database.SetBesieged(defenderId, chatId, 1);
-                try { await SendPermanent(chatId, $"💥 شهر {def.Name} به تصرف {atkName} درآمد! (باقی: {newCities}){gm}", ct: ct); } catch { }
-                if (newCities <= 0)
+                await SendTemp(uid, "🛡 کشور هدف در حال حاضر سپر فعال دارد.", ct: ct);
+                return;
+            }
+            if (defender.CreatedAtMs > 0 && !Database.HasShieldExemption(defenderId, chatId) &&
+                !Database.HasGroupLockExemption(chatId))
+            {
+                double ageHours = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - defender.CreatedAtMs) / 3600000.0;
+                if (ageHours < SHIELD_HOURS)
                 {
-                    Database.DeleteCountry(defenderId, chatId);
-                    try { await SendPermanent(defenderId, $"☠️ کشورتان به‌دست {atkName} سقوط کرد.", ct: ct); } catch { }
-                    try { await SendPermanent(chatId, $"☠️ {def.Name} سقوط کرد!", ct: ct); } catch { }
+                    await SendTemp(uid, $"🛡 سپر کشور تازه‌ساخت تا {(int)Math.Ceiling(SHIELD_HOURS - ageHours)} ساعت دیگر فعال است.", ct: ct);
                     return;
                 }
-                if (newCities <= 1 && def.Besieged < 2) { Database.SetBesieged(defenderId, chatId, 2); try { await SendPermanent(chatId, $"🆘 {def.Name} بحرانی!", ct: ct); } catch { } }
             }
-            else
+
+            var selectedTanks = SessionModelAmounts(
+                sess.AttackTankModelNamesFinal,
+                sess.AttackTankModelAmountsFinal,
+                sess.AttackModelNames,
+                sess.AttackModelAmounts,
+                sess.AttackTanks,
+                Database.GetDefaultTankModel(attacker.Faction));
+            var selectedFighters = SessionModelAmounts(
+                sess.AttackPlaneModelNamesFinal,
+                sess.AttackPlaneModelAmountsFinal,
+                new List<string>(), new List<long>(), sess.AttackFighters,
+                Database.GetDefaultPlaneModel(attacker.Faction));
+            var selectedBombers = SessionModelAmounts(
+                sess.AttackBomberModelNamesFinal,
+                sess.AttackBomberModelAmountsFinal,
+                new List<string>(), new List<long>(), sess.AttackBombers,
+                Database.GetDefaultBomberModel(attacker.Faction));
+            long soldiers = Math.Max(0, sess.AttackSoldiers);
+
+            if (soldiers > attacker.Soldiers || selectedTanks.Sum(x => x.Count) > attacker.Tanks ||
+                selectedFighters.Sum(x => x.Count) > attacker.Planes || selectedBombers.Sum(x => x.Count) > attacker.Bombers)
             {
-                int nextMilestone = ((cnt / 5) + 1) * 5;
-                int left = nextMilestone - cnt;
-                await SendPermanent(defenderId, $"🚨 شکست! شماره شکست: {cnt}\n⚠️ {left} شکست تا سقوط شهر بعدی!", ct: ct);
+                await SendTemp(uid, "❌ موجودی نیروها در طول ثبت فرمان تغییر کرده است. حمله ثبت نشد.", ct: ct);
+                return;
+            }
+            if (soldiers + selectedTanks.Sum(x => x.Count) <= 0)
+            {
+                await SendTemp(uid, "❌ برای عملیات باید نیروی زمینی اعزام شود.", ct: ct);
+                return;
+            }
+
+            var ownDefense = BuildOwnDefenseParticipant(defender);
+            var deploymentParticipants = BuildDeploymentParticipants(defensiveDeployments, chatId);
+            var defenders = new List<BattleParticipant> { ownDefense };
+            defenders.AddRange(deploymentParticipants);
+
+            ulong scenarioSeed = WarEngine.CreateScenarioSeed();
+            long battleId = unchecked((long)scenarioSeed);
+            if (battleId == 0) battleId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() ^ uid ^ defenderId;
+            var request = new BattleRequest
+            {
+                BattleId = battleId,
+                ChatId = chatId,
+                ScenarioSeed = scenarioSeed,
+                Attackers = new List<BattleParticipant>
+                {
+                    new()
+                    {
+                        OwnerId = uid,
+                        CountryName = attacker.Name,
+                        OwnerName = attacker.OwnerName,
+                        Faction = attacker.Faction,
+                        Soldiers = soldiers,
+                        Tanks = selectedTanks,
+                        Fighters = selectedFighters,
+                        Bombers = selectedBombers
+                    }
+                },
+                Defenders = defenders,
+                AttackerOrders = new BattleOrders
+                {
+                    GroundStrategy = sess.AttackStrategy,
+                    GroundTactic = sess.AttackTactic,
+                    AirStrategy = sess.AttackAirStrategy,
+                    AirTactic = sess.AttackAirTactic <= 0 ? 1 : sess.AttackAirTactic
+                },
+                DefenderOrders = new BattleOrders
+                {
+                    GroundStrategy = defender.DefenseStrategy,
+                    GroundTactic = defender.DefenseTactic,
+                    AirStrategy = defender.AirDefStrategy,
+                    AirTactic = defender.AirDefTactic
+                }
+            };
+
+            var context = new BattleJobContext
+            {
+                AttackerId = uid,
+                DefenderId = defenderId,
+                ChatId = chatId,
+                DefensiveDeploymentIds = defensiveDeployments.Select(x => x.Id).ToList()
+            };
+            queuedBattleId = request.BattleId;
+            var persisted = Database.EnsureBattleJob(request.BattleId, "Direct",
+                JsonSerializer.Serialize(request, BattleJsonOptions),
+                JsonSerializer.Serialize(context, BattleJsonOptions));
+            request = JsonSerializer.Deserialize<BattleRequest>(persisted.RequestJson, BattleJsonOptions)
+                ?? throw new InvalidOperationException("Persisted battle request is invalid.");
+            Database.UpdateBattleJob(request.BattleId, "Running");
+
+            await SendTemp(uid, "⚙️ عملیات وارد صف پردازش موتور نبرد شد.", ct: ct);
+            BattleResult result = await BattleExecutionScheduler.EnqueueAsync(request, ct);
+            string resultJson = JsonSerializer.Serialize(result, BattleJsonOptions);
+            Database.UpdateBattleJob(request.BattleId, "Resolved", resultJson);
+            resultApplied = ApplyDirectBattleLosses(request.BattleId, attacker, defender, ownDefense,
+                deploymentParticipants, defensiveDeployments, result);
+            if (!resultApplied)
+            {
+                Database.UpdateBattleJob(request.BattleId, "Completed", resultJson);
+                return;
+            }
+            try { Database.SaveBattleResult(request, result); }
+            catch (Exception historyError) { Console.WriteLine($"[BATTLE HISTORY ERR] {historyError}"); }
+
+            IncAttackCount(chatId, uid);
+            string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
+            Database.IncDailyDefendCount(defenderId, today);
+            Database.SetAttackerFlag(uid, today);
+            Database.AddAttackShieldHit(defenderId, chatId);
+
+            try { await SendPermanent(uid, result.AttackerReport, ct: ct); } catch { }
+            try { await SendPermanent(defenderId, result.DefenderReport, ct: ct); } catch { }
+            try { await SendPermanent(chatId, result.GroupAnnouncement, ct: ct); } catch { }
+            await ProcessStrategicBattleOutcome(uid, defenderId, chatId, result, ct);
+            Database.UpdateBattleJob(request.BattleId, "Completed", resultJson);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[NEW BATTLE ENGINE ERR] applied={resultApplied}: {ex}");
+            if (!resultApplied && queuedBattleId != 0)
+            {
+                try { Database.UpdateBattleJob(queuedBattleId, "Pending", error: ex.Message); } catch { }
+            }
+            string message = resultApplied
+                ? "⚠️ نتیجه نبرد اعمال شد، اما ارسال گزارش یا پردازش پیامدهای راهبردی کامل نشد. مدیران گزارش خطا را بررسی کنند."
+                : "❌ موتور نتوانست این نبرد را تکمیل کند؛ هیچ نتیجه‌ای اعمال نشد.";
+            try { await SendTemp(uid, message, ct: ct); } catch { }
+        }
+        finally
+        {
+            ReleaseCountryMutationLocks(locks);
+            if (deploymentLockHeld) deploymentProcessorLock.Release();
+        }
+    }
+
+    static List<ModelAmount> SessionModelAmounts(
+        List<string> finalNames,
+        List<long> finalAmounts,
+        List<string> fallbackNames,
+        List<long> fallbackAmounts,
+        long fallbackTotal,
+        string defaultModel)
+    {
+        var result = new List<ModelAmount>();
+        for (int i = 0; i < finalNames.Count && i < finalAmounts.Count; i++)
+            if (finalAmounts[i] > 0) result.Add(new ModelAmount(finalNames[i], finalAmounts[i]));
+        if (result.Count == 0)
+        {
+            for (int i = 0; i < fallbackNames.Count && i < fallbackAmounts.Count; i++)
+                if (fallbackAmounts[i] > 0) result.Add(new ModelAmount(fallbackNames[i], fallbackAmounts[i]));
+        }
+        if (result.Count == 0 && fallbackTotal > 0)
+            result.Add(new ModelAmount(defaultModel, fallbackTotal));
+        return result;
+    }
+
+    static BattleParticipant BuildOwnDefenseParticipant(Country country)
+    {
+        var tanks = GetDefenseBreakdown(country, "tanks")
+            .Select(x => new ModelAmount(x.ModelName, Math.Min(x.Count, (long)Math.Ceiling(x.Count * x.DefPct / 100.0))))
+            .Where(x => x.Count > 0).ToList();
+        var fighters = GetDefenseBreakdown(country, "planes")
+            .Select(x => new ModelAmount(x.ModelName, Math.Min(x.Count, (long)Math.Ceiling(x.Count * x.DefPct / 100.0))))
+            .Where(x => x.Count > 0).ToList();
+        long soldiers = Math.Min(country.Soldiers,
+            Math.Max(country.DefenseSoldiers, (long)Math.Ceiling(country.Soldiers * 0.2)));
+        return new BattleParticipant
+        {
+            OwnerId = country.OwnerId,
+            CountryName = country.Name,
+            OwnerName = country.OwnerName,
+            Faction = country.Faction,
+            Soldiers = soldiers,
+            Tanks = tanks,
+            Fighters = fighters,
+            AntiAir = country.AntiAir,
+            IsHomelandDefender = country.Cities <= 2
+        };
+    }
+
+    static List<BattleParticipant> BuildDeploymentParticipants(List<Deployment> deployments, long chatId)
+    {
+        var entries = deployments.SelectMany(deployment =>
+            Database.GetDeploymentContributors(deployment.Id)
+                .Select(contributor => (DeploymentId: deployment.Id, Contributor: contributor)))
+            .ToList();
+        var result = new List<BattleParticipant>();
+        foreach (var group in entries.GroupBy(x => x.Contributor.UserId))
+        {
+            var country = Database.GetCountry(group.Key, chatId);
+            Faction faction = country?.Faction ?? Faction.USA;
+            List<ModelAmount> ModelsFor(string category, Func<DeploymentContributor, long> totalSelector,
+                string defaultModel)
+            {
+                var models = new List<ModelAmount>();
+                foreach (var entry in group)
+                {
+                    long expected = Math.Max(0, totalSelector(entry.Contributor));
+                    var stored = Database.GetDeploymentContributorModels(entry.DeploymentId,
+                        group.Key, category);
+                    long storedTotal = stored.Sum(x => Math.Max(0, x.Count));
+                    models.AddRange(stored.Where(x => x.Count > 0));
+                    if (storedTotal < expected)
+                        models.Add(new ModelAmount(defaultModel, expected - storedTotal));
+                }
+                return models.GroupBy(x => x.Model, StringComparer.OrdinalIgnoreCase)
+                    .Select(x => new ModelAmount(x.Key, x.Sum(y => y.Count)))
+                    .Where(x => x.Count > 0).ToList();
+            }
+
+            result.Add(new BattleParticipant
+            {
+                OwnerId = group.Key,
+                CountryName = country?.Name ?? $"کشور {group.Key}",
+                OwnerName = country?.OwnerName ?? $"کاربر {group.Key}",
+                Faction = faction,
+                Soldiers = group.Sum(x => x.Contributor.Soldiers),
+                Tanks = ModelsFor("Tanks", x => x.Tanks, Database.GetDefaultTankModel(faction)),
+                Fighters = ModelsFor("Planes", x => x.Fighters, Database.GetDefaultPlaneModel(faction)),
+                Bombers = ModelsFor("Bombers", x => x.Bombers, Database.GetDefaultBomberModel(faction))
+            });
+        }
+        return result;
+    }
+
+    static bool ApplyDirectBattleLosses(long battleId, Country attacker, Country defender,
+        BattleParticipant ownDefense, List<BattleParticipant> deploymentParticipants,
+        List<Deployment> defensiveDeployments, BattleResult result)
+    {
+        var equipmentMutations = new List<(long OwnerId, Faction Faction, string Category, Dictionary<string, long> Losses)>();
+        var deploymentMutations = new List<(long ContributorId, long Tanks, long Soldiers, long Fighters, long Bombers)>();
+
+        if (result.AttackerParticipantLosses.TryGetValue(attacker.OwnerId, out var attackerLoss))
+        {
+            attacker.Soldiers = Math.Max(0, attacker.Soldiers - attackerLoss.SoldiersUnavailable);
+            attacker.Tanks = Math.Max(0, attacker.Tanks - attackerLoss.TanksUnavailable.Values.Sum());
+            attacker.Planes = Math.Max(0, attacker.Planes - attackerLoss.FightersUnavailable.Values.Sum());
+            attacker.Bombers = Math.Max(0, attacker.Bombers - attackerLoss.BombersUnavailable.Values.Sum());
+            equipmentMutations.Add((attacker.OwnerId, attacker.Faction, "Tanks", attackerLoss.TanksUnavailable));
+            equipmentMutations.Add((attacker.OwnerId, attacker.Faction, "Planes", attackerLoss.FightersUnavailable));
+            equipmentMutations.Add((attacker.OwnerId, attacker.Faction, "Bombers", attackerLoss.BombersUnavailable));
+        }
+
+        foreach (var (ownerId, loss) in result.DefenderParticipantLosses)
+        {
+            var deployed = deploymentParticipants.Where(x => x.OwnerId == ownerId).ToList();
+            long deployedSoldiers = deployed.Sum(x => x.Soldiers);
+            long deployedTanks = deployed.Sum(x => x.Tanks.Sum(m => m.Count));
+            long deployedFighters = deployed.Sum(x => x.Fighters.Sum(m => m.Count));
+            long deployedBombers = deployed.Sum(x => x.Bombers.Sum(m => m.Count));
+            long ownSoldiers = ownerId == defender.OwnerId ? ownDefense.Soldiers : 0;
+            long ownTanks = ownerId == defender.OwnerId ? ownDefense.Tanks.Sum(x => x.Count) : 0;
+            long ownFighters = ownerId == defender.OwnerId ? ownDefense.Fighters.Sum(x => x.Count) : 0;
+            long ownBombers = 0;
+            long totalTankLoss = loss.TanksUnavailable.Values.Sum();
+            long totalFighterLoss = loss.FightersUnavailable.Values.Sum();
+            long totalBomberLoss = loss.BombersUnavailable.Values.Sum();
+            long ownSLoss = ProportionalShare(loss.SoldiersUnavailable, ownSoldiers, deployedSoldiers);
+            long ownTLoss = ProportionalShare(totalTankLoss, ownTanks, deployedTanks);
+            long ownFLoss = ProportionalShare(totalFighterLoss, ownFighters, deployedFighters);
+            long ownBLoss = ProportionalShare(totalBomberLoss, ownBombers, deployedBombers);
+
+            if (ownerId == defender.OwnerId)
+            {
+                defender.Soldiers = Math.Max(0, defender.Soldiers - ownSLoss);
+                defender.Tanks = Math.Max(0, defender.Tanks - ownTLoss);
+                defender.Planes = Math.Max(0, defender.Planes - ownFLoss);
+                defender.Bombers = Math.Max(0, defender.Bombers - ownBLoss);
+                defender.AntiAir = Math.Max(0, defender.AntiAir - loss.AntiAirLost);
+            }
+
+            deploymentMutations.Add((ownerId,
+                totalTankLoss - ownTLoss,
+                loss.SoldiersUnavailable - ownSLoss,
+                totalFighterLoss - ownFLoss,
+                totalBomberLoss - ownBLoss));
+
+            var ownerCountry = Database.GetCountry(ownerId, defender.ChatId);
+            if (ownerCountry != null)
+            {
+                equipmentMutations.Add((ownerId, ownerCountry.Faction, "Tanks", loss.TanksUnavailable));
+                equipmentMutations.Add((ownerId, ownerCountry.Faction, "Planes", loss.FightersUnavailable));
+                equipmentMutations.Add((ownerId, ownerCountry.Faction, "Bombers", loss.BombersUnavailable));
             }
         }
-        else if (result.AttackerFailed || result.SuccessPercent < 40)
+
+        bool applied = Database.ApplyDirectBattleSettlement(battleId, attacker, defender,
+            equipmentMutations, deploymentMutations,
+            defensiveDeployments.Select(x => x.Id).ToArray());
+        if (applied)
         {
-            if (def.Besieged >= 1)
+            Database.ReconcileDefense(attacker.OwnerId, attacker.ChatId);
+            Database.ReconcileDefense(defender.OwnerId, defender.ChatId);
+        }
+        return applied;
+    }
+
+    static long[] AllocateProportionallyExact(long requestedTotal, long[] capacities)
+    {
+        long capacity = capacities.Sum();
+        long target = Math.Min(Math.Max(0, requestedTotal), capacity);
+        var allocated = new long[capacities.Length];
+        if (target == 0 || capacity == 0) return allocated;
+
+        var fractions = new decimal[capacities.Length];
+        long assigned = 0;
+        for (int i = 0; i < capacities.Length; i++)
+        {
+            decimal exact = (decimal)target * capacities[i] / capacity;
+            allocated[i] = Math.Min(capacities[i], (long)decimal.Floor(exact));
+            fractions[i] = exact - allocated[i];
+            assigned += allocated[i];
+        }
+        foreach (int i in Enumerable.Range(0, capacities.Length)
+                     .OrderByDescending(i => fractions[i]).ThenBy(i => i))
+        {
+            if (assigned >= target) break;
+            if (allocated[i] >= capacities[i]) continue;
+            allocated[i]++;
+            assigned++;
+        }
+        return allocated;
+    }
+
+    static long ProportionalShare(long loss, long own, long deployed)
+    {
+        long total = own + deployed;
+        if (loss <= 0 || total <= 0 || own <= 0) return 0;
+        return Math.Min(own, (long)Math.Round((double)loss * own / total));
+    }
+
+    static void DeductEquipmentLosses(Country country, string category,
+        Dictionary<string, long> losses, Func<string, Faction, string> canonicalize)
+    {
+        var stored = Database.GetEquipmentModels(country.OwnerId, country.ChatId, category);
+        foreach (var (canonicalModel, rawLoss) in losses)
+        {
+            long remaining = Math.Max(0, rawLoss);
+            foreach (var row in stored.Where(x => canonicalize(x.ModelName, country.Faction)
+                         .Equals(canonicalModel, StringComparison.OrdinalIgnoreCase)))
             {
-                int wins = def.DefenseWins + 1;
+                long take = Math.Min(remaining, row.Count);
+                if (take <= 0) continue;
+                Database.AddEquipmentModel(country.OwnerId, country.ChatId, category, row.ModelName, -take);
+                row.Count -= take;
+                remaining -= take;
+                if (remaining == 0) break;
+            }
+        }
+    }
+
+    static async Task ProcessStrategicBattleOutcome(long attackerId, long defenderId,
+        long chatId, BattleResult result, CancellationToken ct)
+    {
+        var attacker = Database.GetCountry(attackerId, chatId);
+        var defender = Database.GetCountry(defenderId, chatId);
+        if (attacker == null || defender == null) return;
+
+        if (result.AttackerHeavyVictory)
+        {
+            int defeats = Database.AddRoutDefeat(defenderId, chatId, attackerId, 1);
+            if (defeats >= 5)
+            {
+                Database.AddRoutDefeat(defenderId, chatId, attackerId, -defeats);
+                int cities = Math.Max(0, defender.Cities - 1);
+                Database.SetCities(defenderId, chatId, cities);
+                bool gained = Database.AddCityToAttacker(attackerId, chatId);
+                Database.SetBesieged(defenderId, chatId, cities <= 2 ? 2 : 1);
+                if (cities == 0) Database.DeleteCountry(defenderId, chatId);
+                try
+                {
+                    await SendPermanent(chatId,
+                        $"🏙 پس از پنجمین شکست سنگین برابر {attacker.Name}، کشور {defender.Name} یک شهر از دست داد. شهرهای باقی‌مانده: {cities}" +
+                        (gained ? "" : "\nسقف شهرهای مهاجم پر است."), ct: ct);
+                    if (cities == 0)
+                        await SendPermanent(chatId, $"☠️ کشور {defender.Name} سقوط کرد.", ct: ct);
+                }
+                catch { }
+            }
+
+            attacker = Database.GetCountry(attackerId, chatId);
+            if (attacker != null && attacker.Cities < Database.MAX_CITIES)
+            {
+                int wins = Database.IncrementHeavyOffensiveWins(attackerId, chatId);
                 if (wins >= 5)
                 {
-                    wins = 0;
-                    int newCities = Math.Min(Database.MAX_CITIES, def.Cities + 1);
-                    Database.SetCities(defenderId, chatId, newCities);
-                    Database.AddRoutDefeat(defenderId, chatId, attackerId, -5);
-                    int newState = def.Besieged;
-                    if (def.Besieged == 2 && newCities > 1) newState = 1;
-                    if (Database.MaxRoutDefeats(defenderId, chatId) < 5) newState = 0;
-                    if (newState != def.Besieged) Database.SetBesieged(defenderId, chatId, newState);
-                    await SendPermanent(defenderId, $"🎉 شهر بازپس گرفته شد! (شهرها: {newCities})", ct: ct);
-                    try { await SendPermanent(chatId, $"🎌 {def.Name} شهر را پس گرفت! ({newCities})", ct: ct); } catch { }
+                    Database.ResetHeavyOffensiveWins(attackerId, chatId);
+                    int cities = Math.Min(Database.MAX_CITIES, attacker.Cities + 1);
+                    Database.SetCities(attackerId, chatId, cities);
+                    Database.SetBesieged(attackerId, chatId, cities <= 2 ? 2 : 0);
+                    try { await SendPermanent(chatId, $"🎌 {attacker.Name} با پنج پیروزی سنگین، یک شهر ازدست‌رفته را بازپس گرفت. شهرها: {cities}", ct: ct); }
+                    catch { }
                 }
-                else { Database.SetDefenseWins(defenderId, chatId, wins); await SendPermanent(defenderId, $"🛡 دفاع موفق! ({wins}/5)", ct: ct); }
             }
-            else
+        }
+        else if (result.DefenderVictory)
+        {
+            int defenses = defender.DefenseWins + 1;
+            if (defenses >= 5)
             {
-                int before = Database.GetRoutDefeats(defenderId, chatId, attackerId);
-                if (before > 0) { int cnt = Database.AddRoutDefeat(defenderId, chatId, attackerId, -1); await SendPermanent(defenderId, $"🛡 فشار کاهش یافت. شکست: {cnt}", ct: ct); }
+                defenses = 0;
+                if (defender.Cities < Database.MAX_CITIES)
+                {
+                    int cities = Math.Min(Database.MAX_CITIES, defender.Cities + 1);
+                    Database.SetCities(defenderId, chatId, cities);
+                    Database.SetBesieged(defenderId, chatId, cities <= 2 ? 2 : 0);
+                    try { await SendPermanent(chatId, $"🛡 {defender.Name} با پنج دفاع موفق یک شهر را بازپس گرفت. شهرها: {cities}", ct: ct); }
+                    catch { }
+                }
             }
+            Database.SetDefenseWins(defenderId, chatId, defenses);
         }
     }
 
@@ -11100,25 +12850,31 @@ partial class Program
             await SendPermanent(adminId, "❌ لطفاً فایل دیتابیس را ارسال کنید.\nلغو: لغو", ct: ct);
             return;
         }
+        string uploadPath = $"gamedata.{adminId}.upload";
         try
         {
             var file = await bot.GetFileAsync(message.Document.FileId, cancellationToken: ct);
-            using (var stream = System.IO.File.OpenWrite("gamedata.db.tmp"))
+            using (var stream = new System.IO.FileStream(uploadPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None))
                 await bot.DownloadFileAsync(file.FilePath!, stream, cancellationToken: ct);
 
-            // Replace
-            System.IO.File.Move("gamedata.db.tmp", "gamedata.db", true);
-            Database.WriteAdminAudit(adminId, "RESTORE_DB", "Maintenance", "", "", true);
+            var restore = await RestoreDatabaseSafely(uploadPath, ct);
+            Database.WriteAdminAudit(adminId, "RESTORE_DB", "Maintenance", "", restore.Error, restore.Success);
+            if (!restore.Success)
+            {
+                await SendPermanent(adminId, $"❌ بازیابی انجام نشد: {restore.Error}", ct: ct);
+                return;
+            }
+
             adminInputRequests.TryRemove(adminId, out _);
-            await SendPermanent(adminId, "✅ دیتابیس جدید جایگزین شد و ربات ریستارت می‌شود.", ct: ct);
-            // Re-init
-            Database.Init();
-            Database.InitActivity();
-            Database.InitAdminPanel(OWNER_ID);
+            await SendPermanent(adminId, "✅ دیتابیس جدید با بررسی سلامت و بکاپ بازگشت جایگزین شد.", ct: ct);
         }
         catch (Exception ex)
         {
             await SendPermanent(adminId, $"❌ خطا در آپلود: {ex.Message}", ct: ct);
+        }
+        finally
+        {
+            TryDeleteSqliteSidecar(uploadPath);
         }
     }
 
@@ -13479,7 +15235,7 @@ partial class Program
             if (sub == "assetnow")
             {
                 if (!CanAdmin(userId, "G_EDIT")) { await AnswerAdminCallback(callback, "⛔ دسترسی ندارید.", true, ct); return; }
-                try { await RunAssetUpdateCore(); await AnswerAdminCallback(callback, "✅ آپدیت دارایی اجرا شد.", false, ct); }
+                try { await RunAssetUpdate(force: true); await AnswerAdminCallback(callback, "✅ آپدیت دارایی اجرا شد.", false, ct); }
                 catch (Exception ex) { await AnswerAdminCallback(callback, $"❌ خطا: {ex.Message}", true, ct); }
                 return;
             }
@@ -13694,7 +15450,7 @@ partial class Program
             {
                 if (!CanAdmin(userId, "O_EDIT")) { await AnswerAdminCallback(callback, "⛔ دسترسی ندارید.", true, ct); return; }
                 var dep = Database.GetDeploymentById(dId);
-                if (dep != null) Database.CancelDeploymentForces(dep);
+                if (dep != null) await CancelDeploymentSafely(dep, ct);
                 else Database.DeleteDeployment(dId);
                 Database.WriteAdminAudit(userId, "DEPLOY_CANCEL", "Deployment", dId.ToString(), "", true);
                 await RenderAdminScreen(callback, BuildAdminOperationsHome(), ct);
@@ -13870,13 +15626,17 @@ partial class Program
             string sub = parts.Length >= 3 ? parts[2] : "";
             if (sub == "get")
             {
+                string backupPath = $"gamedata_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{userId}.db";
                 try
                 {
-                    await bot.SendDocumentAsync(userId, new InputOnlineFile(System.IO.File.OpenRead("gamedata.db"), $"gamedata_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}.db"), caption: "📦 بکاپ دیتابیس", cancellationToken: ct);
+                    Database.CreateConsistentBackup(backupPath);
+                    using var backupStream = System.IO.File.OpenRead(backupPath);
+                    await bot.SendDocumentAsync(userId, new InputOnlineFile(backupStream, System.IO.Path.GetFileName(backupPath)), caption: "📦 بکاپ دیتابیس", cancellationToken: ct);
                     Database.WriteAdminAudit(userId, "BACKUP_GET", "Maintenance", "", "", true);
                     await AnswerAdminCallback(callback, "✅ بکاپ ارسال شد.", false, ct);
                 }
                 catch (Exception ex) { await AnswerAdminCallback(callback, $"❌ خطا: {ex.Message}", true, ct); }
+                finally { TryDeleteSqliteSidecar(backupPath); }
                 return;
             }
             if (sub == "upload")
@@ -14424,6 +16184,14 @@ partial class Program
         return $"{mp:N0}";
     }
 
+    static string MarkdownText(string? text) =>
+        (text ?? "")
+            .Replace("\\", "\\\\")
+            .Replace("_", "\\_")
+            .Replace("*", "\\*")
+            .Replace("`", "\\`")
+            .Replace("[", "\\[");
+
     static async Task<string> BuildTopPlayersManpowerText(CancellationToken ct = default)
     {
         var all = Database.GetAllCountries();
@@ -14442,10 +16210,10 @@ partial class Program
             string medal = i switch { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => $"{i + 1}." };
             string groupTitle = await GetGroupTitleCached(item.Country.ChatId, ct);
 
-            sb.AppendLine($"{medal} **{item.Country.Name}**");
-            sb.AppendLine($"👤 {item.Country.OwnerName}");
+            sb.AppendLine($"{medal} **{MarkdownText(item.Country.Name)}**");
+            sb.AppendLine($"👤 {MarkdownText(item.Country.OwnerName)}");
             sb.AppendLine($"⚡ {FormatManpowerK(item.MP)} مان‌پاور");
-            sb.AppendLine($"🌍 {groupTitle}");
+            sb.AppendLine($"🌍 {MarkdownText(groupTitle)}");
             sb.AppendLine();
         }
 
@@ -14474,7 +16242,7 @@ partial class Program
             var g = groups[i];
             string medal = i switch { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => $"{i + 1}." };
             string title = await GetGroupTitleCached(g.ChatId, ct);
-            sb.AppendLine($"{medal} **{title}**");
+            sb.AppendLine($"{medal} **{MarkdownText(title)}**");
             sb.AppendLine($"👥 {g.Count} پلیر");
             sb.AppendLine();
         }
@@ -14508,7 +16276,7 @@ partial class Program
             var g = groups[i];
             string medal = i switch { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => $"{i + 1}." };
             string title = await GetGroupTitleCached(g.ChatId, ct);
-            sb.AppendLine($"{medal} **{title}**");
+            sb.AppendLine($"{medal} **{MarkdownText(title)}**");
             sb.AppendLine($"⚡ {FormatManpowerK(g.TotalMP)} مان‌پاور");
             sb.AppendLine();
         }
