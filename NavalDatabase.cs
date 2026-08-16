@@ -389,6 +389,19 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
         cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);cmd.ExecuteNonQuery();
     }
 
+    public static bool GetBattleshipRepairQuote(long unitId,long ownerId,long chatId,
+        out string model,out int damage,out long money,out long iron)
+    {
+        model="";damage=0;money=iron=0;using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"SELECT ModelName,DamagePercent FROM BattleshipUnits
+ WHERE Id=@id AND OwnerId=@o AND ChatId=@c AND Status='Ready' AND OperationId IS NULL";
+        cmd.Parameters.AddWithValue("@id",unitId);cmd.Parameters.AddWithValue("@o",ownerId);cmd.Parameters.AddWithValue("@c",chatId);
+        using var r=cmd.ExecuteReader();if(!r.Read())return false;model=r.GetString(0);damage=r.GetInt32(1);if(damage<=0)return false;
+        (long baseMoney,long baseIron)=model.ToLowerInvariant() switch
+        {var m when m.Contains("iowa")=>(50000,40000),var m when m.Contains("soyuz")=>(45000,25000),_=>(50000,30000)};
+        money=(long)Math.Ceiling(baseMoney*damage/100.0);iron=(long)Math.Ceiling(baseIron*damage/100.0);return true;
+    }
+
     public static bool RepairBattleshipUnit(long unitId,long ownerId,long chatId,out long money,out long iron)
     {
         money=iron=0;using var con=OpenCon();using var tx=con.BeginTransaction();string model;int damage;

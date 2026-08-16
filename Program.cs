@@ -5872,7 +5872,7 @@ partial class Program
             Database.SyncBattleshipUnits(uid, chat.Id);
             var damaged = Database.GetBattleshipUnits(uid, chat.Id, onlyCombatReady: false).Where(x => x.DamagePercent > 0).ToList();
             if (damaged.Count == 0) { await SendTemp(chat.Id, "✅ نبردناو آسیب‌دیده‌ای ندارید.", ct: ct); return; }
-            var rows = damaged.Select(x => new[] { InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} #{x.UnitId} — {x.DamagePercent}٪", $"battleship_repair_unit:{x.UnitId}") }).ToList();
+            var rows = damaged.Select(x => new[] { InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} #{x.UnitId} — {x.DamagePercent}٪", $"battleship_repair_quote:{x.UnitId}") }).ToList();
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", "cancel") });
             await SendTemp(chat.Id, "🔧 نبردناو موردنظر را انتخاب کنید. هزینه تعمیر برابر درصد واقعی آسیب از قیمت پول و آهن همان مدل است.", markup: new InlineKeyboardMarkup(rows), ct: ct);
             return;
@@ -7406,6 +7406,7 @@ partial class Program
             case "battleship_info": await HandleBattleshipInfoCallback(cb, parts, ct); break;
             case "battleship_buy": await HandleBattleshipBuyCallback(cb, parts, ct); break;
             case "battleship_repair": await HandleBattleshipRepairCallback(cb, parts, ct); break;
+            case "battleship_repair_quote": await HandleBattleshipRepairQuoteCallback(cb, parts, ct); break;
             case "battleship_repair_unit": await HandleBattleshipRepairUnitCallback(cb, parts, ct); break;
             case "airdef_strategy": await HandleAirDefStrategyCallback(cb, parts, ct); break;
             case "airdef_tactic": await HandleAirDefTacticCallback(cb, parts, ct); break;
@@ -8164,12 +8165,25 @@ partial class Program
         var rows = damaged.Select(x => new[]
         {
             InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} #{x.UnitId} — آسیب {x.DamagePercent}٪",
-                $"battleship_repair_unit:{x.UnitId}")
+                $"battleship_repair_quote:{x.UnitId}")
         }).ToList();
         rows.Add(new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", $"cancel:{uid}") });
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
         await SendTemp(cb.Message.Chat.Id, "🔧 نبردناو موردنظر برای تعمیر فوری را انتخاب کنید.\nهزینه دقیقاً متناسب با درصد آسیب و قیمت همان مدل است.",
             markup: new InlineKeyboardMarkup(rows), ct: ct);
+    }
+
+    static async Task HandleBattleshipRepairQuoteCallback(CallbackQuery cb,string[] parts,CancellationToken ct)
+    {
+        if(parts.Length<2||cb.Message==null||!TryParseLong(parts[1],out long unitId))return;
+        long uid=cb.From.Id,cid=cb.Message.Chat.Id;
+        if(!Database.GetBattleshipRepairQuote(unitId,uid,cid,out string model,out int damage,out long money,out long iron))
+        {await bot.AnswerCallbackQueryAsync(cb.Id,"❌ ناو قابل تعمیر نیست.",showAlert:true,cancellationToken:ct);return;}
+        var kb=new InlineKeyboardMarkup(new[]{
+            new[]{InlineKeyboardButton.WithCallbackData($"✅ تعمیر فوری — {money:N0} پول + {iron:N0} آهن",$"battleship_repair_unit:{unitId}")},
+            new[]{InlineKeyboardButton.WithCallbackData("❌ لغو","cancel")}});
+        await bot.AnswerCallbackQueryAsync(cb.Id,cancellationToken:ct);
+        await SendTemp(cid,$"🔧 تعمیر {model} #{unitId}\n💥 آسیب: {damage}٪\n💰 هزینه: {money:N0} پول\n🔩 هزینه: {iron:N0} آهن",markup:kb,ct:ct);
     }
 
     static async Task HandleBattleshipRepairUnitCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
