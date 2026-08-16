@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 static partial class Database
@@ -355,6 +356,14 @@ SELECT last_insert_rowid();";
  VALUES(@a,@d,@c,@w) ON CONFLICT(AttackerId,DefenderId,ChatId) DO UPDATE SET Wins=@w";
             rivalry.Parameters.AddWithValue("@a",inv.AttackerId); rivalry.Parameters.AddWithValue("@d",inv.DefenderId);
             rivalry.Parameters.AddWithValue("@c",inv.ChatId); rivalry.Parameters.AddWithValue("@w",wins); rivalry.ExecuteNonQuery();
+        }
+        using(var persistResult=con.CreateCommand())
+        {
+            persistResult.Transaction=tx;
+            persistResult.CommandText="UPDATE NavalInvasions SET ResultJson=@result WHERE Id=@id";
+            persistResult.Parameters.AddWithValue("@result",JsonSerializer.Serialize(result));
+            persistResult.Parameters.AddWithValue("@id",inv.Id);
+            persistResult.ExecuteNonQuery();
         }
         using(var hist=con.CreateCommand())
         {

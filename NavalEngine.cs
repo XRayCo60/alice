@@ -60,12 +60,12 @@ sealed class NavalBattleResult
     public int RivalryWinsAfter { get; set; }
     public long LootMoney { get; set; }
     public long LootIron { get; set; }
-    public Dictionary<string, long> AttackerBoatLosses { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, long> AttackerSubmarineLosses { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, long> DefenderBoatLosses { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, long> DefenderSubmarineLosses { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public List<NavalBattleshipOutcome> AttackerBattleships { get; } = new();
-    public List<NavalBattleshipOutcome> DefenderBattleships { get; } = new();
+    public Dictionary<string, long> AttackerBoatLosses { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, long> AttackerSubmarineLosses { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, long> DefenderBoatLosses { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, long> DefenderSubmarineLosses { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<NavalBattleshipOutcome> AttackerBattleships { get; set; } = new();
+    public List<NavalBattleshipOutcome> DefenderBattleships { get; set; } = new();
     public string AttackerReport { get; set; } = "";
     public string DefenderReport { get; set; } = "";
     public string GroupAnnouncement { get; set; } = "";

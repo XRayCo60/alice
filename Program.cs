@@ -179,6 +179,8 @@ class NavalInvasion
     public int Processed { get; set; } = 0;
     public string AttackerName { get; set; } = "";
     public string DefenderName { get; set; } = "";
+    public string Status { get; set; } = "Pending";
+    public string ResultJson { get; set; } = "";
 }
 
 enum SessionStep
@@ -3539,7 +3541,7 @@ static partial class Database
         var list = new List<NavalInvasion>();
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT Id,ChatId,AttackerId,DefenderId,Boats,Submarines,Battleships,BoatModels,SubModels,BattleshipModels,Strategy,Tactic,CreatedAtMs,ArriveAtMs,Processed,AttackerName,DefenderName FROM NavalInvasions WHERE Processed=0 AND ArriveAtMs<=@now";
+        cmd.CommandText = "SELECT Id,ChatId,AttackerId,DefenderId,Boats,Submarines,Battleships,BoatModels,SubModels,BattleshipModels,Strategy,Tactic,CreatedAtMs,ArriveAtMs,Processed,AttackerName,DefenderName,Status,ResultJson FROM NavalInvasions WHERE ArriveAtMs<=@now AND (Processed=0 OR Status='Settled')";
         cmd.Parameters.AddWithValue("@now", nowMs);
         using var r = cmd.ExecuteReader();
         while (r.Read())
@@ -3562,7 +3564,9 @@ static partial class Database
                 ArriveAtMs = r.GetInt64(13),
                 Processed = r.GetInt32(14),
                 AttackerName = r.IsDBNull(15) ? "" : r.GetString(15),
-                DefenderName = r.IsDBNull(16) ? "" : r.GetString(16)
+                DefenderName = r.IsDBNull(16) ? "" : r.GetString(16),
+                Status = r.FieldCount > 17 && !r.IsDBNull(17) ? r.GetString(17) : "Pending",
+                ResultJson = r.FieldCount > 18 && !r.IsDBNull(18) ? r.GetString(18) : ""
             });
         }
         return list;
@@ -3572,7 +3576,7 @@ static partial class Database
     {
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "UPDATE NavalInvasions SET Processed=1 WHERE Id=@id";
+        cmd.CommandText = "UPDATE NavalInvasions SET Processed=1,Status='Completed' WHERE Id=@id";
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
     }
@@ -4020,7 +4024,8 @@ partial class Program
                     string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
                     Database.IncDailyDefendCount(context.DefenderId, today);
                     Database.SetAttackerFlag(context.AttackerId, today);
-                    Database.AddAttackShieldHit(context.DefenderId, context.ChatId);
+                    if (!Database.HasGroupLockExemption(context.ChatId))
+                        Database.AddAttackShieldHit(context.DefenderId, context.ChatId);
                     try { await SendPermanent(context.AttackerId, result.AttackerReport, ct: ct); } catch { }
                     try { await SendPermanent(context.DefenderId, result.DefenderReport, ct: ct); } catch { }
                     try { await SendPermanent(context.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
@@ -4084,6 +4089,10 @@ partial class Program
             cancellationToken: cts.Token
         );
         Console.WriteLine("Bot is running...");
+        // ArriveAtMs is an absolute persisted timestamp. Any operation that arrived while
+        // the bot was offline is resolved immediately on startup; settlement is idempotent.
+        try { await ProcessNavalInvasions(cts.Token); }
+        catch (Exception ex) { Console.WriteLine($"[NAVAL STARTUP RECOVERY ERR] {ex}"); }
         StartAssetUpdateTimer();
         StartTransferTimer();
         StartActivityStatsTimer();
@@ -4178,6 +4187,8 @@ partial class Program
             if (deploymentLocked) deploymentProcessorLock.Release();
             if (transferLocked) transferProcessorLock.Release();
             Volatile.Write(ref databaseMaintenanceRunning, 0);
+            try { await ProcessNavalInvasions(CancellationToken.None); }
+            catch (Exception ex) { Console.WriteLine($"[NAVAL RESTORE RECOVERY ERR] {ex}"); }
             StartAssetUpdateTimer();
             StartTransferTimer();
             StartActivityStatsTimer();
@@ -7029,7 +7040,8 @@ partial class Program
                 var defenderCountry = Database.GetCountry(sess.AttackTargetId, sess.AttackChatId);
                 if (attackerCountry == null || defenderCountry == null) { EndSession(uid); await SendTemp(uid, "❌ کشور یافت نشد.", ct: ct); return; }
 
-                if (Database.IsAttackShieldActive(defenderCountry.OwnerId, defenderCountry.ChatId))
+                bool fullExemption = Database.HasGroupLockExemption(sess.AttackChatId);
+                if (Database.IsAttackShieldActive(defenderCountry.OwnerId, defenderCountry.ChatId) && !fullExemption)
                 {
                     long until = Database.GetAttackShieldUntilMs(defenderCountry.OwnerId, defenderCountry.ChatId);
                     long leftH = Math.Max(1, (until - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 3600000);
@@ -7046,7 +7058,8 @@ partial class Program
                 var selectedBs = bsModelsList.Select(x => x.Split(':', 2))
                     .Where(x => x.Length == 2 && long.TryParse(x[1], out _))
                     .Select(x => new NavalModelAmount(x[0], long.Parse(x[1]))).ToList();
-                int travelMinutes = Random.Shared.Next(10, 301);
+                // معافیت کامل تمام انتظارهای حمله را حذف می‌کند؛ سفر دریایی فقط یک دقیقه است.
+                int travelMinutes = fullExemption ? 1 : Random.Shared.Next(10, 301);
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 long operationId;
                 try
@@ -9769,6 +9782,21 @@ partial class Program
         }
     }
 
+    static void AppendNavalStrategicProgress(NavalBattleResult result)
+    {
+        if (result.AttackerReport.Contains("پیشرفت تخریب بندر", StringComparison.Ordinal) ||
+            result.AttackerReport.Contains("سومین پیروزی این مهاجم", StringComparison.Ordinal)) return;
+        if (result.PortLevelDamaged)
+        {
+            string portNews = "\n⚓ پس از سومین پیروزی این مهاجم، بندر مدافع یک سطح تخریب شد.";
+            result.AttackerReport += portNews;
+            result.DefenderReport += portNews;
+            result.GroupAnnouncement += portNews;
+        }
+        else if (result.AttackerWon && !result.EmptyBase)
+            result.AttackerReport += $"\n📈 پیشرفت تخریب بندر برابر این مدافع: {result.RivalryWinsAfter}/3";
+    }
+
     static async Task ProcessNavalInvasionsCore(CancellationToken ct)
     {
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -9779,6 +9807,18 @@ partial class Program
                 new[] { inv.AttackerId, inv.DefenderId }, ct);
             try
             {
+                if (inv.Status.Equals("Settled", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(inv.ResultJson))
+                {
+                    var recovered = JsonSerializer.Deserialize<NavalBattleResult>(inv.ResultJson);
+                    if (recovered == null) throw new InvalidOperationException("Stored naval result is invalid.");
+                    AppendNavalStrategicProgress(recovered);
+                    try { await SendPermanent(inv.AttackerId, recovered.AttackerReport, ct: ct); } catch { }
+                    try { await SendPermanent(inv.DefenderId, recovered.DefenderReport, ct: ct); } catch { }
+                    try { await SendPermanent(inv.ChatId, recovered.GroupAnnouncement, ct: ct); } catch { }
+                    Database.MarkNavalInvasionProcessed(inv.Id);
+                    continue;
+                }
                 var attacker = Database.GetCountry(inv.AttackerId, inv.ChatId);
                 var defender = Database.GetCountry(inv.DefenderId, inv.ChatId);
                 if (attacker == null || defender == null)
@@ -9835,16 +9875,11 @@ partial class Program
                 NavalBattleResult result = NavalEngine.Resolve(request);
                 if (!Database.SettleNavalOperation(inv, result, attackerBoats, attackerSubs,
                         defenderBoats, defenderSubs)) continue;
-                if (result.PortLevelDamaged)
-                {
-                    string portNews = "\n⚓ پس از سومین پیروزی این مهاجم، بندر مدافع یک سطح تخریب شد.";
-                    result.AttackerReport += portNews; result.DefenderReport += portNews; result.GroupAnnouncement += portNews;
-                }
-                else if (result.AttackerWon && !result.EmptyBase)
-                    result.AttackerReport += $"\n📈 پیشرفت تخریب بندر برابر این مدافع: {result.RivalryWinsAfter}/3";
+                AppendNavalStrategicProgress(result);
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
+                Database.MarkNavalInvasionProcessed(inv.Id);
             }
             catch (Exception ex)
             {
@@ -9856,10 +9891,12 @@ partial class Program
 
     static async Task HandleAttackGroupCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
 {
-        if (Database.HasAttackAbandonLock(cb.From.Id)) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
         if (parts.Length < 2 || cb.Message == null) return;
         long uid = cb.From.Id;
         if (!TryParseLong(parts[1], out long cid)) return;
+        bool fullExemption = Database.HasGroupLockExemption(cid);
+        if (Database.HasAttackAbandonLock(uid) && !fullExemption)
+        { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
         var targets = Database.GetAttackableTargets(cid, uid);
         if (targets.Count == 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "هدف نیست.", cancellationToken: ct); return; }
         var kb = targets.Select(t => new[] { InlineKeyboardButton.WithCallbackData($"{t.Name} ({t.OwnerName})", $"attack_target:{cid}:{t.OwnerId}") }).ToArray();
@@ -9874,7 +9911,6 @@ partial class Program
         string[] parts,
         CancellationToken ct)
 {
-        if (Database.HasAttackAbandonLock(cb.From.Id)) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
         if (parts.Length < 3 || cb.Message == null)
             return;
 
@@ -9883,6 +9919,9 @@ partial class Program
         if (!TryParseLong(parts[1], out long cid) ||
             !TryParseLong(parts[2], out long tid))
             return;
+        bool fullExemption = Database.HasGroupLockExemption(cid);
+        if (Database.HasAttackAbandonLock(uid) && !fullExemption)
+        { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
 
         var defender = Database.GetCountry(tid, cid);
         var attacker = Database.GetCountry(uid, cid);
@@ -9898,7 +9937,7 @@ partial class Program
         }
 
         //  – shield check (5 attacks => 16h shield)
-        if (Database.IsAttackShieldActive(tid, cid))
+        if (Database.IsAttackShieldActive(tid, cid) && !fullExemption)
         {
             long until = Database.GetAttackShieldUntilMs(tid, cid);
             long leftMs = until - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -9978,6 +10017,7 @@ partial class Program
         long uid = cb.From.Id;
         if (!TryParseLong(parts[1], out long cid) || !TryParseLong(parts[2], out long tid)) return;
         string type = parts[3]; // ground or naval
+        bool fullExemption = Database.HasGroupLockExemption(cid);
         var session = sessions.GetOrAdd(uid, _ => new UserSession());
         session.AttackChatId = cid;
         session.AttackTargetId = tid;
@@ -10021,7 +10061,7 @@ partial class Program
             var defender = Database.GetCountry(tid, cid);
             if (attacker != null && defender != null)
             {
-                if (Database.IsAttackShieldActive(tid, cid))
+                if (Database.IsAttackShieldActive(tid, cid) && !fullExemption)
                 {
                     long until = Database.GetAttackShieldUntilMs(tid, cid);
                     long leftH = Math.Max(1, (until - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 3600000);
@@ -10136,7 +10176,6 @@ partial class Program
         string[] parts,
         CancellationToken ct)
 {
-        if (Database.HasAttackAbandonLock(cb.From.Id)) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
         if (parts.Length < 4 || cb.Message == null)
             return;
 
@@ -10147,6 +10186,8 @@ partial class Program
             !TryParseInt(parts[3], out int strategy) ||
             strategy is < 1 or > 2)
             return;
+        if (Database.HasAttackAbandonLock(uid) && !Database.HasGroupLockExemption(cid))
+        { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ شما تا ۳ روز به دلیل بزن‌دررو از حمله قفل هستید.", showAlert: true, cancellationToken: ct); return; }
 
         var session = sessions.GetOrAdd(
             uid,
@@ -10426,7 +10467,7 @@ partial class Program
         long queuedBattleId = 0;
         try
         {
-            if (Database.HasAttackAbandonLock(uid))
+            if (Database.HasAttackAbandonLock(uid) && !Database.HasGroupLockExemption(chatId))
             {
                 await SendTemp(uid, "⛔ به‌دلیل قفل بزن‌دررو فعلاً امکان حمله ندارید.", ct: ct);
                 return;
@@ -10452,7 +10493,7 @@ partial class Program
                 await SendTemp(uid, $"⛔ سهمیه حمله تمام شده است ({MAX_ATTACKS_PER_UPDATE}).", ct: ct);
                 return;
             }
-            if (Database.IsAttackShieldActive(defenderId, chatId))
+            if (Database.IsAttackShieldActive(defenderId, chatId) && !Database.HasGroupLockExemption(chatId))
             {
                 await SendTemp(uid, "🛡 کشور هدف در حال حاضر سپر فعال دارد.", ct: ct);
                 return;
@@ -10581,7 +10622,8 @@ partial class Program
             string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
             Database.IncDailyDefendCount(defenderId, today);
             Database.SetAttackerFlag(uid, today);
-            Database.AddAttackShieldHit(defenderId, chatId);
+            if (!Database.HasGroupLockExemption(chatId))
+                Database.AddAttackShieldHit(defenderId, chatId);
 
             try { await SendPermanent(uid, result.AttackerReport, ct: ct); } catch { }
             try { await SendPermanent(defenderId, result.DefenderReport, ct: ct); } catch { }
