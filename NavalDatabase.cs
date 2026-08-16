@@ -344,9 +344,11 @@ SELECT last_insert_rowid();";
         if(wins>=3)
         {
             using var port=con.CreateCommand(); port.Transaction=tx;
-            port.CommandText="UPDATE Countries SET PortLevel=MAX(1,PortLevel-1) WHERE OwnerId=@o AND ChatId=@c";
-            port.Parameters.AddWithValue("@o",inv.DefenderId); port.Parameters.AddWithValue("@c",inv.ChatId); port.ExecuteNonQuery(); wins=0;
+            port.CommandText="UPDATE Countries SET PortLevel=PortLevel-1 WHERE OwnerId=@o AND ChatId=@c AND PortLevel>1";
+            port.Parameters.AddWithValue("@o",inv.DefenderId); port.Parameters.AddWithValue("@c",inv.ChatId);
+            result.PortLevelDamaged=port.ExecuteNonQuery()==1; wins=0;
         }
+        result.RivalryWinsAfter=wins;
         using(var rivalry=con.CreateCommand())
         {
             rivalry.Transaction=tx; rivalry.CommandText=@"INSERT INTO NavalRivalryWins(AttackerId,DefenderId,ChatId,Wins)

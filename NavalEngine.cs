@@ -56,6 +56,8 @@ sealed class NavalBattleResult
     public bool AttackerWon { get; set; }
     public bool EmptyBase { get; set; }
     public bool SurpriseSucceeded { get; set; }
+    public bool PortLevelDamaged { get; set; }
+    public int RivalryWinsAfter { get; set; }
     public long LootMoney { get; set; }
     public long LootIron { get; set; }
     public Dictionary<string, long> AttackerBoatLosses { get; } = new(StringComparer.OrdinalIgnoreCase);

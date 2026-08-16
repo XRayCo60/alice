@@ -8127,9 +8127,9 @@ partial class Program
             await bot.AnswerCallbackQueryAsync(cb.Id, "⚓ برای ساخت نبردناو بندر سطح ۴ لازم است", showAlert: true, cancellationToken: ct);
             return;
         }
-        if (c.Battleships >= 3)
+        if (c.Battleships + c.BattleshipsAtSea >= 3)
         {
-            await bot.AnswerCallbackQueryAsync(cb.Id, "❌ حداکثر 3 نبردناو می‌توانید داشته باشید", showAlert: true, cancellationToken: ct);
+            await bot.AnswerCallbackQueryAsync(cb.Id, "❌ حداکثر 3 نبردناو می‌توانید داشته باشید (ناوهای در مأموریت هم حساب می‌شوند)", showAlert: true, cancellationToken: ct);
             return;
         }
 
@@ -9835,6 +9835,13 @@ partial class Program
                 NavalBattleResult result = NavalEngine.Resolve(request);
                 if (!Database.SettleNavalOperation(inv, result, attackerBoats, attackerSubs,
                         defenderBoats, defenderSubs)) continue;
+                if (result.PortLevelDamaged)
+                {
+                    string portNews = "\n⚓ پس از سومین پیروزی این مهاجم، بندر مدافع یک سطح تخریب شد.";
+                    result.AttackerReport += portNews; result.DefenderReport += portNews; result.GroupAnnouncement += portNews;
+                }
+                else if (result.AttackerWon && !result.EmptyBase)
+                    result.AttackerReport += $"\n📈 پیشرفت تخریب بندر برابر این مدافع: {result.RivalryWinsAfter}/3";
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
