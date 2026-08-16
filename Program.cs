@@ -8674,7 +8674,7 @@ partial class Program
         long mp = CalcManpower(c);
         string crisis = c.Besieged >= 2 ? "🆘 بحرانی! (۵۰٪ درآمد، قفل سطح ۴-۵)\n\n" : "";
         // Naval info for وضعیت کشور
-        string navalLine = $"🚤 قایق: {c.Boats}{(c.BoatsAtSea>0 ? $" (در دریا {c.BoatsAtSea})" : "")} | ⚓ زیردریایی: {c.Submarines}{(c.SubmarinesAtSea>0 ? $" در دریا {c.SubmarinesAtSea}" : "")} | 🚢 نبردناو: {c.Battleships}/3{(c.BattleshipDamage>0 ? $" آسیب {c.BattleshipDamage}%" : "")}{(c.BattleshipsAtSea>0 ? $" در دریا {c.BattleshipsAtSea}" : "")}";
+        string navalLine = $"🚤 قایق: {c.Boats}{(c.BoatsAtSea>0 ? $" (در دریا {c.BoatsAtSea})" : "")} | ⚓ زیردریایی: {c.Submarines}{(c.SubmarinesAtSea>0 ? $" در دریا {c.SubmarinesAtSea}" : "")} | 🚢 نبردناو: {c.Battleships}/3{(c.BattleshipsAtSea>0 ? $" در دریا {c.BattleshipsAtSea}" : "")}";
         string info = crisis + $"🏳️ کشور: {c.Name}\n👤 مالک: {c.OwnerName}\n{status}\n⚡ مان‌پاور: {mp / 1000.0:F1}K\n\n" +
             $"💰 پول: {(c.Money / 1000.0):F1}K\n🏭 ساختمان: +{bInc / 1000.0:F1}K\n🧾 مالیات: +{tInc / 1000.0:F1}K ({c.TaxRate}%)\n\n" +
             $"🔩 آهن: {(c.Iron / 1000.0):F1}K\n⛏️ معدن: +{iInc / 1000.0:F1}K\n\n" +
@@ -10996,7 +10996,7 @@ partial class Program
             $"تاکتیک: {airTactic}\n\n" +
 
             "⚓ دفاع دریایی\n" +
-            $"بندر سطح: {country.PortLevel} | نبردناو آسیب: {country.BattleshipDamage}%\n\n" +
+            $"بندر سطح: {country.PortLevel}\n\n" +
 
             sbDef.ToString() + "\n" +
 
