@@ -376,10 +376,11 @@ class UserSession
 
 static partial class Database
 {
-    private const string CONNECTION = "Data Source=gamedata.db";
+    private static string ConnectionString =>
+        $"Data Source={Environment.GetEnvironmentVariable("ALICE_DB_PATH") ?? "gamedata.db"}";
     private static SqliteConnection OpenCon()
     {
-        var con = new SqliteConnection(CONNECTION);
+        var con = new SqliteConnection(ConnectionString);
         con.Open();
         using var p = con.CreateCommand();
         p.CommandText = "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;";
@@ -4119,8 +4120,8 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
 // ============================================================
 partial class Program
 {
-    static readonly string BOT_TOKEN = Environment.GetEnvironmentVariable("BOT_TOKEN")
-        ?? throw new InvalidOperationException("BOT_TOKEN environment variable is required.");
+    // Kept lazy enough for offline regression commands; normal bot startup validates it in Main.
+    static readonly string BOT_TOKEN = Environment.GetEnvironmentVariable("BOT_TOKEN") ?? "";
     const long OWNER_ID = 8248899977L;
     static TelegramBotClient bot = null!;
     static readonly ConcurrentDictionary<long, UserSession> sessions = new();
@@ -4359,6 +4360,13 @@ partial class Program
             WarEngine.RunSelfTest(seeds);
             return;
         }
+        if (args.Length > 0 && args[0].Equals("navaltest", StringComparison.OrdinalIgnoreCase))
+        {
+            NavalRegressionTests.Run();
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(BOT_TOKEN))
+            throw new InvalidOperationException("BOT_TOKEN environment variable is required.");
         Database.Init();
         Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
         Database.InitNavalV2();

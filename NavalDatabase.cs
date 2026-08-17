@@ -470,6 +470,14 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
         cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);cmd.ExecuteNonQuery();
     }
 
+    internal static bool SetBattleshipDamageForTest(long unitId,int damage)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="UPDATE BattleshipUnits SET DamagePercent=@damage WHERE Id=@id AND Status='Ready'";
+        cmd.Parameters.AddWithValue("@damage",Math.Clamp(damage,0,99));cmd.Parameters.AddWithValue("@id",unitId);
+        return cmd.ExecuteNonQuery()==1;
+    }
+
     public static bool GetBattleshipScrapQuote(long unitId,long ownerId,long chatId,out string model,out int damage,out long money,out long iron)
     {
         model="";damage=0;money=iron=0;using var con=OpenCon();using var cmd=con.CreateCommand();
