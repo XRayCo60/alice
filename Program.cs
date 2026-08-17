@@ -6167,11 +6167,9 @@ partial class Program
             if (country == null) { await SendTemp(chat.Id, MsgNoCountryGuide, ct: ct); return; }
             // Check port level for battleship info
             string portInfo = country.PortLevel < 4 ? "\n⚠️ برای ساخت نبردناو بندر سطح ۴ لازم است" : "";
-            Database.SyncBattleshipUnits(uid, chat.Id);
-            var shipStates = Database.GetBattleshipUnits(uid, chat.Id, onlyCombatReady: false);
-            string dmgInfo = shipStates.Any(x => x.DamagePercent > 0)
-                ? "\n" + string.Join("\n", shipStates.Where(x => x.DamagePercent > 0).Select(x => $"🔧 {x.Model} #{x.UnitId}: {x.DamagePercent}٪ آسیب"))
-                : $"\n🚢 نبردناو: {country.Battleships}/3";
+            // Keep the purchase menu read-only and fast. Per-ship damage is loaded only
+            // when the user opens repair/scrap details, not on every «خرید ناو» command.
+            string dmgInfo = $"\n🚢 نبردناو حاضر در بندر: {country.Battleships}/3";
             string seaInfo = (country.BoatsAtSea + country.SubmarinesAtSea + country.BattleshipsAtSea) > 0 ? $"\n🌊 در دریا: {country.BoatsAtSea}🚤 {country.SubmarinesAtSea}⚓ {country.BattleshipsAtSea}🚢" : "";
             var navalKb = country.Faction switch
             {

@@ -97,18 +97,35 @@ CREATE INDEX IF NOT EXISTS IX_BattleshipUnits_Owner ON BattleshipUnits(OwnerId,C
         var desired = GetEquipmentBreakdownForReconcile(c, "battleships")
             .ToDictionary(x => x.ModelName, x => x.Count, StringComparer.OrdinalIgnoreCase);
         using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
         foreach (var item in desired)
         {
-            using var count = con.CreateCommand();
-            count.CommandText = @"SELECT COUNT(*) FROM BattleshipUnits
-                                  WHERE OwnerId=@owner AND ChatId=@chat AND ModelName=@model
-                                    AND Status!='Sunk'";
-            count.Parameters.AddWithValue("@owner", ownerId);
-            count.Parameters.AddWithValue("@chat", chatId);
-            count.Parameters.AddWithValue("@model", item.Key);
-            long have = Convert.ToInt64(count.ExecuteScalar());
-            for (long i = have; i < item.Value; i++) RegisterBattleshipUnit(ownerId, chatId, item.Key);
+            long have;
+            using (var count = con.CreateCommand())
+            {
+                count.Transaction = transaction;
+                count.CommandText = @"SELECT COUNT(*) FROM BattleshipUnits
+                                      WHERE OwnerId=@owner AND ChatId=@chat AND ModelName=@model
+                                        AND Status!='Sunk'";
+                count.Parameters.AddWithValue("@owner", ownerId);
+                count.Parameters.AddWithValue("@chat", chatId);
+                count.Parameters.AddWithValue("@model", item.Key);
+                have = Convert.ToInt64(count.ExecuteScalar());
+            }
+            for (long i = have; i < item.Value; i++)
+            {
+                using var insert = con.CreateCommand();
+                insert.Transaction = transaction;
+                insert.CommandText = @"INSERT INTO BattleshipUnits
+                    (OwnerId,ChatId,ModelName,DamagePercent,OperationId,Status)
+                    VALUES(@owner,@chat,@model,0,NULL,'Ready')";
+                insert.Parameters.AddWithValue("@owner", ownerId);
+                insert.Parameters.AddWithValue("@chat", chatId);
+                insert.Parameters.AddWithValue("@model", item.Key);
+                insert.ExecuteNonQuery();
+            }
         }
+        transaction.Commit();
     }
 
     public static List<NavalBattleshipState> GetBattleshipUnits(long ownerId, long chatId,
