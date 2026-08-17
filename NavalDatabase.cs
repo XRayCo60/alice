@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS BattleshipUnits(
  Id INTEGER PRIMARY KEY AUTOINCREMENT, OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL,
  ModelName TEXT NOT NULL, DamagePercent INTEGER NOT NULL DEFAULT 0,
  OperationId INTEGER NULL, Status TEXT NOT NULL DEFAULT 'Ready');
+CREATE TABLE IF NOT EXISTS TransferBattleships(
+ TransferId INTEGER NOT NULL, UnitId INTEGER NOT NULL UNIQUE,
+ PRIMARY KEY(TransferId,UnitId));
 CREATE TABLE IF NOT EXISTS NavalRivalryWins(
  AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, ChatId INTEGER NOT NULL,
  Wins INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(AttackerId,DefenderId,ChatId));
@@ -38,6 +41,42 @@ CREATE INDEX IF NOT EXISTS IX_BattleshipUnits_Owner ON BattleshipUnits(OwnerId,C
         EnsureColumn(con, "NavalInvasions", "ResultJson", "TEXT DEFAULT ''");
         EnsureColumn(con, "NavalInvasions", "Status", "TEXT DEFAULT 'Pending'");
         foreach (var c in GetAllCountries()) SyncBattleshipUnits(c.OwnerId, c.ChatId);
+    }
+
+    public static bool TryPurchaseBattleship(long ownerId,long chatId,string model,long moneyCost,long ironCost)
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        long used;
+        using(var capacity=con.CreateCommand())
+        {
+            capacity.Transaction=tx;capacity.CommandText=@"SELECT Battleships+BattleshipsAtSea+
+ COALESCE((SELECT SUM(Amount) FROM Transfers WHERE ReceiverId=@o AND ChatId=@c AND ResourceType='battleships'),0)
+ FROM Countries WHERE OwnerId=@o AND ChatId=@c AND PortLevel>=4";
+            capacity.Parameters.AddWithValue("@o",ownerId);capacity.Parameters.AddWithValue("@c",chatId);
+            object? value=capacity.ExecuteScalar();if(value==null||value==DBNull.Value)return false;used=Convert.ToInt64(value);
+        }
+        if(used>=3)return false;
+        using(var country=con.CreateCommand())
+        {
+            country.Transaction=tx;country.CommandText=@"UPDATE Countries SET Money=Money-@money,Iron=Iron-@iron,Battleships=Battleships+1
+ WHERE OwnerId=@o AND ChatId=@c AND PortLevel>=4 AND Money>=@money AND Iron>=@iron";
+            country.Parameters.AddWithValue("@money",moneyCost);country.Parameters.AddWithValue("@iron",ironCost);
+            country.Parameters.AddWithValue("@o",ownerId);country.Parameters.AddWithValue("@c",chatId);
+            if(country.ExecuteNonQuery()!=1)return false;
+        }
+        using(var equipment=con.CreateCommand())
+        {
+            equipment.Transaction=tx;equipment.CommandText=@"INSERT INTO EquipmentModels(OwnerId,ChatId,Category,ModelName,Count)
+ VALUES(@o,@c,'Battleships',@model,1) ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+1";
+            equipment.Parameters.AddWithValue("@o",ownerId);equipment.Parameters.AddWithValue("@c",chatId);equipment.Parameters.AddWithValue("@model",model);equipment.ExecuteNonQuery();
+        }
+        using(var unit=con.CreateCommand())
+        {
+            unit.Transaction=tx;unit.CommandText=@"INSERT INTO BattleshipUnits(OwnerId,ChatId,ModelName,DamagePercent,Status)
+ VALUES(@o,@c,@model,0,'Ready')";unit.Parameters.AddWithValue("@o",ownerId);unit.Parameters.AddWithValue("@c",chatId);
+            unit.Parameters.AddWithValue("@model",model);unit.ExecuteNonQuery();
+        }
+        tx.Commit();return true;
     }
 
     public static void RegisterBattleshipUnit(long ownerId, long chatId, string model)
@@ -158,6 +197,20 @@ CREATE INDEX IF NOT EXISTS IX_BattleshipUnits_Owner ON BattleshipUnits(OwnerId,C
         }
         return inventory.Select((x,i) => new NavalModelAmount(x.ModelName, chosen[i]))
             .Where(x => x.Count > 0).ToList();
+    }
+
+    public static List<NavalModelAmount> GetNavalTransferableModels(Country c, string resourceType)
+    {
+        if(resourceType!="battleships")return GetNavalAttackableModels(c,resourceType);
+        var inventory=GetEquipmentBreakdownForReconcile(c,"battleships");
+        var defense=GetNavalDefenseModels(c,"battleships")
+            .ToDictionary(x=>x.Model,x=>x.Count,StringComparer.OrdinalIgnoreCase);
+        var ready=GetBattleshipUnits(c.OwnerId,c.ChatId,false)
+            .GroupBy(x=>x.Model,StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x=>x.Key,x=>(long)x.Count(),StringComparer.OrdinalIgnoreCase);
+        return inventory.Select(x=>new NavalModelAmount(x.ModelName,
+                Math.Max(0,Math.Min(x.Count,ready.GetValueOrDefault(x.ModelName))-defense.GetValueOrDefault(x.ModelName))))
+            .Where(x=>x.Count>0).ToList();
     }
 
     public static List<NavalModelAmount> GetNavalAttackableModels(Country c, string resourceType)
@@ -398,6 +451,52 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
         cmd.CommandText=outcome.Sunk?"UPDATE BattleshipUnits SET DamagePercent=100,Status='Sunk',OperationId=NULL WHERE Id=@id":
             "UPDATE BattleshipUnits SET DamagePercent=@damage,Status='Ready',OperationId=NULL WHERE Id=@id";
         cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);cmd.ExecuteNonQuery();
+    }
+
+    public static bool GetBattleshipScrapQuote(long unitId,long ownerId,long chatId,out string model,out int damage,out long money,out long iron)
+    {
+        model="";damage=0;money=iron=0;using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"SELECT ModelName,DamagePercent FROM BattleshipUnits
+ WHERE Id=@id AND OwnerId=@o AND ChatId=@c AND Status='Ready' AND OperationId IS NULL";
+        cmd.Parameters.AddWithValue("@id",unitId);cmd.Parameters.AddWithValue("@o",ownerId);cmd.Parameters.AddWithValue("@c",chatId);
+        using var r=cmd.ExecuteReader();if(!r.Read())return false;model=r.GetString(0);damage=r.GetInt32(1);
+        (long baseMoney,long baseIron)=model.ToLowerInvariant() switch
+        {var m when m.Contains("iowa")=>(50000,40000),var m when m.Contains("soyuz")=>(45000,25000),_=>(50000,30000)};
+        money=baseMoney/2;iron=baseIron/2;return true;
+    }
+
+    public static bool ScrapBattleshipUnit(long unitId,long ownerId,long chatId,out string model,out long money,out long iron)
+    {
+        model="";money=iron=0;using var con=OpenCon();using var tx=con.BeginTransaction();
+        using(var get=con.CreateCommand())
+        {
+            get.Transaction=tx;get.CommandText=@"SELECT ModelName FROM BattleshipUnits
+ WHERE Id=@id AND OwnerId=@o AND ChatId=@c AND Status='Ready' AND OperationId IS NULL";
+            get.Parameters.AddWithValue("@id",unitId);get.Parameters.AddWithValue("@o",ownerId);get.Parameters.AddWithValue("@c",chatId);
+            object? value=get.ExecuteScalar();if(value==null||value==DBNull.Value)return false;model=Convert.ToString(value)??"";
+        }
+        (long baseMoney,long baseIron)=model.ToLowerInvariant() switch
+        {var m when m.Contains("iowa")=>(50000,40000),var m when m.Contains("soyuz")=>(45000,25000),_=>(50000,30000)};
+        money=(long)Math.Floor(baseMoney*0.50);iron=(long)Math.Floor(baseIron*0.50);
+        using(var country=con.CreateCommand())
+        {
+            country.Transaction=tx;country.CommandText=@"UPDATE Countries SET Battleships=Battleships-1,
+ Money=Money+@money,Iron=Iron+@iron WHERE OwnerId=@o AND ChatId=@c AND Battleships>=1";
+            country.Parameters.AddWithValue("@money",money);country.Parameters.AddWithValue("@iron",iron);
+            country.Parameters.AddWithValue("@o",ownerId);country.Parameters.AddWithValue("@c",chatId);
+            if(country.ExecuteNonQuery()!=1)return false;
+        }
+        using(var equipment=con.CreateCommand())
+        {
+            equipment.Transaction=tx;equipment.CommandText=@"UPDATE EquipmentModels SET Count=MAX(0,Count-1)
+ WHERE OwnerId=@o AND ChatId=@c AND Category='Battleships' AND ModelName=@model;
+ DELETE FROM EquipmentModels WHERE OwnerId=@o AND ChatId=@c AND Category='Battleships' AND ModelName=@model AND Count<=0";
+            equipment.Parameters.AddWithValue("@o",ownerId);equipment.Parameters.AddWithValue("@c",chatId);equipment.Parameters.AddWithValue("@model",model);
+            equipment.ExecuteNonQuery();
+        }
+        using(var delete=con.CreateCommand()){delete.Transaction=tx;delete.CommandText="DELETE FROM BattleshipUnits WHERE Id=@id";
+            delete.Parameters.AddWithValue("@id",unitId);if(delete.ExecuteNonQuery()!=1)return false;}
+        tx.Commit();return true;
     }
 
     public static bool GetBattleshipRepairQuote(long unitId,long ownerId,long chatId,
