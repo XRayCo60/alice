@@ -702,7 +702,16 @@ static partial class Database
         EnsureColumn(con, "Countries", "BattleshipsAtSea", "INTEGER DEFAULT 0");
         // FIX(2): ستون جدید برای پیام پین‌شدهٔ صف‌آرایی (روی دیتابیس‌های قدیمی هم اضافه می‌شود)
         EnsureColumn(con, "Deployments", "AnnounceMsgId", "INTEGER DEFAULT 0");
+        EnsureColumn(con, "DeploymentContributors", "ChatId", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Transfers", "ModelName", "TEXT DEFAULT ''");
+        using (var backfillContributorChat = con.CreateCommand())
+        {
+            backfillContributorChat.CommandText = @"UPDATE DeploymentContributors
+                SET ChatId=COALESCE((SELECT d.ChatId FROM Deployments d
+                                    WHERE d.Id=DeploymentContributors.DeploymentId),ChatId)
+                WHERE ChatId=0";
+            backfillContributorChat.ExecuteNonQuery();
+        }
 
         using (var fix = con.CreateCommand())
         {
@@ -2769,6 +2778,8 @@ static partial class Database
         IReadOnlyDictionary<string, long>? fighterModels = null,
         IReadOnlyDictionary<string, long>? bomberModels = null)
     {
+        if (deployment.Tanks < 0 || deployment.Soldiers < 0 ||
+            deployment.Fighters < 0 || deployment.Bombers < 0) return 0;
         using var con = OpenCon();
         using var transaction = con.BeginTransaction();
 
@@ -2830,10 +2841,11 @@ static partial class Database
         {
             contributor.Transaction = transaction;
             contributor.CommandText = @"INSERT INTO DeploymentContributors
-                (DeploymentId,UserId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
-                VALUES(@deployment,@user,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
+                (DeploymentId,UserId,ChatId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
+                VALUES(@deployment,@user,@chat,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
             contributor.Parameters.AddWithValue("@deployment", deploymentId);
             contributor.Parameters.AddWithValue("@user", deployment.InitiatorId);
+            contributor.Parameters.AddWithValue("@chat", deployment.ChatId);
             contributor.Parameters.AddWithValue("@tanks", deployment.Tanks);
             contributor.Parameters.AddWithValue("@soldiers", deployment.Soldiers);
             contributor.Parameters.AddWithValue("@fighters", deployment.Fighters);
@@ -2862,6 +2874,8 @@ static partial class Database
         IReadOnlyDictionary<string, long>? fighterModels = null,
         IReadOnlyDictionary<string, long>? bomberModels = null)
     {
+        if (contributor.Tanks < 0 || contributor.Soldiers < 0 ||
+            contributor.Fighters < 0 || contributor.Bombers < 0) return false;
         using var con = OpenCon();
         using var transaction = con.BeginTransaction();
 
@@ -2916,10 +2930,11 @@ static partial class Database
         {
             insert.Transaction = transaction;
             insert.CommandText = @"INSERT INTO DeploymentContributors
-                (DeploymentId,UserId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
-                VALUES(@deployment,@user,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
+                (DeploymentId,UserId,ChatId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
+                VALUES(@deployment,@user,@chat,@tanks,@soldiers,@fighters,@bombers,@strategy,@tactic)";
             insert.Parameters.AddWithValue("@deployment", deploymentId);
             insert.Parameters.AddWithValue("@user", contributor.UserId);
+            insert.Parameters.AddWithValue("@chat", chatId);
             insert.Parameters.AddWithValue("@tanks", contributor.Tanks);
             insert.Parameters.AddWithValue("@soldiers", contributor.Soldiers);
             insert.Parameters.AddWithValue("@fighters", contributor.Fighters);
@@ -3157,10 +3172,38 @@ static partial class Database
     public static bool ReturnDeploymentForcesAndDelete(
         long deploymentId,
         long chatId,
-        IReadOnlyList<(long UserId, long Tanks, long Soldiers, long Fighters, long Bombers)> returns)
+        IReadOnlyList<(long UserId, long Tanks, long Soldiers, long Fighters, long Bombers)> returns,
+        bool allowBattleLosses = false)
     {
         using var con = OpenCon();
         using var transaction = con.BeginTransaction();
+
+        var capacities = new Dictionary<long, (long Tanks, long Soldiers, long Fighters, long Bombers)>();
+        using (var ledger = con.CreateCommand())
+        {
+            ledger.Transaction = transaction;
+            ledger.CommandText = @"SELECT UserId,COALESCE(SUM(Tanks),0),COALESCE(SUM(Soldiers),0),
+                                           COALESCE(SUM(Fighters),0),COALESCE(SUM(Bombers),0)
+                                    FROM DeploymentContributors WHERE DeploymentId=@id GROUP BY UserId";
+            ledger.Parameters.AddWithValue("@id", deploymentId);
+            using var reader = ledger.ExecuteReader();
+            while (reader.Read()) capacities[reader.GetInt64(0)] =
+                (reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4));
+        }
+        var normalizedReturns = returns.GroupBy(x => x.UserId).ToDictionary(g => g.Key, g => (
+            Tanks: g.Sum(x => x.Tanks), Soldiers: g.Sum(x => x.Soldiers),
+            Fighters: g.Sum(x => x.Fighters), Bombers: g.Sum(x => x.Bombers)));
+        if (capacities.Count == 0 || capacities.Keys.Any(x => !normalizedReturns.ContainsKey(x)) ||
+            normalizedReturns.Any(x => !capacities.TryGetValue(x.Key, out var cap) ||
+                x.Value.Tanks < 0 || x.Value.Soldiers < 0 || x.Value.Fighters < 0 || x.Value.Bombers < 0 ||
+                x.Value.Tanks > cap.Tanks || x.Value.Soldiers > cap.Soldiers ||
+                x.Value.Fighters > cap.Fighters || x.Value.Bombers > cap.Bombers ||
+                (!allowBattleLosses && (x.Value.Tanks != cap.Tanks || x.Value.Soldiers != cap.Soldiers ||
+                    x.Value.Fighters != cap.Fighters || x.Value.Bombers != cap.Bombers))))
+        {
+            transaction.Rollback();
+            return false;
+        }
 
         using (var claim = con.CreateCommand())
         {
@@ -3174,7 +3217,7 @@ static partial class Database
             }
         }
 
-        foreach (var item in returns)
+        foreach (var (userId, item) in normalizedReturns)
         {
             using var restore = con.CreateCommand();
             restore.Transaction = transaction;
@@ -3188,9 +3231,13 @@ static partial class Database
             restore.Parameters.AddWithValue("@soldiers", item.Soldiers);
             restore.Parameters.AddWithValue("@fighters", item.Fighters);
             restore.Parameters.AddWithValue("@bombers", item.Bombers);
-            restore.Parameters.AddWithValue("@owner", item.UserId);
+            restore.Parameters.AddWithValue("@owner", userId);
             restore.Parameters.AddWithValue("@chat", chatId);
-            restore.ExecuteNonQuery();
+            if (restore.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
         }
 
         using (var contributorModels = con.CreateCommand())
@@ -3213,7 +3260,106 @@ static partial class Database
         return true;
     }
 
-    public static void CancelDeploymentForces(Deployment d)
+    public static string RepairDeploymentIntegrity()
+    {
+        using var con = OpenCon();
+        using var transaction = con.BeginTransaction();
+        int totalsFixed = 0, emptyRecovered = 0, orphanContributorsRecovered = 0, modelRowsFixed = 0;
+
+        // From this version onward contributors carry ChatId, so even a legacy/orphan row
+        // whose parent deployment vanished can be returned safely instead of being lost.
+        var orphanContributors = new List<(long DeploymentId,long UserId,long ChatId,long Tanks,long Soldiers,long Fighters,long Bombers)>();
+        using (var orphanSelect = con.CreateCommand())
+        {
+            orphanSelect.Transaction = transaction;
+            orphanSelect.CommandText = @"SELECT dc.DeploymentId,dc.UserId,dc.ChatId,
+ COALESCE(SUM(dc.Tanks),0),COALESCE(SUM(dc.Soldiers),0),COALESCE(SUM(dc.Fighters),0),COALESCE(SUM(dc.Bombers),0)
+ FROM DeploymentContributors dc LEFT JOIN Deployments d ON d.Id=dc.DeploymentId
+ WHERE d.Id IS NULL AND dc.ChatId!=0 GROUP BY dc.DeploymentId,dc.UserId,dc.ChatId";
+            using var reader=orphanSelect.ExecuteReader();
+            while(reader.Read())orphanContributors.Add((reader.GetInt64(0),reader.GetInt64(1),reader.GetInt64(2),
+                reader.GetInt64(3),reader.GetInt64(4),reader.GetInt64(5),reader.GetInt64(6)));
+        }
+        foreach(var orphan in orphanContributors)
+        {
+            using var restore=con.CreateCommand();restore.Transaction=transaction;
+            restore.CommandText=@"UPDATE Countries SET Tanks=Tanks+@t,Soldiers=Soldiers+@s,Planes=Planes+@f,Bombers=Bombers+@b
+ WHERE OwnerId=@o AND ChatId=@c";
+            restore.Parameters.AddWithValue("@t",orphan.Tanks);restore.Parameters.AddWithValue("@s",orphan.Soldiers);
+            restore.Parameters.AddWithValue("@f",orphan.Fighters);restore.Parameters.AddWithValue("@b",orphan.Bombers);
+            restore.Parameters.AddWithValue("@o",orphan.UserId);restore.Parameters.AddWithValue("@c",orphan.ChatId);
+            if(restore.ExecuteNonQuery()!=1)continue;
+            using var deleteModels=con.CreateCommand();deleteModels.Transaction=transaction;
+            deleteModels.CommandText="DELETE FROM DeploymentContributorModels WHERE DeploymentId=@d AND UserId=@u";
+            deleteModels.Parameters.AddWithValue("@d",orphan.DeploymentId);deleteModels.Parameters.AddWithValue("@u",orphan.UserId);deleteModels.ExecuteNonQuery();
+            using var deleteContributor=con.CreateCommand();deleteContributor.Transaction=transaction;
+            deleteContributor.CommandText="DELETE FROM DeploymentContributors WHERE DeploymentId=@d AND UserId=@u";
+            deleteContributor.Parameters.AddWithValue("@d",orphan.DeploymentId);deleteContributor.Parameters.AddWithValue("@u",orphan.UserId);deleteContributor.ExecuteNonQuery();
+            orphanContributorsRecovered++;
+        }
+
+        // Model reservations without a matching contributor can hide equipment forever.
+        using (var orphanModels = con.CreateCommand())
+        {
+            orphanModels.Transaction = transaction;
+            orphanModels.CommandText = @"DELETE FROM DeploymentContributorModels
+                WHERE NOT EXISTS (SELECT 1 FROM DeploymentContributors dc
+                                  WHERE dc.DeploymentId=DeploymentContributorModels.DeploymentId
+                                    AND dc.UserId=DeploymentContributorModels.UserId)";
+            modelRowsFixed += orphanModels.ExecuteNonQuery();
+        }
+
+        var deployments = new List<(long Id,long ChatId,long InitiatorId,long Tanks,long Soldiers,long Fighters,long Bombers)>();
+        using (var select = con.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = "SELECT Id,ChatId,InitiatorId,Tanks,Soldiers,Fighters,Bombers FROM Deployments";
+            using var reader = select.ExecuteReader();
+            while (reader.Read()) deployments.Add((reader.GetInt64(0),reader.GetInt64(1),reader.GetInt64(2),
+                reader.GetInt64(3),reader.GetInt64(4),reader.GetInt64(5),reader.GetInt64(6)));
+        }
+
+        foreach (var deployment in deployments)
+        {
+            long tanks=0,soldiers=0,fighters=0,bombers=0,count=0;
+            using (var sums = con.CreateCommand())
+            {
+                sums.Transaction = transaction;
+                sums.CommandText = @"SELECT COALESCE(SUM(Tanks),0),COALESCE(SUM(Soldiers),0),
+ COALESCE(SUM(Fighters),0),COALESCE(SUM(Bombers),0),COUNT(*)
+ FROM DeploymentContributors WHERE DeploymentId=@id";
+                sums.Parameters.AddWithValue("@id",deployment.Id);
+                using var reader=sums.ExecuteReader();reader.Read();
+                tanks=reader.GetInt64(0);soldiers=reader.GetInt64(1);fighters=reader.GetInt64(2);bombers=reader.GetInt64(3);count=reader.GetInt64(4);
+            }
+            if(count==0)
+            {
+                // A deployment cannot legitimately exist without its contributor ledger.
+                // Old broken versions could leave this state after deducting the initiator.
+                using var restore=con.CreateCommand();restore.Transaction=transaction;
+                restore.CommandText=@"UPDATE Countries SET Tanks=Tanks+@t,Soldiers=Soldiers+@s,
+ Planes=Planes+@f,Bombers=Bombers+@b WHERE OwnerId=@o AND ChatId=@c";
+                restore.Parameters.AddWithValue("@t",Math.Max(0,deployment.Tanks));restore.Parameters.AddWithValue("@s",Math.Max(0,deployment.Soldiers));
+                restore.Parameters.AddWithValue("@f",Math.Max(0,deployment.Fighters));restore.Parameters.AddWithValue("@b",Math.Max(0,deployment.Bombers));
+                restore.Parameters.AddWithValue("@o",deployment.InitiatorId);restore.Parameters.AddWithValue("@c",deployment.ChatId);
+                if(restore.ExecuteNonQuery()==1)emptyRecovered++;
+                using var delete=con.CreateCommand();delete.Transaction=transaction;delete.CommandText="DELETE FROM Deployments WHERE Id=@id";
+                delete.Parameters.AddWithValue("@id",deployment.Id);delete.ExecuteNonQuery();continue;
+            }
+            if(tanks!=deployment.Tanks||soldiers!=deployment.Soldiers||fighters!=deployment.Fighters||bombers!=deployment.Bombers)
+            {
+                using var update=con.CreateCommand();update.Transaction=transaction;
+                update.CommandText="UPDATE Deployments SET Tanks=@t,Soldiers=@s,Fighters=@f,Bombers=@b WHERE Id=@id";
+                update.Parameters.AddWithValue("@t",tanks);update.Parameters.AddWithValue("@s",soldiers);
+                update.Parameters.AddWithValue("@f",fighters);update.Parameters.AddWithValue("@b",bombers);
+                update.Parameters.AddWithValue("@id",deployment.Id);update.ExecuteNonQuery();totalsFixed++;
+            }
+        }
+        transaction.Commit();
+        return $"totals={totalsFixed}, emptyRecovered={emptyRecovered}, orphanContributors={orphanContributorsRecovered}, orphanModels={modelRowsFixed}";
+    }
+
+    public static bool CancelDeploymentForces(Deployment d)
     {
         var returns = GetDeploymentContributors(d.Id)
             .GroupBy(x => x.UserId)
@@ -3224,11 +3370,10 @@ static partial class Database
                 Fighters: g.Sum(x => x.Fighters),
                 Bombers: g.Sum(x => x.Bombers)))
             .ToList();
-        if (ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns))
-        {
-            foreach (long contributorId in returns.Select(x => x.UserId))
-                ReconcileDefense(contributorId, d.ChatId);
-        }
+        if (!ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns)) return false;
+        foreach (long contributorId in returns.Select(x => x.UserId).Distinct())
+            ReconcileDefense(contributorId, d.ChatId);
+        return true;
     }
 
     public static Deployment? GetDeploymentById(long id)
@@ -3393,7 +3538,9 @@ static partial class Database
     {
         using var con = OpenCon();
         using var cmd = con.CreateCommand();
-        cmd.CommandText = "INSERT INTO DeploymentContributors(DeploymentId, UserId, Tanks, Soldiers, Fighters, Bombers, Strategy, Tactic) VALUES(@did, @uid, @t, @s, @f, @b, @str, @tac)";
+        cmd.CommandText = @"INSERT INTO DeploymentContributors
+(DeploymentId,UserId,ChatId,Tanks,Soldiers,Fighters,Bombers,Strategy,Tactic)
+VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@s,@f,@b,@str,@tac)";
         cmd.Parameters.AddWithValue("@did", c.DeploymentId);
         cmd.Parameters.AddWithValue("@uid", c.UserId);
         cmd.Parameters.AddWithValue("@t", c.Tanks);
@@ -4054,6 +4201,7 @@ partial class Program
             return;
         }
         Database.Init();
+        Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
         Database.InitNavalV2();
         Database.InitActivity();
         Database.InitAdminPanel(OWNER_ID);
@@ -4152,6 +4300,7 @@ partial class Program
             try
             {
                 Database.Init();
+                Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
                 Database.InitActivity();
                 Database.InitAdminPanel(OWNER_ID);
@@ -4164,6 +4313,7 @@ partial class Program
                 TryDeleteSqliteSidecar("gamedata.db-wal");
                 TryDeleteSqliteSidecar("gamedata.db-shm");
                 Database.Init();
+                Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
                 Database.InitActivity();
                 Database.InitAdminPanel(OWNER_ID);
@@ -4394,8 +4544,9 @@ partial class Program
                 .Append(deployment.InitiatorId)
                 .Append(deployment.TargetUserId);
             locks = await AcquireCountryMutationLocks(deployment.ChatId, contributorIds, ct);
+            if (!Database.CancelDeploymentForces(deployment))
+                throw new InvalidOperationException("Deployment cancellation ledger validation failed.");
             await UnpinAndDeleteAnnounce(deployment.ChatId, deployment.AnnounceMsgId, ct);
-            Database.CancelDeploymentForces(deployment);
         }
         finally
         {
@@ -4909,6 +5060,17 @@ partial class Program
             var all = Database.GetAllCountries();
             foreach (var c in all) Database.ReconcileDefense(c.OwnerId, c.ChatId);
             await SendTemp(uid, $"✅ دفاع همه کشورها بروزرسانی شد. ({all.Count} کشور)", ct: ct);
+            return;
+        }
+        if (txt == "فیکس صف آرایی" || txt == "فیکس صف‌آرایی")
+        {
+            await deploymentProcessorLock.WaitAsync(ct);
+            try
+            {
+                string repair = Database.RepairDeploymentIntegrity();
+                await SendTemp(uid, $"✅ بررسی و ترمیم دفتر صف‌آرایی انجام شد.\n{repair}", ct: ct);
+            }
+            finally { deploymentProcessorLock.Release(); }
             return;
         }
 
@@ -9352,9 +9514,6 @@ partial class Program
             string tName = tc?.Name ?? $"کاربر {d.TargetUserId}";
             if (d.EndAtMs <= now)
             {
-                // FIX(2): در پایان طبیعی صف‌آرایی هم پیام پین‌شده آنپین و حذف شود
-                await UnpinAndDeleteAnnounce(d.ChatId, d.AnnounceMsgId, ct);
-
                 var participantIds = Database.GetDeploymentContributors(d.Id)
                     .Select(x => x.UserId)
                     .Append(d.InitiatorId)
@@ -9379,32 +9538,35 @@ partial class Program
                     tc = Database.GetCountry(d.TargetUserId, d.ChatId);
                     if (tc == null)
                     {
-                        Database.CancelDeploymentForces(d);
+                        if (!Database.CancelDeploymentForces(d))
+                            throw new InvalidOperationException("Failed to return deployment forces after target deletion.");
+                        await UnpinAndDeleteAnnounce(d.ChatId, d.AnnounceMsgId, ct);
                         try { await SendPermanent(d.ChatId, "❌ هدف صف‌آرایی وجود ندارد؛ نیروها بازگشتند.", ct: ct); } catch { }
                         continue;
                     }
-                    await ProcessOffensiveDeploymentBattle(d, tc, ct);
+                    if (await ProcessOffensiveDeploymentBattle(d, tc, ct))
+                        await UnpinAndDeleteAnnounce(d.ChatId, d.AnnounceMsgId, ct);
                 }
                 else
                 {
                     //  – defensive troops no longer in target assets, just return to contributors
+                    // DeploymentContributors is the authoritative force ledger. Never scale returns
+                    // from the cached totals on Deployments: an old/stale aggregate could otherwise
+                    // return fewer units and make the remainder appear to vanish.
                     var defC = Database.GetDeploymentContributors(d.Id);
-                    long[] returnedTanks = AllocateProportionallyExact(d.Tanks, defC.Select(x => x.Tanks).ToArray());
-                    long[] returnedSoldiers = AllocateProportionallyExact(d.Soldiers, defC.Select(x => x.Soldiers).ToArray());
-                    long[] returnedFighters = AllocateProportionallyExact(d.Fighters, defC.Select(x => x.Fighters).ToArray());
-                    long[] returnedBombers = AllocateProportionallyExact(d.Bombers, defC.Select(x => x.Bombers).ToArray());
-                    var returns = defC.Select((cbn, i) => (
-                        UserId: cbn.UserId,
-                        Tanks: returnedTanks[i],
-                        Soldiers: returnedSoldiers[i],
-                        Fighters: returnedFighters[i],
-                        Bombers: returnedBombers[i]))
+                    var returns = defC.GroupBy(x => x.UserId)
+                        .Select(g => (
+                            UserId: g.Key,
+                            Tanks: g.Sum(x => Math.Max(0, x.Tanks)),
+                            Soldiers: g.Sum(x => Math.Max(0, x.Soldiers)),
+                            Fighters: g.Sum(x => Math.Max(0, x.Fighters)),
+                            Bombers: g.Sum(x => Math.Max(0, x.Bombers))))
                         .ToList();
-                    if (Database.ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns))
-                    {
-                        foreach (long contributorId in returns.Select(x => x.UserId).Distinct())
-                            Database.ReconcileDefense(contributorId, d.ChatId);
-                    }
+                    if (!Database.ReturnDeploymentForcesAndDelete(d.Id, d.ChatId, returns))
+                        throw new InvalidOperationException("Defensive deployment return ledger validation failed.");
+                    foreach (long contributorId in returns.Select(x => x.UserId).Distinct())
+                        Database.ReconcileDefense(contributorId, d.ChatId);
+                    await UnpinAndDeleteAnnounce(d.ChatId, d.AnnounceMsgId, ct);
                     try { await SendPermanent(d.ChatId, $"🛡 پایان دفاع اتحاد «{aName}» از «{tName}»", ct: ct); } catch { }
                 }
                 }
@@ -9421,13 +9583,14 @@ partial class Program
         }
     }
 
-    static async Task ProcessOffensiveDeploymentBattle(Deployment deployment, Country defender, CancellationToken ct)
+    static async Task<bool> ProcessOffensiveDeploymentBattle(Deployment deployment, Country defender, CancellationToken ct)
     {
         var attackerParticipants = BuildDeploymentParticipants(new List<Deployment> { deployment }, deployment.ChatId);
         if (attackerParticipants.Sum(x => x.Soldiers + x.Tanks.Sum(t => t.Count)) <= 0)
         {
-            Database.CancelDeploymentForces(deployment);
-            return;
+            if (!Database.CancelDeploymentForces(deployment))
+                throw new InvalidOperationException("Failed to return non-combat deployment forces.");
+            return true;
         }
 
         var ownDefense = BuildOwnDefenseParticipant(defender);
@@ -9493,7 +9656,7 @@ partial class Program
             Console.WriteLine($"[DEPLOYMENT BATTLE ENGINE ERR] {ex}");
             try { Database.UpdateBattleJob(request.BattleId, "Pending", error: ex.Message); } catch { }
             try { await SendPermanent(deployment.ChatId, "❌ پردازش صف‌آرایی ناموفق بود؛ نیروها و رکورد عملیات محفوظ ماندند.", ct: ct); } catch { }
-            return;
+            return false;
         }
 
         var returns = new List<(long UserId, long Tanks, long Soldiers, long Fighters, long Bombers)>();
@@ -9514,8 +9677,9 @@ partial class Program
                 attackerEquipmentLosses.Add((country, loss));
         }
 
-        if (!Database.ReturnDeploymentForcesAndDelete(deployment.Id, deployment.ChatId, returns))
-            throw new InvalidOperationException("Deployment was already completed by another worker.");
+        if (!Database.ReturnDeploymentForcesAndDelete(deployment.Id, deployment.ChatId, returns,
+                allowBattleLosses: true))
+            throw new InvalidOperationException("Deployment settlement ledger validation failed or was already completed.");
         foreach (var item in attackerEquipmentLosses)
         {
             DeductEquipmentLosses(item.Country, "Tanks", item.Loss.TanksUnavailable, WarEngine.CanonicalTankModel);
@@ -9554,6 +9718,7 @@ partial class Program
         await ProcessStrategicBattleOutcome(deployment.InitiatorId, defender.OwnerId, deployment.ChatId, result, ct);
         Database.UpdateBattleJob(request.BattleId, "Completed",
             JsonSerializer.Serialize(result, BattleJsonOptions));
+        return true;
     }
 
     static void ApplyDefenderBattleLosses(Country defender, BattleParticipant ownDefense,
