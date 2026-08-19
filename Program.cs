@@ -8925,7 +8925,21 @@ partial class Program
             }).ToArray();
             sessions[uid] = new UserSession { Step = SessionStep.TransferWaitingTarget, TransferChatId = cid, TransferAllianceId = aid, TransferResourceType = res };
             await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
-            if (cb.Message != null) await bot.EditMessageTextAsync(uid, cb.Message.MessageId, $"🎯 مقصد برای {res}:\n⚠️ نبردناو: حداکثر 3 عدد", replyMarkup: new InlineKeyboardMarkup(kbList), cancellationToken: ct);
+            if (cb.Message != null)
+            {
+                try
+                {
+                    await bot.EditMessageTextAsync(uid, cb.Message.MessageId,
+                        $"🎯 مقصد برای {res}:\n⚠️ نبردناو: حداکثر 3 عدد",
+                        replyMarkup: new InlineKeyboardMarkup(kbList), cancellationToken: ct);
+                }
+                catch (Telegram.Bot.Exceptions.ApiRequestException ex) when
+                    (ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Repeated taps on the same resource are harmless; Telegram rejects an
+                    // identical edit, so keep the current screen without polluting error logs.
+                }
+            }
             return;
         }
 
