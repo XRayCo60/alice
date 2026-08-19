@@ -4443,10 +4443,16 @@ partial class Program
             NavalRegressionTests.Run();
             return;
         }
+        if (args.Length > 0 && args[0].Equals("attacktest", StringComparison.OrdinalIgnoreCase))
+        {
+            AttackSelectionRegressionTests.Run();
+            return;
+        }
         if (args.Length > 0 && args[0].Equals("alltests", StringComparison.OrdinalIgnoreCase))
         {
             NavalRegressionTests.Run();
             EconomyRegressionTests.Run();
+            AttackSelectionRegressionTests.Run();
             return;
         }
         if (string.IsNullOrWhiteSpace(BOT_TOKEN))
@@ -7587,8 +7593,8 @@ partial class Program
                 var planeBreakdown = GetAttackBreakdown(atk, "planes");
                 if (planeBreakdown.Count == 0)
                 {
-                    sess.Step = SessionStep.AttackWaitingBombers;
-                    await SendPrompt(uid, uid, "🛩 تعداد بمب‌افکن‌های اعزامی را وارد کنید.\n" + InventoryLine(atk.Bombers), ct: ct);
+                    sess.AttackFighters=0;sess.AttackPlaneModelNamesFinal=new();sess.AttackPlaneModelAmountsFinal=new();
+                    await BeginAttackBomberSelection(uid,sess,atk,ct);
                     return;
                 }
                 if (planeBreakdown.Count == 1)
@@ -7628,24 +7634,9 @@ partial class Program
                 sess.AttackFighters = sess.AttackModelAmounts.Sum();
                 sess.AttackPlaneModelNamesFinal = new List<string>(sess.AttackModelNames);
                 sess.AttackPlaneModelAmountsFinal = new List<long>(sess.AttackModelAmounts);
-                // Now bombers per-model
                 var atk = Database.GetCountry(uid, sess.AttackChatId);
-                var bomberBreakdown = GetTransferBreakdown(atk, "bombers");
-                if (bomberBreakdown.Count == 0)
-                {
-                    if (sess.AttackFighters == 0) { await RunAttackBattle(uid, sess, ct); return; }
-                    sess.Step = SessionStep.AttackWaitingAirStrategy;
-                    var kb = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی", "attack_air_strategy:1") }, new[] { InlineKeyboardButton.WithCallbackData("💣 بمباران راهبردی", "attack_air_strategy:2") } });
-                    await SendPrompt(uid, uid, AirAttackStrategyGuide, kb, ct);
-                    return;
-                }
-                sess.AttackModelNames = bomberBreakdown.Select(x => x.ModelName).ToList();
-                sess.AttackModelCounts = bomberBreakdown.Select(x => x.Count).ToList();
-                sess.AttackModelAmounts = new List<long>(new long[bomberBreakdown.Count]);
-                sess.AttackModelIndex = 0;
-                sess.AttackCurrentCategory = "bombers";
-                sess.Step = SessionStep.AttackWaitingBomberModel;
-                await SendPrompt(uid, uid, $"🛩 بمب‌افکن مدل 1/{bomberBreakdown.Count}: {bomberBreakdown[0].ModelName} – {bomberBreakdown[0].Count:N0}\nچند تا اعزام شود؟ (0 برای رد)", ct: ct);
+                if(atk==null){EndSession(uid);return;}
+                await BeginAttackBomberSelection(uid,sess,atk,ct);
                 return;
             }
 
@@ -7665,32 +7656,24 @@ partial class Program
                 sess.AttackBombers = sess.AttackModelAmounts.Sum();
                 sess.AttackBomberModelNamesFinal = new List<string>(sess.AttackModelNames);
                 sess.AttackBomberModelAmountsFinal = new List<long>(sess.AttackModelAmounts);
-                if (sess.AttackFighters == 0 && sess.AttackBombers == 0) { await RunAttackBattle(uid, sess, ct); return; }
-                sess.Step = SessionStep.AttackWaitingAirStrategy;
-                var kb = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی", "attack_air_strategy:1") }, new[] { InlineKeyboardButton.WithCallbackData("💣 بمباران راهبردی", "attack_air_strategy:2") } });
-                await SendPrompt(uid, uid, AirAttackStrategyGuide, kb, ct);
+                await PromptAttackAirOrRun(uid,sess,ct);
                 return;
             }
 
             if (sess.Step == SessionStep.AttackWaitingFighters)
             {
-                // Legacy – redirect to new per-model flow for planes
-                if (!TryParseLong(txt, out long fighters) || fighters < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
-                sess.AttackFighters = fighters;
-                sess.Step = SessionStep.AttackWaitingBombers;
-                var atk = Database.GetCountry(uid, sess.AttackChatId);
-                await SendPrompt(uid, uid, "🛩 تعداد بمب‌افکن‌های اعزامی را وارد کنید.\n" + InventoryLine(atk?.Bombers ?? 0), ct: ct);
-                return;
+                var atk=Database.GetCountry(uid,sess.AttackChatId);if(atk==null){EndSession(uid);return;}
+                var planes=GetAttackBreakdown(atk,"planes");
+                if(planes.Count==0){sess.AttackFighters=0;await BeginAttackBomberSelection(uid,sess,atk,ct);return;}
+                sess.AttackModelNames=planes.Select(x=>x.ModelName).ToList();sess.AttackModelCounts=planes.Select(x=>x.Count).ToList();
+                sess.AttackModelAmounts=new List<long>(new long[planes.Count]);sess.AttackModelIndex=0;
+                sess.AttackCurrentCategory="planes";sess.Step=SessionStep.AttackWaitingPlaneModel;
+                await SendPrompt(uid,uid,$"✈️ انتخاب مدل‌به‌مدل فعال شد.\nمدل 1/{planes.Count}: {planes[0].ModelName}\nموجودی قابل اعزام: {planes[0].Count:N0}\nچند فروند؟",ct:ct);return;
             }
             if (sess.Step == SessionStep.AttackWaitingBombers)
             {
-                if (!TryParseLong(txt, out long bombers) || bombers < 0) { await SendPrompt(uid, uid, "❌ عدد معتبر.", ct: ct); return; }
-                sess.AttackBombers = bombers;
-                if (sess.AttackFighters == 0 && sess.AttackBombers == 0) { await RunAttackBattle(uid, sess, ct); return; }
-                sess.Step = SessionStep.AttackWaitingAirStrategy;
-                var kb = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی", "attack_air_strategy:1") }, new[] { InlineKeyboardButton.WithCallbackData("💣 بمباران راهبردی", "attack_air_strategy:2") } });
-                await SendPrompt(uid, uid, AirAttackStrategyGuide, kb, ct);
-                return;
+                var atk=Database.GetCountry(uid,sess.AttackChatId);if(atk==null){EndSession(uid);return;}
+                await BeginAttackBomberSelection(uid,sess,atk,ct);return;
             }
         }
 
@@ -9732,14 +9715,14 @@ partial class Program
             (x.ModelName, x.Count, DefenseCount: selected[i], MinimumCount: minimums[i])).ToList();
     }
 
-    static long GetAttackAvailableSoldiers(Country c)
+    internal static long GetAttackAvailableSoldiers(Country c)
     {
         long mandatory = (long)Math.Ceiling(c.Soldiers * 0.20);
         long reserved = Math.Clamp(Math.Max(mandatory, c.DefenseSoldiers), 0, c.Soldiers);
         return Math.Max(0, c.Soldiers - reserved);
     }
 
-    static List<(string ModelName, long Count)> GetAttackBreakdown(Country c, string resType)
+    internal static List<(string ModelName, long Count)> GetAttackBreakdown(Country c, string resType)
     {
         var inventory = GetTransferBreakdown(c, resType);
         if (resType is not ("tanks" or "planes")) return inventory;
@@ -10820,6 +10803,43 @@ partial class Program
         );
     }
 
+    static async Task PromptAttackAirOrRun(long uid,UserSession session,CancellationToken ct)
+    {
+        if(session.AttackFighters==0&&session.AttackBombers==0)
+        {await RunAttackBattle(uid,session,ct);return;}
+        session.Step=SessionStep.AttackWaitingAirStrategy;
+        var keyboard=new InlineKeyboardMarkup(new[]{
+            new[]{InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی","attack_air_strategy:1")},
+            new[]{InlineKeyboardButton.WithCallbackData("💣 بمباران راهبردی","attack_air_strategy:2")}});
+        await SendPrompt(uid,uid,AirAttackStrategyGuide,keyboard,ct);
+    }
+
+    static async Task BeginAttackBomberSelection(long uid,UserSession session,Country attacker,CancellationToken ct)
+    {
+        var breakdown=GetTransferBreakdown(attacker,"bombers");
+        if(breakdown.Count==0)
+        {
+            session.AttackBombers=0;session.AttackBomberModelNamesFinal=new();session.AttackBomberModelAmountsFinal=new();
+            await PromptAttackAirOrRun(uid,session,ct);return;
+        }
+        session.AttackModelNames=breakdown.Select(x=>x.ModelName).ToList();
+        session.AttackModelCounts=breakdown.Select(x=>x.Count).ToList();
+        session.AttackModelAmounts=new List<long>(new long[breakdown.Count]);session.AttackModelIndex=0;
+        session.AttackCurrentCategory="bombers";session.Step=SessionStep.AttackWaitingBomberModel;
+        await SendPrompt(uid,uid,$"🛩 حمله — بمب‌افکن مدل 1/{breakdown.Count}: {breakdown[0].ModelName}\n📊 موجودی قابل اعزام: {breakdown[0].Count:N0}\nچند فروند اعزام شود؟ (0 برای رد)",ct:ct);
+    }
+
+    internal static void ResetAttackForceSelection(UserSession session)
+    {
+        session.AttackTanks=session.AttackSoldiers=session.AttackFighters=session.AttackBombers=0;
+        session.AttackAirStrategy=session.AttackAirTactic=0;
+        session.AttackCurrentCategory="";session.AttackModelIndex=0;
+        session.AttackModelNames=new();session.AttackModelCounts=new();session.AttackModelAmounts=new();
+        session.AttackTankModelNamesFinal=new();session.AttackTankModelAmountsFinal=new();
+        session.AttackPlaneModelNamesFinal=new();session.AttackPlaneModelAmountsFinal=new();
+        session.AttackBomberModelNamesFinal=new();session.AttackBomberModelAmountsFinal=new();
+    }
+
     static async Task HandleAttackTacticCallback(
         CallbackQuery cb,
         string[] parts,
@@ -10845,6 +10865,7 @@ partial class Program
         session.AttackTargetId = tid;
         session.AttackStrategy = strategy;
         session.AttackTactic = tactic;
+        ResetAttackForceSelection(session);
 
         var attacker = Database.GetCountry(uid, cid);
 
@@ -11095,8 +11116,7 @@ partial class Program
             var selectedTanks = SessionModelAmounts(
                 sess.AttackTankModelNamesFinal,
                 sess.AttackTankModelAmountsFinal,
-                sess.AttackModelNames,
-                sess.AttackModelAmounts,
+                new List<string>(), new List<long>(),
                 sess.AttackTanks,
                 Database.GetDefaultTankModel(attacker.Faction));
             var selectedFighters = SessionModelAmounts(
@@ -11112,6 +11132,11 @@ partial class Program
             long soldiers = Math.Max(0, sess.AttackSoldiers);
 
             long availableSoldiers = GetAttackAvailableSoldiers(attacker);
+            if (!AttackSelectionStateIsConsistent(sess,selectedTanks,selectedFighters,selectedBombers))
+            {
+                await SendTemp(uid,"❌ ترکیب انتخابی نیروها ناسازگار بود و برای جلوگیری از اعزام اشتباه ثبت نشد. حمله را دوباره تنظیم کنید.",ct:ct);
+                return;
+            }
             bool exactModelsAvailable =
                 ModelSelectionFits(selectedTanks, GetAttackBreakdown(attacker, "tanks")) &&
                 ModelSelectionFits(selectedFighters, GetAttackBreakdown(attacker, "planes")) &&
@@ -11233,7 +11258,16 @@ partial class Program
         }
     }
 
-    static bool ModelSelectionFits(IReadOnlyList<ModelAmount> selected,
+    internal static bool AttackSelectionStateIsConsistent(UserSession session,
+        IReadOnlyList<ModelAmount> tanks,IReadOnlyList<ModelAmount> fighters,IReadOnlyList<ModelAmount> bombers)
+    {
+        bool Valid(IReadOnlyList<ModelAmount> models,long expected)=>models.All(x=>x.Count>0&&!string.IsNullOrWhiteSpace(x.Model))&&
+            models.GroupBy(x=>x.Model,StringComparer.OrdinalIgnoreCase).All(x=>x.Count()==1)&&models.Sum(x=>x.Count)==expected;
+        return session.AttackSoldiers>=0&&Valid(tanks,session.AttackTanks)&&
+               Valid(fighters,session.AttackFighters)&&Valid(bombers,session.AttackBombers);
+    }
+
+    internal static bool ModelSelectionFits(IReadOnlyList<ModelAmount> selected,
         IReadOnlyList<(string ModelName, long Count)> available)
     {
         var capacity = available.GroupBy(x => x.ModelName, StringComparer.OrdinalIgnoreCase)
@@ -11243,7 +11277,7 @@ partial class Program
         return true;
     }
 
-    static List<ModelAmount> SessionModelAmounts(
+    internal static List<ModelAmount> SessionModelAmounts(
         List<string> finalNames,
         List<long> finalAmounts,
         List<string> fallbackNames,
@@ -11252,15 +11286,18 @@ partial class Program
         string defaultModel)
     {
         var result = new List<ModelAmount>();
+        bool explicitFinalSelection = finalNames.Count > 0;
         for (int i = 0; i < finalNames.Count && i < finalAmounts.Count; i++)
             if (finalAmounts[i] > 0) result.Add(new ModelAmount(finalNames[i], finalAmounts[i]));
-        if (result.Count == 0)
+        // Once a per-model category was shown, even an all-zero answer is authoritative.
+        // Falling through to the generic working arrays could reinterpret bombers as tanks.
+        if (!explicitFinalSelection)
         {
             for (int i = 0; i < fallbackNames.Count && i < fallbackAmounts.Count; i++)
                 if (fallbackAmounts[i] > 0) result.Add(new ModelAmount(fallbackNames[i], fallbackAmounts[i]));
+            if (result.Count == 0 && fallbackTotal > 0)
+                result.Add(new ModelAmount(defaultModel, fallbackTotal));
         }
-        if (result.Count == 0 && fallbackTotal > 0)
-            result.Add(new ModelAmount(defaultModel, fallbackTotal));
         return result;
     }
 
