@@ -33,6 +33,7 @@ static class NavalRegressionTests
             TestTransferCancellationAndReceiverDeletion();
             TestSmallCraftTransfers();
             TestRepairPricingAndDamagePreservation();
+            TestDamageSettlementMatchesReport();
             TestSyncIsStableAndFast();
             TestEngineDeterminismAndBounds();
             Console.WriteLine($"NAVAL REGRESSION TESTS PASSED — {_assertions} assertions");
@@ -154,8 +155,51 @@ static class NavalRegressionTests
         Assert(Database.GetBattleshipUnits(b.OwnerId, chat, false).Single().DamagePercent == 0, "repair must clear damage");
     }
 
+    static void TestDamageSettlementMatchesReport()
+    {
+        const long chat=-90006;var attacker=Country(601,chat,"DamageAttacker",Faction.USA);var defender=Country(602,chat,"DamageDefender",Faction.Reich);
+        Database.AddCountry(attacker);Database.AddCountry(defender);
+        Assert(Database.TryPurchaseBattleship(attacker.OwnerId,chat,"Iowa",50_000,40_000),"settlement attacker ship 1");
+        Assert(Database.TryPurchaseBattleship(attacker.OwnerId,chat,"Iowa",50_000,40_000),"settlement attacker ship 2");
+        Assert(Database.TryPurchaseBattleship(defender.OwnerId,chat,"Bismarck",50_000,30_000),"settlement defender ship");
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long op=Database.CreateNavalOperation(Database.GetCountry(attacker.OwnerId,chat)!,Database.GetCountry(defender.OwnerId,chat)!,
+            new List<NavalModelAmount>(),new List<NavalModelAmount>(),new List<NavalModelAmount>{new("Iowa",1)},1,now,0);
+        NavalInvasion inv=Database.GetPendingNavalInvasions(now+1).Single(x=>x.Id==op);
+        var aShips=Database.GetBattleshipUnits(attacker.OwnerId,chat,false,op);
+        var dShips=Database.GetBattleshipUnits(defender.OwnerId,chat,false);
+        var request=new NavalBattleRequest{OperationId=op,Seed=12345,AttackerName=attacker.Name,DefenderName=defender.Name,
+            AttackerTactic=1,DefenderStrategy=1,DefenderTactic=1,DefenderPortLevel=defender.PortLevel,
+            DefenderMoney=defender.Money,DefenderIron=defender.Iron,AttackerBattleships=aShips,DefenderBattleships=dShips};
+        NavalBattleResult result=NavalEngine.Resolve(request);
+        Assert(Database.SettleNavalOperation(inv,result,new List<NavalModelAmount>(),new List<NavalModelAmount>(),
+            new List<NavalModelAmount>(),new List<NavalModelAmount>()),"damage settlement must commit");
+        foreach(var outcome in result.AttackerBattleships.Concat(result.DefenderBattleships))
+        {
+            long owner=result.AttackerBattleships.Contains(outcome)?attacker.OwnerId:defender.OwnerId;
+            var stored=Database.GetBattleshipUnits(owner,chat,false).FirstOrDefault(x=>x.UnitId==outcome.UnitId);
+            if(outcome.Sunk)Assert(stored==null,$"sunk ship {outcome.UnitId} must not remain ready");
+            else Assert(stored!=null&&stored.UnitId==outcome.UnitId&&stored.DamagePercent==outcome.FinalDamage,
+                $"reported damage for ship {outcome.UnitId} must exactly match database");
+        }
+        foreach(long owner in new[]{attacker.OwnerId,defender.OwnerId})
+        {
+            Country c=Database.GetCountry(owner,chat)!;
+            long actual=Database.GetBattleshipUnits(owner,chat,false).Sum(x=>x.DamagePercent);
+            Assert(c.BattleshipDamage==actual,"legacy aggregate damage must mirror per-ship damage exactly");
+        }
+    }
+
     static void TestSyncIsStableAndFast()
     {
+        const long legacyChat=-90007;
+        var legacy=Country(701,legacyChat,"LegacyDamage",Faction.USSR);legacy.Battleships=1;legacy.BattleshipDamage=40;
+        Database.AddCountry(legacy);Database.AddEquipmentModel(legacy.OwnerId,legacyChat,"Battleships","Sovetsky Soyuz",1);
+        Database.SyncBattleshipUnits(legacy.OwnerId,legacyChat);
+        Assert(Database.GetBattleshipUnits(legacy.OwnerId,legacyChat,false).Single().DamagePercent==40,
+            "legacy aggregate damage must migrate to the per-ship ledger");
+        Assert(Database.GetCountry(legacy.OwnerId,legacyChat)!.BattleshipDamage==40,"legacy damage mirror must remain exact after migration");
+
         const long chat = -90005;
         var c = Country(501, chat, "Sync", Faction.Reich);
         Database.AddCountry(c);

@@ -2622,6 +2622,7 @@ VALUES(@o,@c,@cat,@m,@n) ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDAT
             units.Parameters.AddWithValue("@id",id);units.ExecuteNonQuery();
             using var links=con.CreateCommand();links.Transaction=transaction;links.CommandText="DELETE FROM TransferBattleships WHERE TransferId=@id";
             links.Parameters.AddWithValue("@id",id);links.ExecuteNonQuery();
+            UpdateLegacyBattleshipDamage(con,transaction,sender,chat);
         }
         using(var delete=con.CreateCommand()){delete.Transaction=transaction;delete.CommandText="DELETE FROM Transfers WHERE Id=@id";
             delete.Parameters.AddWithValue("@id",id);if(delete.ExecuteNonQuery()!=1){transaction.Rollback();return false;}}
@@ -2729,6 +2730,8 @@ VALUES(@o,@c,@cat,@m,@n) ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDAT
             deleteLinks.CommandText = "DELETE FROM TransferBattleships WHERE TransferId=@transfer";
             deleteLinks.Parameters.AddWithValue("@transfer", transfer.Id);
             deleteLinks.ExecuteNonQuery();
+            UpdateLegacyBattleshipDamage(con,transaction,transfer.SenderId,transfer.ChatId);
+            UpdateLegacyBattleshipDamage(con,transaction,recipientId,transfer.ChatId);
         }
 
         using (var delete = con.CreateCommand())

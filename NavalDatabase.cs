@@ -40,6 +40,10 @@ BEFORE UPDATE OF Battleships,BattleshipsAtSea ON Countries
 WHEN (NEW.Battleships+NEW.BattleshipsAtSea)>3
  AND (NEW.Battleships+NEW.BattleshipsAtSea)>(OLD.Battleships+OLD.BattleshipsAtSea)
 BEGIN SELECT RAISE(ABORT,'battleship capacity exceeds 3'); END;
+CREATE TRIGGER IF NOT EXISTS TR_BattleshipUnits_DamageRange
+BEFORE UPDATE OF DamagePercent ON BattleshipUnits
+WHEN NEW.DamagePercent<0 OR NEW.DamagePercent>100
+BEGIN SELECT RAISE(ABORT,'battleship damage outside 0..100'); END;
 ";
         cmd.ExecuteNonQuery();
         EnsureColumn(con, "NavalInvasions", "ScenarioSeed", "INTEGER DEFAULT 0");
@@ -130,6 +134,46 @@ BEGIN SELECT RAISE(ABORT,'battleship capacity exceeds 3'); END;
                 insert.ExecuteNonQuery();
             }
         }
+
+        var units = new List<(long Id,int Damage)>();
+        using (var readUnits = con.CreateCommand())
+        {
+            readUnits.Transaction = transaction;
+            readUnits.CommandText = @"SELECT Id,DamagePercent FROM BattleshipUnits
+                WHERE OwnerId=@owner AND ChatId=@chat AND Status!='Sunk' ORDER BY Id";
+            readUnits.Parameters.AddWithValue("@owner", ownerId);
+            readUnits.Parameters.AddWithValue("@chat", chatId);
+            using var reader = readUnits.ExecuteReader();
+            while (reader.Read()) units.Add((reader.GetInt64(0), reader.GetInt32(1)));
+        }
+        int actualDamage = units.Sum(x => Math.Clamp(x.Damage,0,80));
+        // One-time migration from the old aggregate column. Unit rows are authoritative
+        // afterwards; migration only runs when every unit is still at zero damage.
+        if (units.Count > 0 && actualDamage == 0 && c.BattleshipDamage > 0)
+        {
+            int distributable = (int)Math.Min(c.BattleshipDamage, units.Count * 80L);
+            int each = distributable / units.Count, remainder = distributable % units.Count;
+            for (int i = 0; i < units.Count; i++)
+            {
+                int damage = each + (i < remainder ? 1 : 0);
+                using var migrate = con.CreateCommand();
+                migrate.Transaction = transaction;
+                migrate.CommandText = "UPDATE BattleshipUnits SET DamagePercent=@damage WHERE Id=@id";
+                migrate.Parameters.AddWithValue("@damage", damage);
+                migrate.Parameters.AddWithValue("@id", units[i].Id);
+                migrate.ExecuteNonQuery();
+            }
+            actualDamage = distributable;
+        }
+        using (var syncLegacy = con.CreateCommand())
+        {
+            syncLegacy.Transaction = transaction;
+            syncLegacy.CommandText = "UPDATE Countries SET BattleshipDamage=@damage WHERE OwnerId=@owner AND ChatId=@chat";
+            syncLegacy.Parameters.AddWithValue("@damage", actualDamage);
+            syncLegacy.Parameters.AddWithValue("@owner", ownerId);
+            syncLegacy.Parameters.AddWithValue("@chat", chatId);
+            syncLegacy.ExecuteNonQuery();
+        }
         transaction.Commit();
     }
 
@@ -139,9 +183,9 @@ BEGIN SELECT RAISE(ABORT,'battleship capacity exceeds 3'); END;
         var list = new List<NavalBattleshipState>();
         using var con = OpenCon(); using var cmd = con.CreateCommand();
         cmd.CommandText = @"SELECT Id,ModelName,DamagePercent FROM BattleshipUnits
-                            WHERE OwnerId=@owner AND ChatId=@chat AND Status!='Sunk'
-                              AND ((@operation IS NOT NULL AND OperationId=@operation)
-                                OR (@operation IS NULL AND OperationId IS NULL))" +
+                            WHERE OwnerId=@owner AND ChatId=@chat
+                              AND ((@operation IS NOT NULL AND OperationId=@operation AND Status='AtSea')
+                                OR (@operation IS NULL AND OperationId IS NULL AND Status='Ready'))" +
                           (onlyCombatReady ? " AND DamagePercent<=50" : "") + " ORDER BY Id";
         cmd.Parameters.AddWithValue("@owner", ownerId); cmd.Parameters.AddWithValue("@chat", chatId);
         cmd.Parameters.AddWithValue("@operation", operationId.HasValue ? (object)operationId.Value : DBNull.Value);
@@ -356,6 +400,8 @@ SELECT last_insert_rowid();";
         IReadOnlyList<NavalModelAmount> attackerBoats, IReadOnlyList<NavalModelAmount> attackerSubs,
         IReadOnlyList<NavalModelAmount> defenderBoats, IReadOnlyList<NavalModelAmount> defenderSubs)
     {
+        if(result.AttackerBattleships.Count!=inv.Battleships)
+            throw new InvalidOperationException($"Battleship settlement mismatch for operation {inv.Id}: sent={inv.Battleships}, outcomes={result.AttackerBattleships.Count}.");
         using var con = OpenCon(); using var tx = con.BeginTransaction();
         using (var claim = con.CreateCommand())
         {
@@ -406,6 +452,8 @@ SELECT last_insert_rowid();";
             .Select(x=>new NavalModelAmount(x.Key,x.Count())).ToList();
         DeductModels(con,tx,inv.DefenderId,inv.ChatId,"Battleships",defenderSunk);
         foreach(var bs in result.DefenderBattleships) ApplyBattleshipOutcome(con,tx,bs);
+        UpdateLegacyBattleshipDamage(con,tx,inv.AttackerId,inv.ChatId);
+        UpdateLegacyBattleshipDamage(con,tx,inv.DefenderId,inv.ChatId);
 
         int wins;
         using(var readWins=con.CreateCommand())
@@ -467,12 +515,22 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
             cmd.Parameters.AddWithValue("@m",item.Model);cmd.Parameters.AddWithValue("@n",count);cmd.ExecuteNonQuery();
         }
     }
+    static void UpdateLegacyBattleshipDamage(SqliteConnection con,SqliteTransaction tx,long ownerId,long chatId)
+    {
+        using var cmd=con.CreateCommand();cmd.Transaction=tx;
+        cmd.CommandText=@"UPDATE Countries SET BattleshipDamage=COALESCE((SELECT SUM(DamagePercent)
+ FROM BattleshipUnits WHERE OwnerId=@owner AND ChatId=@chat AND Status!='Sunk'),0)
+ WHERE OwnerId=@owner AND ChatId=@chat";
+        cmd.Parameters.AddWithValue("@owner",ownerId);cmd.Parameters.AddWithValue("@chat",chatId);cmd.ExecuteNonQuery();
+    }
+
     static void ApplyBattleshipOutcome(SqliteConnection con,SqliteTransaction tx,NavalBattleshipOutcome outcome)
     {
         using var cmd=con.CreateCommand();cmd.Transaction=tx;
         cmd.CommandText=outcome.Sunk?"UPDATE BattleshipUnits SET DamagePercent=100,Status='Sunk',OperationId=NULL WHERE Id=@id":
             "UPDATE BattleshipUnits SET DamagePercent=@damage,Status='Ready',OperationId=NULL WHERE Id=@id";
-        cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);cmd.ExecuteNonQuery();
+        cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);
+        if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException($"Battleship unit {outcome.UnitId} was not settled.");
     }
 
     internal static bool SetBattleshipDamageForTest(long unitId,int damage)
@@ -526,6 +584,7 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
         }
         using(var delete=con.CreateCommand()){delete.Transaction=tx;delete.CommandText="DELETE FROM BattleshipUnits WHERE Id=@id";
             delete.Parameters.AddWithValue("@id",unitId);if(delete.ExecuteNonQuery()!=1)return false;}
+        UpdateLegacyBattleshipDamage(con,tx,ownerId,chatId);
         tx.Commit();return true;
     }
 
@@ -558,6 +617,7 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
          pay.Parameters.AddWithValue("@m",money);pay.Parameters.AddWithValue("@i",iron);pay.Parameters.AddWithValue("@o",ownerId);pay.Parameters.AddWithValue("@c",chatId);
          if(pay.ExecuteNonQuery()!=1)return false;}
         using(var fix=con.CreateCommand()){fix.Transaction=tx;fix.CommandText="UPDATE BattleshipUnits SET DamagePercent=0 WHERE Id=@id";fix.Parameters.AddWithValue("@id",unitId);fix.ExecuteNonQuery();}
+        UpdateLegacyBattleshipDamage(con,tx,ownerId,chatId);
         tx.Commit();return true;
     }
 }
