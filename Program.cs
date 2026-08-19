@@ -8818,6 +8818,9 @@ partial class Program
         return (long)(MineIncome[c.MineLevel] * 1000);
     }
 
+    internal static bool PassesAttackTypePowerRule(Country attacker,Country defender,bool isNaval) =>
+        !isNaval || CalcManpower(defender) >= CalcManpower(attacker) / 4;
+
     static long CalcManpower(Country c)
     {
         double popPower = (c.Population / 1000.0) * (c.Welfare / 100.0);
@@ -10521,18 +10524,8 @@ partial class Program
             return;
         }
 
-        // Power ratio check already for naval, but also ground – 1/4 rule
-        if (attacker != null)
-        {
-            long attMP = CalcManpower(attacker);
-            long defMP = CalcManpower(defender);
-            if (defMP < attMP / 4)
-            {
-                await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
-                return;
-            }
-        }
-
+        // The one-quarter power rule is evaluated only after the user chooses
+        // «حمله دریایی». Ground/air attacks must never be blocked here.
         var session = sessions.GetOrAdd(
             uid,
             _ => new UserSession()
@@ -10609,10 +10602,8 @@ partial class Program
                 return;
             }
 
-            // Rule: attacking someone with less than 1/4 of our power is forbidden
-            long attMP = CalcManpower(attacker);
-            long defMP = CalcManpower(defender);
-            if (defMP < attMP / 4)
+            // The one-quarter rule belongs exclusively to naval attacks.
+            if (!PassesAttackTypePowerRule(attacker,defender,isNaval:true))
             {
                 await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
                 return;
@@ -10641,13 +10632,6 @@ partial class Program
                     long until = Database.GetAttackShieldUntilMs(tid, cid);
                     long leftH = Math.Max(1, (until - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 3600000);
                     await bot.AnswerCallbackQueryAsync(cb.Id, $"🛡 {defender.Name} سپر 16 ساعته دارد! تا {leftH} ساعت دیگر قابل حمله نیست.", showAlert: true, cancellationToken: ct);
-                    return;
-                }
-                long attMP = CalcManpower(attacker);
-                long defMP = CalcManpower(defender);
-                if (defMP < attMP / 4)
-                {
-                    await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ حمله به کشوری با قدرت کمتر از یک چهارم قدرت شما ممنوع است!", showAlert: true, cancellationToken: ct);
                     return;
                 }
             }

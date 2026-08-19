@@ -44,6 +44,9 @@ static class AttackSelectionRegressionTests
                 "fighter attack capacities must be model-exact after defense");
             Assert(fighters.Values.Sum()==40,"exactly ten of fifty fighters must remain in defense");
             Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"soldier selection must exclude configured 20 percent defense");
+            var weak=new Country{Population=1_000,Soldiers=10,Tanks=0,Planes=0,Welfare=100};
+            Assert(!Program.PassesAttackTypePowerRule(c,weak,isNaval:true),"one-quarter rule must still block an undersized naval target");
+            Assert(Program.PassesAttackTypePowerRule(c,weak,isNaval:false),"one-quarter rule must never block a ground/air attack");
 
             var selectedTanks=new List<ModelAmount>{new("M2 Medium",10),new("T-28",25),new("Panzer III",5)};
             Assert(Program.ModelSelectionFits(selectedTanks,Program.GetAttackBreakdown(c,"tanks")),"valid mixed tank selection must fit");
@@ -79,6 +82,22 @@ static class AttackSelectionRegressionTests
                     Tanks=new(){new("Panzer III",30)}}},
                 AttackerOrders=new(){GroundStrategy=1,GroundTactic=1,AirStrategy=1,AirTactic=1},
                 DefenderOrders=new(){GroundStrategy=1,GroundTactic=1,AirStrategy=1,AirTactic=1}};
+            var random=new Random(1939);
+            for(int n=0;n<30;n++)
+            {
+                long id=900+n,total=random.Next(1,501),foreignA=random.NextInt64(0,total+1),foreignB=random.NextInt64(0,total-foreignA+1);
+                var fuzz=new Country{OwnerId=id,ChatId=chat,Name=$"Fuzz{id}",OwnerName="Fuzz",Faction=Faction.USA,
+                    Money=1000,Iron=1000,Population=100_000,Soldiers=1000,Tanks=total,Planes=0,Bombers=0,Cities=4};
+                Database.AddCountry(fuzz);
+                if(foreignA>0)Database.AddEquipmentModel(id,chat,"Tanks","T-28",foreignA);
+                if(foreignB>0)Database.AddEquipmentModel(id,chat,"Tanks","Panzer III",foreignB);
+                var available=Program.GetAttackBreakdown(Database.GetCountry(id,chat)!,"tanks");
+                long expected=total-(long)Math.Ceiling(total*0.20);
+                Assert(available.Sum(x=>x.Count)==expected,$"fuzz {n}: attack total must equal inventory minus mandatory defense");
+                Assert(available.All(x=>x.Count>=0)&&available.GroupBy(x=>x.ModelName,StringComparer.OrdinalIgnoreCase).All(x=>x.Count()==1),
+                    $"fuzz {n}: model capacities must be nonnegative and unique");
+            }
+
             BattleResult battle=WarEngine.Resolve(request);
             Assert(battle.AttackerParticipantLosses.ContainsKey(owner),"engine must retain attacker participant identity");
             Assert(battle.AttackerTanksLost<=selectedTanks.Sum(x=>x.Count)&&battle.AttackerFightersLost<=15&&battle.AttackerBombersLost<=6,
