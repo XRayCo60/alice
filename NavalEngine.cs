@@ -251,10 +251,10 @@ static class NavalEngine
             double pressure=Math.Clamp(ratio,0.15,5.0);
             int added=(int)Math.Round(rng.Range(7,22)*Math.Sqrt(pressure)*(0.55+penetration*0.75)*(tacticalTrap?1.25:1));
             int rawDamage=Math.Max(0,unit.DamagePercent+added);
-            // Damage is cumulative. Crossing 100% always means the hull is lost; 99% is
-            // the highest repairable state and can no longer absorb another hit for free.
-            bool sunk=rawDamage>=100;
-            int finalDamage=sunk?100:Math.Clamp(rawDamage,0,99);
+            // Damage is cumulative. Above 80% the hull, machinery and combat systems are
+            // considered beyond survival; the ship sinks instead of being parked at 99%.
+            bool sunk=rawDamage>80;
+            int finalDamage=sunk?100:Math.Clamp(rawDamage,0,80);
             output.Add(new NavalBattleshipOutcome
             {
                 UnitId = unit.UnitId,

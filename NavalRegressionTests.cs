@@ -222,11 +222,11 @@ static class NavalRegressionTests
             Seed=99,AttackerName="Finisher",DefenderName="Critical",
             AttackerTactic=2,DefenderStrategy=1,DefenderTactic=1,
             AttackerBoats=new(){new("PT Boat",1)},
-            DefenderBattleships=new(){new(){UnitId=77,Model="Bismarck",DamagePercent=99}}
+            DefenderBattleships=new(){new(){UnitId=77,Model="Bismarck",DamagePercent=80}}
         };
         NavalBattleResult fatal=NavalEngine.Resolve(fatalDamage);
         Assert(fatal.DefenderBattleships.Single().Sunk&&fatal.DefenderBattleships.Single().FinalDamage==100,
-            "a battleship crossing 99 percent damage must sink unconditionally");
+            "a battleship whose cumulative damage rises above 80 percent must sink unconditionally");
         bool locked=false;
         try
         {
