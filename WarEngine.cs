@@ -2368,6 +2368,8 @@ static class WarEngineV2Core
         List<(string Model, long Count)> defBattleshipBreakdown,
         int attStrategy, int attTactic, int defStrategy, int defTactic)
     {
+        if (attStrategy != 1)
+            throw new NotSupportedException("عملیات آبی‌خاکی و پیشروی زمینی فعلاً قفل است.");
         long seed = (long)Interlocked.Increment(ref _seedCounter) ^ ((long)attacker.OwnerId << 20) ^ DateTime.UtcNow.Ticks;
         var rng = new XorRng((ulong)seed);
         var res = new BattleResult { IsNavalBattle = true };
@@ -2503,12 +2505,12 @@ static class WarEngineV2Core
             }
         }
 
-        // Loot – 1.5x ground 100% success (ground loot 15% money 10% iron * frac)
+        // Legacy naval entry point follows the live engine: 2.5x ground loot.
         float frac = success / 100f;
         long baseMoneyLoot = (long)(defender.Money * 0.15 * frac);
         long baseIronLoot = (long)(defender.Iron * 0.10 * frac);
-        long lootMoney = (long)(baseMoneyLoot * 1.5); // 1.5x
-        long lootIron = (long)(baseIronLoot * 1.5);
+        long lootMoney = (long)(baseMoneyLoot * 2.5);
+        long lootIron = (long)(baseIronLoot * 2.5);
         lootMoney = Math.Min(lootMoney, defender.Money);
         lootIron = Math.Min(lootIron, defender.Iron);
 
@@ -2566,7 +2568,7 @@ static class WarEngineV2Core
         sb.AppendLine("📊 آمار نهایی:");
         sb.AppendLine($"🔻 مهاجم: {attBoatLoss} قایق، {attSubLoss} زیردریایی، {attBSLost} نبردناو منهدم، {attBSDamage}% آسیب نبردناو");
         sb.AppendLine($"🔻 مدافع: {defBoatLoss} قایق، {defSubLoss} زیردریایی، {defBSLost} نبردناو منهدم، {defBSDamage}% آسیب نبردناو");
-        sb.AppendLine($"💰 غنیمت دریایی (1.5x زمینی): {lootMoney/1000.0:F1}K پول، {lootIron/1000.0:F1}K آهن");
+        sb.AppendLine($"💰 غنیمت دریایی (2.5x زمینی): {lootMoney/1000.0:F1}K پول، {lootIron/1000.0:F1}K آهن");
         if (success >= 90) sb.AppendLine($"⚠️ بندر {defender.Name} با سقوط {success}% یک سطح کاهش می‌یابد!");
         sb.AppendLine($"⏱ مدت نبرد: {(int)(15 + effectiveRatio * 20)} دقیقه | 🌊 سوخت قایق‌ها تمام شد و به بندر بازگشتند");
 

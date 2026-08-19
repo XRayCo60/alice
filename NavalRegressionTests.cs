@@ -193,6 +193,12 @@ static class NavalRegressionTests
             "defender losses must not exceed deployed units");
         Assert(x.LootMoney <= request.DefenderMoney && x.LootIron <= request.DefenderIron,
             "loot must not exceed defender resources");
+        if (x.AttackerWon)
+        {
+            long expectedMoney=Math.Min(request.DefenderMoney,(long)Math.Round(request.DefenderMoney*0.15*(x.SuccessPercent/100.0)*2.5));
+            long expectedIron=Math.Min(request.DefenderIron,(long)Math.Round(request.DefenderIron*0.10*(x.SuccessPercent/100.0)*2.5));
+            Assert(x.LootMoney==expectedMoney&&x.LootIron==expectedIron,"naval loot must be exactly 2.5x ground formula");
+        }
         Assert(x.AttackerReport.Contains("Iowa #1") && x.AttackerReport.Contains("9×406mm") &&
                x.AttackerReport.Contains("زره 305/140-140/406mm"),
             "attacker report must expose exact battleship technical data");
@@ -208,7 +214,25 @@ static class NavalRegressionTests
         NavalBattleResult emptyResult = NavalEngine.Resolve(empty);
         Assert(emptyResult.Outcome == NavalOutcomeKind.EmptyBaseVictory && emptyResult.AttackerWon,
             "empty base must count as attacker victory");
-        Assert(emptyResult.LootMoney == 7_500 && emptyResult.LootIron == 2_500,
-            "empty base loot must be exactly half of full ground-rate loot");
+        Assert(emptyResult.LootMoney == 18_750 && emptyResult.LootIron == 6_250,
+            "empty base loot must be half of the 2.5x naval rate");
+
+        var fatalDamage = new NavalBattleRequest
+        {
+            Seed=99,AttackerName="Finisher",DefenderName="Critical",
+            AttackerTactic=2,DefenderStrategy=1,DefenderTactic=1,
+            AttackerBoats=new(){new("PT Boat",1)},
+            DefenderBattleships=new(){new(){UnitId=77,Model="Bismarck",DamagePercent=99}}
+        };
+        NavalBattleResult fatal=NavalEngine.Resolve(fatalDamage);
+        Assert(fatal.DefenderBattleships.Single().Sunk&&fatal.DefenderBattleships.Single().FinalDamage==100,
+            "a battleship crossing 99 percent damage must sink unconditionally");
+        bool locked=false;
+        try
+        {
+            WarEngineV2Core.RunNavalBattleAdvanced(new Country(),new Country(),new(),new(),new(),new(),new(),new(),2,1,1,1);
+        }
+        catch(NotSupportedException){locked=true;}
+        Assert(locked,"legacy amphibious/ground-advance naval strategy must remain locked server-side");
     }
 }

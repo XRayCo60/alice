@@ -10635,6 +10635,11 @@ partial class Program
         if (parts.Length < 5 || cb.Message == null) return;
         long uid = cb.From.Id;
         if (!TryParseLong(parts[1], out long cid) || !TryParseLong(parts[2], out long tid) || !TryParseInt(parts[3], out int strat) || !TryParseInt(parts[4], out int tac)) return;
+        if (strat != 1)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id, "🔒 عملیات آبی‌خاکی و پیشروی زمینی فعلاً قفل است.", showAlert: true, cancellationToken: ct);
+            return;
+        }
 
         var session = sessions.GetOrAdd(uid, _ => new UserSession());
         session.AttackChatId = cid;

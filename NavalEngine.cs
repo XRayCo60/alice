@@ -73,6 +73,9 @@ sealed class NavalBattleResult
 
 static class NavalEngine
 {
+    const double NAVAL_LOOT_MULTIPLIER = 2.5;
+    const double EMPTY_BASE_LOOT_FACTOR = 0.5;
+
     struct Rng
     {
         ulong _state;
@@ -109,8 +112,10 @@ static class NavalEngine
             result.AttackerWon = true;
             result.SuccessPercent = 100;
             result.SurpriseSucceeded = request.AttackerTactic == 1;
-            result.LootMoney = (long)Math.Round(request.DefenderMoney * 0.15 * 0.5);
-            result.LootIron = (long)Math.Round(request.DefenderIron * 0.10 * 0.5);
+            result.LootMoney = Math.Min(request.DefenderMoney,
+                (long)Math.Round(request.DefenderMoney * 0.15 * NAVAL_LOOT_MULTIPLIER * EMPTY_BASE_LOOT_FACTOR));
+            result.LootIron = Math.Min(request.DefenderIron,
+                (long)Math.Round(request.DefenderIron * 0.10 * NAVAL_LOOT_MULTIPLIER * EMPTY_BASE_LOOT_FACTOR));
             BuildReports(request, result, attackerInitial, defenderInitial);
             return result;
         }
@@ -181,9 +186,9 @@ static class NavalEngine
         {
             double success = result.SuccessPercent / 100.0;
             result.LootMoney = Math.Min(request.DefenderMoney,
-                (long)Math.Round(request.DefenderMoney * 0.15 * success));
+                (long)Math.Round(request.DefenderMoney * 0.15 * success * NAVAL_LOOT_MULTIPLIER));
             result.LootIron = Math.Min(request.DefenderIron,
-                (long)Math.Round(request.DefenderIron * 0.10 * success));
+                (long)Math.Round(request.DefenderIron * 0.10 * success * NAVAL_LOOT_MULTIPLIER));
         }
         BuildReports(request, result, attackerInitial, defenderInitial);
         return result;
@@ -245,10 +250,11 @@ static class NavalEngine
             double penetration=Math.Clamp(gunPenetration*0.68+torpedoPenetration*0.32,0.08,1);
             double pressure=Math.Clamp(ratio,0.15,5.0);
             int added=(int)Math.Round(rng.Range(7,22)*Math.Sqrt(pressure)*(0.55+penetration*0.75)*(tacticalTrap?1.25:1));
-            int finalDamage=Math.Clamp(unit.DamagePercent+added,0,99);
-            bool sinkEligible=ratio>=3.0&&tacticalTrap&&unit.DamagePercent>=50&&penetration>=0.55;
-            bool sunk=sinkEligible&&unit.DamagePercent+added>=100&&
-                        rng.NextD()<Math.Clamp(0.20+(ratio-3)*0.15,0.20,0.75);
+            int rawDamage=Math.Max(0,unit.DamagePercent+added);
+            // Damage is cumulative. Crossing 100% always means the hull is lost; 99% is
+            // the highest repairable state and can no longer absorb another hit for free.
+            bool sunk=rawDamage>=100;
+            int finalDamage=sunk?100:Math.Clamp(rawDamage,0,99);
             output.Add(new NavalBattleshipOutcome
             {
                 UnitId = unit.UnitId,
@@ -292,7 +298,7 @@ static class NavalEngine
             $"\n📊 خسارات مدل‌به‌مدل:\n🔻 قایق خودی: {Losses(r.AttackerBoatLosses)}\n🔻 زیردریایی خودی: {Losses(r.AttackerSubmarineLosses)}\n"+
             $"🔻 قایق دشمن: {Losses(r.DefenderBoatLosses)}\n🔻 زیردریایی دشمن: {Losses(r.DefenderSubmarineLosses)}\n"+
             $"🚢 وضعیت نبردناو خودی: {ShipDamage(r.AttackerBattleships)}\n🚢 وضعیت نبردناو دشمن: {ShipDamage(r.DefenderBattleships)}\n"+
-            $"💰 غنیمت: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
+            $"💰 غنیمت دریایی (۲.۵× زمینی): {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
         r.DefenderReport=$"🛡 گزارش دفاع دریایی — {q.DefenderName} برابر {q.AttackerName}\n{outcome}\n━━━━━━━━━━━━━━━━━━\n"+
             $"🎯 حمله دشمن: {tactic}\n🛡 آرایش دفاعی: {defense}\n🔎 کشف حمله: {(r.SurpriseSucceeded?"دیرهنگام":"به‌موقع")}\n"+
             $"📐 قدرت مؤثر: {defensePower:F0} برابر {attackPower:F0}\n• {phase}\n"+
@@ -304,6 +310,6 @@ static class NavalEngine
         r.GroupAnnouncement=$"📰 نبرد دریایی\n⚓ {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n"+
             $"🎯 {tactic} ↔ {defense}\n📊 موفقیت مهاجم: {r.SuccessPercent}%\n"+
             $"💀 مهاجم: {aBoat}🚤 {aSub}⚓ {aSunk}🚢 | مدافع: {dBoat}🚤 {dSub}⚓ {dSunk}🚢\n"+
-            $"💰 غنیمت: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
+            $"💰 غنیمت دریایی (۲.۵× زمینی): {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
     }
 }
