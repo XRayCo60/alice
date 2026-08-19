@@ -248,6 +248,14 @@ static class NavalRegressionTests
             "attacker report must expose exact battleship technical data");
         Assert(x.AttackerReport.Contains("خسارات مدل‌به‌مدل") && x.DefenderReport.Contains("وضعیت نبردناوهای شما"),
             "naval reports must contain model losses and per-ship damage");
+        Assert(!x.AttackerReport.Contains("کمین دریایی")&&!x.AttackerReport.Contains("دکترین مدافع:")&&
+               !x.GroupAnnouncement.Contains("کمین دریایی")&&!x.GroupAnnouncement.Contains('↔'),
+            "attacker and group reports must never reveal defender doctrine");
+        Assert(x.DefenderReport.Contains("کمین دریایی"),"defender private report may show its own doctrine");
+        var legacyLeak=new NavalBattleResult{AttackerReport="گزارش\n🛡 دکترین مدافع: کمین دریایی\nپایان",GroupAnnouncement="خبر\n🎯 حمله مستقیم ↔ کمین دریایی"};
+        Program.RedactDefenderNavalDoctrine(legacyLeak);
+        Assert(!legacyLeak.AttackerReport.Contains("کمین دریایی")&&!legacyLeak.GroupAnnouncement.Contains("کمین دریایی")&&!legacyLeak.GroupAnnouncement.Contains('↔'),
+            "persisted legacy reports must be redacted before delivery");
 
         var empty = new NavalBattleRequest
         {

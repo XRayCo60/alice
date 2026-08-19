@@ -291,7 +291,7 @@ static class NavalEngine
         int aSunk=r.AttackerBattleships.Count(x=>x.Sunk),dSunk=r.DefenderBattleships.Count(x=>x.Sunk);
         string aSpecs=ShipSpecs(q.AttackerBattleships),dSpecs=ShipSpecs(q.DefenderBattleships);
         r.AttackerReport=$"⚔️ گزارش عملیات دریایی — {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n━━━━━━━━━━━━━━━━━━\n"+
-            $"🎯 دکترین مهاجم: {tactic}\n🛡 دکترین مدافع: {defense}\n🔎 غافلگیری: {(r.SurpriseSucceeded?"موفق":"ناموفق")}\n"+
+            $"🎯 دکترین مهاجم: {tactic}\n🕵️ آرایش و تاکتیک مدافع: محرمانه\n🔎 غافلگیری: {(r.SurpriseSucceeded?"موفق":"ناموفق")}\n"+
             $"📐 قدرت مؤثر آغازین: {attackPower:F0} ↔ {defensePower:F0} | موفقیت {r.SuccessPercent}%\n\n📜 روند نبرد:\n• {phase}\n"+
             $"• قایق‌های مهاجم: {Models(q.AttackerBoats)}\n• زیردریایی‌های مهاجم: {Models(q.AttackerSubmarines)}\n"+
             (aSpecs.Length>0?$"\n🚢 مشخصات نبردناوهای مهاجم:\n{aSpecs}\n":"")+
@@ -308,7 +308,7 @@ static class NavalEngine
             $"🚢 وضعیت نبردناوهای شما: {ShipDamage(r.DefenderBattleships)}\n🔻 دشمن: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n"+
             $"💸 منابع ازدست‌رفته: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
         r.GroupAnnouncement=$"📰 نبرد دریایی\n⚓ {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n"+
-            $"🎯 {tactic} ↔ {defense}\n📊 موفقیت مهاجم: {r.SuccessPercent}%\n"+
+            $"🎯 تاکتیک اعلام‌شده مهاجم: {tactic}\n📊 موفقیت مهاجم: {r.SuccessPercent}%\n"+
             $"💀 مهاجم: {aBoat}🚤 {aSub}⚓ {aSunk}🚢 | مدافع: {dBoat}🚤 {dSub}⚓ {dSunk}🚢\n"+
             $"💰 غنیمت دریایی (۲.۵× زمینی): {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
     }

@@ -7488,6 +7488,7 @@ partial class Program
                 {
                     operationId = Database.CreateNavalOperation(attackerCountry, defenderCountry,
                         selectedBoats, selectedSubs, selectedBs, sess.AttackNavalTactic, nowMs, travelMinutes);
+                    ScheduleNavalArrival(operationId,nowMs+travelMinutes*60_000L);
                 }
                 catch (Exception ex)
                 {
@@ -8751,14 +8752,16 @@ partial class Program
             transferTimer = null;
             transferTimer = new Timer(async _ =>
             {
-                try { await ProcessActiveTransfers(CancellationToken.None); }
-                catch (Exception ex) { Console.WriteLine($"[TRANSFER TIMER ERR] {ex.Message}"); }
-                try { await ProcessActiveDeployments(CancellationToken.None); }
-                catch (Exception ex) { Console.WriteLine($"[DEPLOY TIMER ERR] {ex.Message}"); }
+                // Naval arrivals are time-sensitive (full exemption = one minute), so they
+                // must not wait behind a long transfer/deployment batch.
                 try { await ProcessNavalInvasions(CancellationToken.None); }
-                catch (Exception ex) { Console.WriteLine($"[NAVAL TIMER ERR] {ex.Message}"); }
-            }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60));
-            Console.WriteLine("[TIMER] transfer/deployment/naval timer started (every 60s)");
+                catch (Exception ex) { Console.WriteLine($"[NAVAL TIMER ERR] {ex}"); }
+                try { await ProcessActiveTransfers(CancellationToken.None); }
+                catch (Exception ex) { Console.WriteLine($"[TRANSFER TIMER ERR] {ex}"); }
+                try { await ProcessActiveDeployments(CancellationToken.None); }
+                catch (Exception ex) { Console.WriteLine($"[DEPLOY TIMER ERR] {ex}"); }
+            }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
+            Console.WriteLine("[TIMER] naval-first operations timer started (every 30s)");
         }
         catch (Exception ex)
         {
@@ -10279,6 +10282,21 @@ partial class Program
         }
     }
 
+    static void ScheduleNavalArrival(long operationId,long arriveAtMs)
+    {
+        _=Task.Run(async () =>
+        {
+            try
+            {
+                long wait=Math.Max(0,arriveAtMs-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                if(wait>0)await Task.Delay(TimeSpan.FromMilliseconds(wait));
+                Console.WriteLine($"[NAVAL ARRIVAL WAKE] operation={operationId}");
+                await ProcessNavalInvasions(CancellationToken.None);
+            }
+            catch(Exception ex){Console.WriteLine($"[NAVAL ARRIVAL WAKE ERR] operation={operationId} {ex}");}
+        });
+    }
+
     static async Task ProcessNavalInvasions(CancellationToken ct)
     {
         await navalProcessorLock.WaitAsync(ct);
@@ -10291,6 +10309,19 @@ partial class Program
         {
             navalProcessorLock.Release();
         }
+    }
+
+    internal static void RedactDefenderNavalDoctrine(NavalBattleResult result)
+    {
+        result.AttackerReport=string.Join("\n",(result.AttackerReport??"").Split('\n')
+            .Where(line=>!line.TrimStart().StartsWith("🛡 دکترین مدافع:",StringComparison.Ordinal)
+                      &&!line.TrimStart().StartsWith("🛡 دفاع دشمن:",StringComparison.Ordinal)));
+        result.GroupAnnouncement=string.Join("\n",(result.GroupAnnouncement??"").Split('\n').Select(line=>
+        {
+            if(line.TrimStart().StartsWith("🎯",StringComparison.Ordinal)&&line.Contains('↔'))
+                return line[..line.IndexOf('↔')].TrimEnd();
+            return line;
+        }));
     }
 
     static void AppendNavalStrategicProgress(NavalBattleResult result)
@@ -10314,6 +10345,7 @@ partial class Program
         foreach (var inv in Database.GetPendingNavalInvasions(now))
         {
             ct.ThrowIfCancellationRequested();
+            Console.WriteLine($"[NAVAL RESOLUTION START] operation={inv.Id} status={inv.Status} due={inv.ArriveAtMs} now={now}");
             var locks = await AcquireCountryMutationLocks(inv.ChatId,
                 new[] { inv.AttackerId, inv.DefenderId }, ct);
             try
@@ -10324,6 +10356,7 @@ partial class Program
                     var recovered = JsonSerializer.Deserialize<NavalBattleResult>(inv.ResultJson);
                     if (recovered == null) throw new InvalidOperationException("Stored naval result is invalid.");
                     AppendNavalStrategicProgress(recovered);
+                    RedactDefenderNavalDoctrine(recovered);
                     try { await SendPermanent(inv.AttackerId, recovered.AttackerReport, ct: ct); } catch { }
                     try { await SendPermanent(inv.DefenderId, recovered.DefenderReport, ct: ct); } catch { }
                     try { await SendPermanent(inv.ChatId, recovered.GroupAnnouncement, ct: ct); } catch { }
@@ -10387,10 +10420,12 @@ partial class Program
                 if (!Database.SettleNavalOperation(inv, result, attackerBoats, attackerSubs,
                         defenderBoats, defenderSubs)) continue;
                 AppendNavalStrategicProgress(result);
+                RedactDefenderNavalDoctrine(result);
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
                 Database.MarkNavalInvasionProcessed(inv.Id);
+                Console.WriteLine($"[NAVAL RESOLUTION COMPLETED] operation={inv.Id} outcome={result.Outcome} success={result.SuccessPercent}");
             }
             catch (Exception ex)
             {
