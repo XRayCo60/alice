@@ -7,6 +7,8 @@ readonly record struct NavalModelAmount(string Model, long Count);
 sealed class NavalBattleshipState
 {
     public long UnitId { get; init; }
+    // Stable country-local number shown to players (1..3); database Id is never exposed.
+    public int ShipNumber { get; init; }
     public string Model { get; init; } = "";
     public int DamagePercent { get; init; }
 }
@@ -43,8 +45,10 @@ sealed class NavalBattleRequest
 sealed class NavalBattleshipOutcome
 {
     public long UnitId { get; init; }
+    public int ShipNumber { get; init; }
     public string Model { get; init; } = "";
     public int PreviousDamage { get; init; }
+    public int DamageInflicted { get; init; }
     public int FinalDamage { get; init; }
     public bool Sunk { get; init; }
 }
@@ -258,8 +262,10 @@ static class NavalEngine
             output.Add(new NavalBattleshipOutcome
             {
                 UnitId = unit.UnitId,
+                ShipNumber = unit.ShipNumber,
                 Model = unit.Model,
                 PreviousDamage = unit.DamagePercent,
+                DamageInflicted = added,
                 FinalDamage = sunk ? 100 : finalDamage,
                 Sunk = sunk
             });
@@ -281,8 +287,15 @@ static class NavalEngine
         }
         string Losses(IReadOnlyDictionary<string,long> losses)=>losses.Count==0?"بدون تلفات":string.Join("، ",losses.Select(x=>$"{x.Key} ×{x.Value:N0}"));
         string ShipSpecs(IEnumerable<NavalBattleshipState> ships)=>string.Join("\n",ships.Select(x=>
-        {var s=WarEngineV2Core.GetBattleshipSpecByModel(x.Model);return $"• {s.Name} #{x.UnitId}: {s.MainGuns:0}×{s.MainCaliber:0.#}mm | زره {s.Belt:0}/{s.DeckMin:0}-{s.DeckMax:0}/{s.Turret:0}mm | سرعت {s.Speed:0.#}kn | شناسایی {s.ReconAircraft:0} | آسیب {x.DamagePercent}%";}));
-        string ShipDamage(IEnumerable<NavalBattleshipOutcome> ships)=>!ships.Any()?"ندارد":string.Join("، ",ships.Select(x=>x.Sunk?$"{x.Model} #{x.UnitId}: غرق شد":$"{x.Model} #{x.UnitId}: {x.PreviousDamage}%→{x.FinalDamage}%"));
+        {var s=WarEngineV2Core.GetBattleshipSpecByModel(x.Model);return $"• {s.Name} شماره {x.ShipNumber}: {s.MainGuns:0}×{s.MainCaliber:0.#}mm | زره {s.Belt:0}/{s.DeckMin:0}-{s.DeckMax:0}/{s.Turret:0}mm | سرعت {s.Speed:0.#}kn | شناسایی {s.ReconAircraft:0} | آسیب {x.DamagePercent}%";}));
+        string ShipDamage(IEnumerable<NavalBattleshipOutcome> ships,bool inflicted)=>!ships.Any()?"ندارد":string.Join("، ",ships.Select(x=>
+        {
+            int dealt=Math.Max(0,x.DamageInflicted);
+            string number=x.ShipNumber is >=1 and <=3?$"شماره {x.ShipNumber}":"بدون شماره";
+            if(x.Sunk)return $"{x.Model} {number}: غرق شد (+{dealt}% آسیب واردشده)";
+            return inflicted?$"{x.Model} {number}: {x.PreviousDamage}%→{x.FinalDamage}% (+{dealt}% آسیب واردشده)":
+                $"{x.Model} {number}: {x.PreviousDamage}%→{x.FinalDamage}% (+{dealt}% آسیب دریافتی)";
+        }));
         string phase=r.EmptyBase?"پایگاه بدون ناوگان رزمی مؤثر تصرف شد.":r.SurpriseSucceeded?
             "شناسایی مهاجم مسیر ورود را باز کرد و موج نخست آتش پیش از آرایش کامل مدافع فرود آمد.":
             "مدافع حمله را کشف کرد؛ ناوگان‌ها پس از آرایش وارد تبادل آتش و اژدر شدند.";
@@ -297,7 +310,7 @@ static class NavalEngine
             (aSpecs.Length>0?$"\n🚢 مشخصات نبردناوهای مهاجم:\n{aSpecs}\n":"")+
             $"\n📊 خسارات مدل‌به‌مدل:\n🔻 قایق خودی: {Losses(r.AttackerBoatLosses)}\n🔻 زیردریایی خودی: {Losses(r.AttackerSubmarineLosses)}\n"+
             $"🔻 قایق دشمن: {Losses(r.DefenderBoatLosses)}\n🔻 زیردریایی دشمن: {Losses(r.DefenderSubmarineLosses)}\n"+
-            $"🚢 وضعیت نبردناو خودی: {ShipDamage(r.AttackerBattleships)}\n🚢 وضعیت نبردناو دشمن: {ShipDamage(r.DefenderBattleships)}\n"+
+            $"🚢 وضعیت نبردناو خودی: {ShipDamage(r.AttackerBattleships,false)}\n🚢 آسیب واردشده به نبردناو دشمن: {ShipDamage(r.DefenderBattleships,true)}\n"+
             $"💰 غنیمت دریایی (۲.۵× زمینی): {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
         r.DefenderReport=$"🛡 گزارش دفاع دریایی — {q.DefenderName} برابر {q.AttackerName}\n{outcome}\n━━━━━━━━━━━━━━━━━━\n"+
             $"🎯 حمله دشمن: {tactic}\n🛡 آرایش دفاعی: {defense}\n🔎 کشف حمله: {(r.SurpriseSucceeded?"دیرهنگام":"به‌موقع")}\n"+
@@ -305,7 +318,8 @@ static class NavalEngine
             $"• قایق‌های شما: {Models(q.DefenderBoats)}\n• زیردریایی‌های شما: {Models(q.DefenderSubmarines)}\n"+
             (dSpecs.Length>0?$"\n🚢 مشخصات نبردناوهای شما:\n{dSpecs}\n":"")+
             $"\n🔻 تلفات قایق شما: {Losses(r.DefenderBoatLosses)}\n🔻 تلفات زیردریایی شما: {Losses(r.DefenderSubmarineLosses)}\n"+
-            $"🚢 وضعیت نبردناوهای شما: {ShipDamage(r.DefenderBattleships)}\n🔻 دشمن: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n"+
+            $"🚢 وضعیت نبردناوهای شما: {ShipDamage(r.DefenderBattleships,false)}\n🚢 آسیب واردشده به نبردناو دشمن: {ShipDamage(r.AttackerBattleships,true)}\n"+
+            $"🔻 دشمن: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n"+
             $"💸 منابع ازدست‌رفته: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
         r.GroupAnnouncement=$"📰 نبرد دریایی\n⚓ {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n"+
             $"🎯 تاکتیک اعلام‌شده مهاجم: {tactic}\n📊 موفقیت مهاجم: {r.SuccessPercent}%\n"+

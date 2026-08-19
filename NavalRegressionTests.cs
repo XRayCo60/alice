@@ -72,7 +72,10 @@ static class NavalRegressionTests
         Transfer transfer = Database.GetActiveTransfers().Single(x => x.ReceiverId == receiver.OwnerId && x.ResourceType == "battleships");
         Assert(Database.CompleteTransfer(transfer, "Iowa") == "delivered", "battleship must be delivered");
         Assert(Database.GetCountry(receiver.OwnerId, chat)!.Battleships == 3, "receiver aggregate must become 3");
-        Assert(Database.GetBattleshipUnits(receiver.OwnerId, chat, false).Count == 3, "receiver must own three ship instances");
+        var receiverShips=Database.GetBattleshipUnits(receiver.OwnerId, chat, false);
+        Assert(receiverShips.Count == 3, "receiver must own three ship instances");
+        Assert(receiverShips.Select(x=>x.ShipNumber).OrderBy(x=>x).SequenceEqual(new[]{1,2,3}),
+            "receiver battleships must be numbered locally and uniquely from 1 to 3");
         Assert(!Database.TryPurchaseBattleship(receiver.OwnerId, chat, "Iowa", 50_000, 40_000), "purchase over cap after transfer must fail");
 
         long unit = Database.GetBattleshipUnits(receiver.OwnerId, chat, false).First().UnitId;
@@ -178,6 +181,7 @@ static class NavalRegressionTests
         {
             long owner=result.AttackerBattleships.Contains(outcome)?attacker.OwnerId:defender.OwnerId;
             var stored=Database.GetBattleshipUnits(owner,chat,false).FirstOrDefault(x=>x.UnitId==outcome.UnitId);
+            Assert(outcome.DamageInflicted>0,$"ship {outcome.UnitId} must record actual inflicted damage");
             if(outcome.Sunk)Assert(stored==null,$"sunk ship {outcome.UnitId} must not remain ready");
             else Assert(stored!=null&&stored.UnitId==outcome.UnitId&&stored.DamagePercent==outcome.FinalDamage,
                 $"reported damage for ship {outcome.UnitId} must exactly match database");
@@ -196,8 +200,10 @@ static class NavalRegressionTests
         var legacy=Country(701,legacyChat,"LegacyDamage",Faction.USSR);legacy.Battleships=1;legacy.BattleshipDamage=40;
         Database.AddCountry(legacy);Database.AddEquipmentModel(legacy.OwnerId,legacyChat,"Battleships","Sovetsky Soyuz",1);
         Database.SyncBattleshipUnits(legacy.OwnerId,legacyChat);
-        Assert(Database.GetBattleshipUnits(legacy.OwnerId,legacyChat,false).Single().DamagePercent==40,
+        var migratedLegacy=Database.GetBattleshipUnits(legacy.OwnerId,legacyChat,false).Single();
+        Assert(migratedLegacy.DamagePercent==40,
             "legacy aggregate damage must migrate to the per-ship ledger");
+        Assert(migratedLegacy.ShipNumber==1,"legacy battleship must receive country-local number 1");
         Assert(Database.GetCountry(legacy.OwnerId,legacyChat)!.BattleshipDamage==40,"legacy damage mirror must remain exact after migration");
 
         const long chat = -90005;
@@ -220,10 +226,10 @@ static class NavalRegressionTests
             DefenderPortLevel = 4, DefenderMoney = 500_000, DefenderIron = 200_000,
             AttackerBoats = new() { new("PT Boat", 30), new("S-Boot", 10) },
             AttackerSubmarines = new() { new("Gato", 8) },
-            AttackerBattleships = new() { new() { UnitId = 1, Model = "Iowa", DamagePercent = 25 } },
+            AttackerBattleships = new() { new() { UnitId = 1, ShipNumber = 1, Model = "Iowa", DamagePercent = 25 } },
             DefenderBoats = new() { new("G-5", 20) },
             DefenderSubmarines = new() { new("Type VIIC", 12) },
-            DefenderBattleships = new() { new() { UnitId = 2, Model = "Bismarck", DamagePercent = 50 } }
+            DefenderBattleships = new() { new() { UnitId = 2, ShipNumber = 2, Model = "Bismarck", DamagePercent = 50 } }
         };
         NavalBattleResult x = NavalEngine.Resolve(request);
         NavalBattleResult y = NavalEngine.Resolve(request);
@@ -243,8 +249,9 @@ static class NavalRegressionTests
             long expectedIron=Math.Min(request.DefenderIron,(long)Math.Round(request.DefenderIron*0.10*(x.SuccessPercent/100.0)*2.5));
             Assert(x.LootMoney==expectedMoney&&x.LootIron==expectedIron,"naval loot must be exactly 2.5x ground formula");
         }
-        Assert(x.AttackerReport.Contains("Iowa #1") && x.AttackerReport.Contains("9×406mm") &&
-               x.AttackerReport.Contains("زره 305/140-140/406mm"),
+        Assert(x.AttackerReport.Contains("Iowa شماره 1") && x.AttackerReport.Contains("9×406mm") &&
+               x.AttackerReport.Contains("زره 305/140-140/406mm") &&
+               x.AttackerReport.Contains("آسیب واردشده به نبردناو دشمن"),
             "attacker report must expose exact battleship technical data");
         Assert(x.AttackerReport.Contains("خسارات مدل‌به‌مدل") && x.DefenderReport.Contains("وضعیت نبردناوهای شما"),
             "naval reports must contain model losses and per-ship damage");
@@ -274,7 +281,7 @@ static class NavalRegressionTests
             Seed=99,AttackerName="Finisher",DefenderName="Critical",
             AttackerTactic=2,DefenderStrategy=1,DefenderTactic=1,
             AttackerBoats=new(){new("PT Boat",1)},
-            DefenderBattleships=new(){new(){UnitId=77,Model="Bismarck",DamagePercent=80}}
+            DefenderBattleships=new(){new(){UnitId=77,ShipNumber=3,Model="Bismarck",DamagePercent=80}}
         };
         NavalBattleResult fatal=NavalEngine.Resolve(fatalDamage);
         Assert(fatal.DefenderBattleships.Single().Sunk&&fatal.DefenderBattleships.Single().FinalDamage==100,

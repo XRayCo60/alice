@@ -2346,6 +2346,11 @@ static partial class Database
             country.Parameters.AddWithValue("@o", ownerId); country.Parameters.AddWithValue("@c", chatId);
             owned = Convert.ToInt64(country.ExecuteScalar() ?? 0);
         }
+        using var outgoing = con.CreateCommand();
+        outgoing.CommandText = @"SELECT COALESCE(SUM(Amount),0) FROM Transfers
+                                 WHERE SenderId=@o AND ChatId=@c AND ResourceType='battleships'";
+        outgoing.Parameters.AddWithValue("@o", ownerId); outgoing.Parameters.AddWithValue("@c", chatId);
+        owned += Convert.ToInt64(outgoing.ExecuteScalar() ?? 0);
         if (!includeIncoming) return owned;
         using var incoming = con.CreateCommand();
         incoming.CommandText = @"SELECT COALESCE(SUM(Amount),0) FROM Transfers
@@ -2405,7 +2410,9 @@ static partial class Database
                 capacity.Transaction = transaction;
                 capacity.CommandText = @"SELECT Battleships+BattleshipsAtSea+
                     COALESCE((SELECT SUM(Amount) FROM Transfers
-                              WHERE ReceiverId=@receiver AND ChatId=@chat AND ResourceType='battleships'),0)
+                              WHERE ReceiverId=@receiver AND ChatId=@chat AND ResourceType='battleships'),0)+
+                    COALESCE((SELECT SUM(Amount) FROM Transfers
+                              WHERE SenderId=@receiver AND ChatId=@chat AND ResourceType='battleships'),0)
                     FROM Countries WHERE OwnerId=@receiver AND ChatId=@chat";
                 capacity.Parameters.AddWithValue("@receiver", receiverId);
                 capacity.Parameters.AddWithValue("@chat", chatId);
@@ -2663,7 +2670,9 @@ VALUES(@o,@c,@cat,@m,@n) ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDAT
         using (var receiver = con.CreateCommand())
         {
             receiver.Transaction = transaction;
-            receiver.CommandText = "SELECT Battleships+BattleshipsAtSea FROM Countries WHERE OwnerId=@owner AND ChatId=@chat";
+            receiver.CommandText = @"SELECT Battleships+BattleshipsAtSea+
+                COALESCE((SELECT SUM(Amount) FROM Transfers WHERE SenderId=@owner AND ChatId=@chat AND ResourceType='battleships'),0)
+                FROM Countries WHERE OwnerId=@owner AND ChatId=@chat";
             receiver.Parameters.AddWithValue("@owner", transfer.ReceiverId);
             receiver.Parameters.AddWithValue("@chat", transfer.ChatId);
             object? value = receiver.ExecuteScalar();
@@ -2716,15 +2725,37 @@ VALUES(@o,@c,@cat,@m,@n) ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDAT
 
         if (transfer.ResourceType == "battleships")
         {
-            using var moveUnits = con.CreateCommand();
-            moveUnits.Transaction = transaction;
-            moveUnits.CommandText = @"UPDATE BattleshipUnits SET OwnerId=@owner,ChatId=@chat,
-                                         Status='Ready',OperationId=NULL
-                                      WHERE Id IN (SELECT UnitId FROM TransferBattleships WHERE TransferId=@transfer)";
-            moveUnits.Parameters.AddWithValue("@owner", recipientId);
-            moveUnits.Parameters.AddWithValue("@chat", transfer.ChatId);
-            moveUnits.Parameters.AddWithValue("@transfer", transfer.Id);
-            moveUnits.ExecuteNonQuery();
+            var transferUnits=new List<long>();
+            using(var readUnits=con.CreateCommand())
+            {
+                readUnits.Transaction=transaction;readUnits.CommandText="SELECT UnitId FROM TransferBattleships WHERE TransferId=@transfer ORDER BY UnitId";
+                readUnits.Parameters.AddWithValue("@transfer",transfer.Id);using var reader=readUnits.ExecuteReader();
+                while(reader.Read())transferUnits.Add(reader.GetInt64(0));
+            }
+            foreach(long unitId in transferUnits)
+            {
+                int slot;
+                if(recipientId==transfer.SenderId)
+                {
+                    using var oldSlot=con.CreateCommand();oldSlot.Transaction=transaction;
+                    oldSlot.CommandText="SELECT SlotNumber FROM BattleshipUnits WHERE Id=@id";oldSlot.Parameters.AddWithValue("@id",unitId);
+                    slot=Convert.ToInt32(oldSlot.ExecuteScalar()??0);
+                }
+                else
+                {
+                    using(var releaseSlot=con.CreateCommand()){releaseSlot.Transaction=transaction;releaseSlot.CommandText="UPDATE BattleshipUnits SET SlotNumber=0 WHERE Id=@id";releaseSlot.Parameters.AddWithValue("@id",unitId);releaseSlot.ExecuteNonQuery();}
+                    using var freeSlot=con.CreateCommand();freeSlot.Transaction=transaction;
+                    freeSlot.CommandText=@"SELECT n FROM (SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3)
+ WHERE NOT EXISTS(SELECT 1 FROM BattleshipUnits b WHERE b.OwnerId=@owner AND b.ChatId=@chat AND b.SlotNumber=n AND b.Status!='Sunk') ORDER BY n LIMIT 1";
+                    freeSlot.Parameters.AddWithValue("@owner",recipientId);freeSlot.Parameters.AddWithValue("@chat",transfer.ChatId);
+                    object? value=freeSlot.ExecuteScalar();if(value==null||value==DBNull.Value){transaction.Rollback();return "capacity";}slot=Convert.ToInt32(value);
+                }
+                using var moveUnit=con.CreateCommand();moveUnit.Transaction=transaction;
+                moveUnit.CommandText=@"UPDATE BattleshipUnits SET OwnerId=@owner,ChatId=@chat,SlotNumber=@slot,Status='Ready',OperationId=NULL WHERE Id=@id";
+                moveUnit.Parameters.AddWithValue("@owner",recipientId);moveUnit.Parameters.AddWithValue("@chat",transfer.ChatId);
+                moveUnit.Parameters.AddWithValue("@slot",slot);moveUnit.Parameters.AddWithValue("@id",unitId);
+                if(moveUnit.ExecuteNonQuery()!=1){transaction.Rollback();return "dropped";}
+            }
             using var deleteLinks = con.CreateCommand();
             deleteLinks.Transaction = transaction;
             deleteLinks.CommandText = "DELETE FROM TransferBattleships WHERE TransferId=@transfer";
@@ -6290,7 +6321,7 @@ partial class Program
             Database.SyncBattleshipUnits(uid, chat.Id);
             var damaged = Database.GetBattleshipUnits(uid, chat.Id, onlyCombatReady: false).Where(x => x.DamagePercent > 0).ToList();
             if (damaged.Count == 0) { await SendTemp(chat.Id, "✅ نبردناو آسیب‌دیده‌ای ندارید.", ct: ct); return; }
-            var rows = damaged.Select(x => new[] { InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} #{x.UnitId} — {x.DamagePercent}٪", $"battleship_repair_quote:{x.UnitId}") }).ToList();
+            var rows = damaged.Select(x => new[] { InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} شماره {x.ShipNumber} — {x.DamagePercent}٪", $"battleship_repair_quote:{x.UnitId}") }).ToList();
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", "cancel") });
             await SendTemp(chat.Id, "🔧 نبردناو موردنظر را انتخاب کنید. هزینه تعمیر برابر درصد واقعی آسیب از قیمت پول و آهن همان مدل است.", markup: new InlineKeyboardMarkup(rows), ct: ct);
             return;
@@ -6303,7 +6334,7 @@ partial class Program
             Database.SyncBattleshipUnits(uid,chat.Id);
             var ships=Database.GetBattleshipUnits(uid,chat.Id,onlyCombatReady:false);
             if(ships.Count==0){await SendTemp(chat.Id,"❌ نبردناو آماده‌ای برای اوراق ندارید. ناوهای در مأموریت یا انتقال قابل اوراق نیستند.",ct:ct);return;}
-            var rows=ships.Select(x=>new[]{InlineKeyboardButton.WithCallbackData($"♻️ {x.Model} #{x.UnitId} — آسیب {x.DamagePercent}٪",$"battleship_scrap:{x.UnitId}")}).ToList();
+            var rows=ships.Select(x=>new[]{InlineKeyboardButton.WithCallbackData($"♻️ {x.Model} شماره {x.ShipNumber} — آسیب {x.DamagePercent}٪",$"battleship_scrap:{x.UnitId}")}).ToList();
             rows.Add(new[]{InlineKeyboardButton.WithCallbackData("❌ لغو","cancel")});
             await SendTemp(chat.Id,"♻️ نبردناو موردنظر را انتخاب کنید. پس از تأیید، ۵۰٪ قیمت ساخت پول و آهن همان مدل برمی‌گردد.",markup:new InlineKeyboardMarkup(rows),ct:ct);
             return;
@@ -8613,7 +8644,7 @@ partial class Program
         if (damaged.Count == 0) { await bot.AnswerCallbackQueryAsync(cb.Id, "✅ آسیبی نیست", showAlert: true, cancellationToken: ct); return; }
         var rows = damaged.Select(x => new[]
         {
-            InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} #{x.UnitId} — آسیب {x.DamagePercent}٪",
+            InlineKeyboardButton.WithCallbackData($"🔧 {x.Model} شماره {x.ShipNumber} — آسیب {x.DamagePercent}٪",
                 $"battleship_repair_quote:{x.UnitId}")
         }).ToList();
         rows.Add(new[] { InlineKeyboardButton.WithCallbackData("❌ لغو", $"cancel:{uid}") });
@@ -8628,17 +8659,19 @@ partial class Program
         long uid=cb.From.Id,cid=cb.Message.Chat.Id;
         if(!Database.GetBattleshipRepairQuote(unitId,uid,cid,out string model,out int damage,out long money,out long iron))
         {await bot.AnswerCallbackQueryAsync(cb.Id,"❌ ناو قابل تعمیر نیست.",showAlert:true,cancellationToken:ct);return;}
+        int shipNumber=Database.GetBattleshipUnits(uid,cid,false).FirstOrDefault(x=>x.UnitId==unitId)?.ShipNumber??0;
         var kb=new InlineKeyboardMarkup(new[]{
             new[]{InlineKeyboardButton.WithCallbackData($"✅ تعمیر فوری — {money:N0} پول + {iron:N0} آهن",$"battleship_repair_unit:{unitId}")},
             new[]{InlineKeyboardButton.WithCallbackData("❌ لغو","cancel")}});
         await bot.AnswerCallbackQueryAsync(cb.Id,cancellationToken:ct);
-        await SendTemp(cid,$"🔧 تعمیر {model} #{unitId}\n💥 آسیب: {damage}٪\n💰 هزینه: {money:N0} پول\n🔩 هزینه: {iron:N0} آهن",markup:kb,ct:ct);
+        await SendTemp(cid,$"🔧 تعمیر {model} شماره {shipNumber}\n💥 آسیب: {damage}٪\n💰 هزینه: {money:N0} پول\n🔩 هزینه: {iron:N0} آهن",markup:kb,ct:ct);
     }
 
     static async Task HandleBattleshipRepairUnitCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
     {
         if (parts.Length < 2 || cb.Message == null || !TryParseLong(parts[1], out long unitId)) return;
         long uid = cb.From.Id, cid = cb.Message.Chat.Id;
+        int shipNumber=Database.GetBattleshipUnits(uid,cid,false).FirstOrDefault(x=>x.UnitId==unitId)?.ShipNumber??0;
         bool repaired = Database.RepairBattleshipUnit(unitId, uid, cid, out long money, out long iron);
         if (!repaired)
         {
@@ -8647,7 +8680,7 @@ partial class Program
             return;
         }
         await bot.AnswerCallbackQueryAsync(cb.Id, "✅ تعمیر کامل شد.", cancellationToken: ct);
-        await SendTemp(cid, $"✅ نبردناو #{unitId} فوراً تعمیر شد.\n💰 {money:N0} پول\n🔩 {iron:N0} آهن", ct: ct);
+        await SendTemp(cid, $"✅ نبردناو شماره {shipNumber} فوراً تعمیر شد.\n💰 {money:N0} پول\n🔩 {iron:N0} آهن", ct: ct);
         DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
     }
 
@@ -8658,7 +8691,7 @@ partial class Program
         Database.SyncBattleshipUnits(uid,cid);
         var ships=Database.GetBattleshipUnits(uid,cid,onlyCombatReady:false);
         if(ships.Count==0){await bot.AnswerCallbackQueryAsync(cb.Id,"❌ نبردناو آماده‌ای برای اوراق ندارید.",showAlert:true,cancellationToken:ct);return;}
-        var rows=ships.Select(x=>new[]{InlineKeyboardButton.WithCallbackData($"♻️ {x.Model} #{x.UnitId} — آسیب {x.DamagePercent}٪",$"battleship_scrap:{x.UnitId}")}).ToList();
+        var rows=ships.Select(x=>new[]{InlineKeyboardButton.WithCallbackData($"♻️ {x.Model} شماره {x.ShipNumber} — آسیب {x.DamagePercent}٪",$"battleship_scrap:{x.UnitId}")}).ToList();
         rows.Add(new[]{InlineKeyboardButton.WithCallbackData("❌ لغو","cancel")});
         await bot.AnswerCallbackQueryAsync(cb.Id,cancellationToken:ct);
         await SendTemp(cid,"♻️ نبردناو موردنظر را انتخاب کنید. ۵۰٪ قیمت ساخت پول و آهن برمی‌گردد.",markup:new InlineKeyboardMarkup(rows),ct:ct);
@@ -8670,23 +8703,25 @@ partial class Program
         long uid=cb.From.Id,cid=cb.Message.Chat.Id;
         if(!Database.GetBattleshipScrapQuote(unitId,uid,cid,out string model,out int damage,out long money,out long iron))
         {await bot.AnswerCallbackQueryAsync(cb.Id,"❌ این نبردناو قابل اوراق نیست یا در مأموریت/انتقال است.",showAlert:true,cancellationToken:ct);return;}
+        int shipNumber=Database.GetBattleshipUnits(uid,cid,false).FirstOrDefault(x=>x.UnitId==unitId)?.ShipNumber??0;
         var kb=new InlineKeyboardMarkup(new[]{
             new[]{InlineKeyboardButton.WithCallbackData($"✅ اوراق — دریافت {money:N0} پول + {iron:N0} آهن",$"battleship_scrap_confirm:{unitId}")},
             new[]{InlineKeyboardButton.WithCallbackData("❌ لغو","cancel")}});
         await bot.AnswerCallbackQueryAsync(cb.Id,cancellationToken:ct);
-        await SendTemp(cid,$"♻️ اوراق {model} #{unitId}\n💥 آسیب فعلی: {damage}٪\n💰 بازگشت پول: {money:N0}\n🔩 بازگشت آهن: {iron:N0}\n⚠️ این عملیات غیرقابل بازگشت است.",markup:kb,ct:ct);
+        await SendTemp(cid,$"♻️ اوراق {model} شماره {shipNumber}\n💥 آسیب فعلی: {damage}٪\n💰 بازگشت پول: {money:N0}\n🔩 بازگشت آهن: {iron:N0}\n⚠️ این عملیات غیرقابل بازگشت است.",markup:kb,ct:ct);
     }
 
     static async Task HandleBattleshipScrapConfirmCallback(CallbackQuery cb,string[] parts,CancellationToken ct)
     {
         if(parts.Length<2||cb.Message==null||!TryParseLong(parts[1],out long unitId))return;
         long uid=cb.From.Id,cid=cb.Message.Chat.Id;
+        int shipNumber=Database.GetBattleshipUnits(uid,cid,false).FirstOrDefault(x=>x.UnitId==unitId)?.ShipNumber??0;
         // The outer group callback already owns the country mutation lock. Do not re-enter it.
         bool scrapped=Database.ScrapBattleshipUnit(unitId,uid,cid,out string model,out long money,out long iron);
         if(!scrapped)
         {await bot.AnswerCallbackQueryAsync(cb.Id,"❌ اوراق انجام نشد؛ وضعیت ناو یا موجودی تغییر کرده است.",showAlert:true,cancellationToken:ct);return;}
         await bot.AnswerCallbackQueryAsync(cb.Id,"✅ نبردناو اوراق شد.",cancellationToken:ct);
-        await SendTemp(cid,$"✅ {model} #{unitId} اوراق شد.\n💰 {money:N0} پول\n🔩 {iron:N0} آهن بازگردانده شد.",ct:ct);
+        await SendTemp(cid,$"✅ {model} شماره {shipNumber} اوراق شد.\n💰 {money:N0} پول\n🔩 {iron:N0} آهن بازگردانده شد.",ct:ct);
         DeleteNow(cb.Message.Chat.Id,cb.Message.MessageId);
     }
 
@@ -9302,7 +9337,7 @@ partial class Program
         var damagedShips = Database.GetBattleshipUnits(c.OwnerId, c.ChatId, onlyCombatReady: false)
             .Where(x => x.DamagePercent > 0).ToList();
         foreach (var ship in damagedShips)
-            sb.AppendLine($"🔧 {ship.Model} #{ship.UnitId}: آسیب {ship.DamagePercent}٪" +
+            sb.AppendLine($"🔧 {ship.Model} شماره {ship.ShipNumber}: آسیب {ship.DamagePercent}٪" +
                 (ship.DamagePercent > 50 ? " — غیرقابل اعزام" : " — قابل اعزام با افت عملکرد"));
         foreach (var op in Database.GetActiveNavalInvasionsByAttacker(c.OwnerId, c.ChatId))
         {
