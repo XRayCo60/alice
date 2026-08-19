@@ -8535,7 +8535,7 @@ partial class Program
         if(s.LightAACount>0)weapons.Add($"{s.LightAACount:0} × توپ {s.LightAACaliber:0.#} میلی‌متری ضدهوایی");
         if(s.MachineGunCount>0)weapons.Add($"{s.MachineGunCount:0} × مسلسل {s.MachineGunCaliber:0.#} میلی‌متری");
         weapons.Add(s.ReconAircraft>0?$"{s.ReconAircraft:0} × هواپیمای شناسایی":"بدون هواپیمای شناسایی");
-        return $"🚢 {s.Name}\nتعداد تولیدشده: {s.UnitsBuilt:0} فروند\nسرعت: {s.Speed:0.#} گره ({s.SpeedKph:0.#} کیلومتر بر ساعت)\n"+
+        return $"🚢 {s.Name}\nسرعت: {s.Speed:0.#} گره ({s.SpeedKph:0.#} کیلومتر بر ساعت)\n"+
                $"خدمه: {s.Crew:N0} نفر\n\n🛡 زره\nکمربند اصلی: {s.Belt:0}mm\nعرشه: {s.DeckMin:0}-{s.DeckMax:0}mm\n"+
                $"برجک‌ها: {s.Turret:0}mm\nبرج فرماندهی: {s.CommandArmor:0}mm\n\n🔫 تسلیحات\n• {string.Join("\n• ",weapons)}";
     }
