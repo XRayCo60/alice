@@ -4920,7 +4920,8 @@ partial class Program
         {
             foreach (var item in locks)
             {
-                await item.WaitAsync(ct);
+                if (!await item.WaitAsync(TimeSpan.FromSeconds(30), ct))
+                    throw new TimeoutException("Timed out waiting for a country mutation lock.");
                 acquired.Add(item);
             }
             return acquired;
@@ -4955,6 +4956,7 @@ partial class Program
             Interlocked.Decrement(ref activeUpdateHandlers);
             return;
         }
+        long updateStartedMs = Environment.TickCount64;
         try
         {
             if (update.Type == UpdateType.CallbackQuery && update.CallbackQuery != null)
@@ -4969,7 +4971,13 @@ partial class Program
                 }
 
                 var l = GetUserLock(cbUid);
-                await l.WaitAsync(ct);
+                if (!await l.WaitAsync(TimeSpan.FromSeconds(30), ct))
+                {
+                    Console.WriteLine($"[UPDATE LOCK TIMEOUT] callback user={cbUid} data={update.CallbackQuery.Data}");
+                    try { await bot.AnswerCallbackQueryAsync(update.CallbackQuery.Id,
+                        "⚠️ عملیات قبلی هنوز در حال پردازش است؛ دوباره تلاش کنید.", showAlert: true, cancellationToken: ct); } catch { }
+                    return;
+                }
                 List<SemaphoreSlim>? callbackCountryLocks = null;
                 try
                 {
@@ -5001,7 +5009,12 @@ partial class Program
             incomingCtx.Value = new MsgContext { UserId = user.Id, ChatId = msg.Chat.Id, MessageId = msg.MessageId };
             long uid = user.Id;
             var lk = GetUserLock(uid);
-            await lk.WaitAsync(ct);
+            if (!await lk.WaitAsync(TimeSpan.FromSeconds(30), ct))
+            {
+                Console.WriteLine($"[UPDATE LOCK TIMEOUT] message user={uid} chat={msg.Chat.Id}");
+                try { await SendTemp(msg.Chat.Id, "⚠️ عملیات قبلی هنوز در حال پردازش است؛ کمی بعد دوباره تلاش کنید.", ct: ct); } catch { }
+                return;
+            }
             try
             {
                 bool isPrivate = msg.Chat.Type == ChatType.Private;
@@ -5033,10 +5046,17 @@ partial class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex.Message);
+            string kind = update.CallbackQuery?.Data ?? update.Message?.Text ?? update.Type.ToString();
+            Console.WriteLine($"[UPDATE ERR] update={update.Id} kind={kind}\n{ex}");
         }
         finally
         {
+            long elapsedMs = Environment.TickCount64 - updateStartedMs;
+            if (elapsedMs >= 5_000)
+            {
+                string kind = update.CallbackQuery?.Data ?? update.Message?.Text ?? update.Type.ToString();
+                Console.WriteLine($"[SLOW UPDATE] update={update.Id} elapsed={elapsedMs}ms kind={kind}");
+            }
             Interlocked.Decrement(ref activeUpdateHandlers);
         }
     }
@@ -8508,10 +8528,9 @@ partial class Program
         long ti = (long)ironPer1;
 
         string modelName = bid switch { "Bismarck" => "Bismarck", "Iowa" => "Iowa", "Soyuz" => "Sovetsky Soyuz", _ => bid };
-        bool purchased;
-        var purchaseLocks = await AcquireCountryMutationLocks(cid, new[] { uid }, ct);
-        try { purchased = Database.TryPurchaseBattleship(uid, cid, modelName, tm, ti); }
-        finally { ReleaseCountryMutationLocks(purchaseLocks); }
+        // Group callbacks already hold this country's mutation lock in HandleUpdateAsync.
+        // Acquiring it again here deadlocked because SemaphoreSlim is not re-entrant.
+        bool purchased = Database.TryPurchaseBattleship(uid, cid, modelName, tm, ti);
         if (!purchased)
         {
             await bot.AnswerCallbackQueryAsync(cb.Id,
@@ -8605,10 +8624,8 @@ partial class Program
     {
         if(parts.Length<2||cb.Message==null||!TryParseLong(parts[1],out long unitId))return;
         long uid=cb.From.Id,cid=cb.Message.Chat.Id;
-        bool scrapped;string model;long money,iron;
-        var scrapLocks=await AcquireCountryMutationLocks(cid,new[]{uid},ct);
-        try{scrapped=Database.ScrapBattleshipUnit(unitId,uid,cid,out model,out money,out iron);}
-        finally{ReleaseCountryMutationLocks(scrapLocks);}
+        // The outer group callback already owns the country mutation lock. Do not re-enter it.
+        bool scrapped=Database.ScrapBattleshipUnit(unitId,uid,cid,out string model,out long money,out long iron);
         if(!scrapped)
         {await bot.AnswerCallbackQueryAsync(cb.Id,"❌ اوراق انجام نشد؛ وضعیت ناو یا موجودی تغییر کرده است.",showAlert:true,cancellationToken:ct);return;}
         await bot.AnswerCallbackQueryAsync(cb.Id,"✅ نبردناو اوراق شد.",cancellationToken:ct);
