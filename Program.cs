@@ -631,12 +631,13 @@ static partial class Database
         string eqModels = @"CREATE TABLE IF NOT EXISTS EquipmentModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseModels = @"CREATE TABLE IF NOT EXISTS DefenseModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, DefPct INTEGER NOT NULL DEFAULT 100, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseModelAmounts = @"CREATE TABLE IF NOT EXISTS DefenseModelAmounts(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
+        string defenseConfigurationFlags = @"CREATE TABLE IF NOT EXISTS DefenseConfigurationFlags(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, SoldiersConfigured INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         //  – naval expansion tables
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -705,6 +706,16 @@ static partial class Database
         EnsureColumn(con, "Deployments", "AnnounceMsgId", "INTEGER DEFAULT 0");
         EnsureColumn(con, "DeploymentContributors", "ChatId", "INTEGER DEFAULT 0");
         EnsureColumn(con, "Transfers", "ModelName", "TEXT DEFAULT ''");
+        // Legacy databases used 100% as an implicit default, which made every soldier
+        // unavailable for attack. Only 20..99 can be recognized as explicit old choices;
+        // untouched or ambiguous 100% rows safely fall back to the mandatory 20%.
+        using (var migrateDefenseFlags = con.CreateCommand())
+        {
+            migrateDefenseFlags.CommandText = @"INSERT OR IGNORE INTO DefenseConfigurationFlags
+                (OwnerId,ChatId,SoldiersConfigured)
+                SELECT OwnerId,ChatId,1 FROM Countries WHERE DefSoldierPct BETWEEN 20 AND 99";
+            migrateDefenseFlags.ExecuteNonQuery();
+        }
         using (var backfillContributorChat = con.CreateCommand())
         {
             backfillContributorChat.CommandText = @"UPDATE DeploymentContributors
@@ -988,6 +999,23 @@ static partial class Database
         cmd.Parameters.AddWithValue("@chat", chatId);
         cmd.Parameters.AddWithValue("@cat", category);
         cmd.ExecuteNonQuery();
+    }
+
+    public static bool IsDefenseSoldierConfigured(long ownerId,long chatId)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="SELECT SoldiersConfigured FROM DefenseConfigurationFlags WHERE OwnerId=@o AND ChatId=@c";
+        cmd.Parameters.AddWithValue("@o",ownerId);cmd.Parameters.AddWithValue("@c",chatId);
+        return Convert.ToInt32(cmd.ExecuteScalar()??0)==1;
+    }
+
+    public static void SetDefenseSoldierConfigured(long ownerId,long chatId,bool configured=true)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"INSERT INTO DefenseConfigurationFlags(OwnerId,ChatId,SoldiersConfigured)
+ VALUES(@o,@c,@v) ON CONFLICT(OwnerId,ChatId) DO UPDATE SET SoldiersConfigured=@v";
+        cmd.Parameters.AddWithValue("@o",ownerId);cmd.Parameters.AddWithValue("@c",chatId);
+        cmd.Parameters.AddWithValue("@v",configured?1:0);cmd.ExecuteNonQuery();
     }
 
     public static Dictionary<string, long> GetDefenseModelAmounts(long ownerId, long chatId,
@@ -1975,9 +2003,9 @@ static partial class Database
 
         long dt = ExactDefenseTotal("Tanks", "tanks", c.DefenseTanks);
         long df = ExactDefenseTotal("Planes", "planes", c.DefenseFighters);
-        long ds;
-        if (c.DefSoldierPct > 0) ds = (long)Math.Ceiling(c.Soldiers * (c.DefSoldierPct / 100.0));
-        else ds = c.DefenseSoldiers;
+        int effectiveSoldierPct=IsDefenseSoldierConfigured(ownerId,chatId)
+            ? Math.Clamp(c.DefSoldierPct,20,100) : 20;
+        long ds=(long)Math.Ceiling(c.Soldiers*(effectiveSoldierPct/100.0));
 
         long minTanks = (long)Math.Ceiling(c.Tanks * 0.2);
         long minSoldiers = (long)Math.Ceiling(c.Soldiers * 0.2);
@@ -2027,7 +2055,9 @@ static partial class Database
         db = Math.Clamp(db, minBoats, c.Boats);
         dsb = Math.Clamp(dsb, minSubs, c.Submarines);
 
-        bool needUpdate = dt != c.DefenseTanks || ds != c.DefenseSoldiers || df != c.DefenseFighters || db != c.DefenseBoats || dsb != c.DefenseSubmarines || c.DefTankPct == 0;
+        bool needUpdate = dt != c.DefenseTanks || ds != c.DefenseSoldiers || df != c.DefenseFighters ||
+            db != c.DefenseBoats || dsb != c.DefenseSubmarines || c.DefTankPct == 0 ||
+            c.DefSoldierPct != effectiveSoldierPct;
         if (needUpdate)
         {
             c.DefenseTanks = dt;
@@ -2036,7 +2066,7 @@ static partial class Database
             c.DefenseBoats = db;
             c.DefenseSubmarines = dsb;
             if (c.DefTankPct == 0) c.DefTankPct = 100;
-            if (c.DefSoldierPct == 0) c.DefSoldierPct = 100;
+            c.DefSoldierPct = effectiveSoldierPct;
             if (c.DefFighterPct == 0) c.DefFighterPct = 100;
             UpdateDefenseFull(ownerId, chatId, dt, ds, df, c.DefenseStrategy, c.DefenseTactic, c.DefTankPct, c.DefSoldierPct, c.DefFighterPct);
             // Also update naval defence via full update
@@ -6909,6 +6939,7 @@ partial class Program
                 Database.ReplaceDefenseModelAmounts(uid, sess.AttackChatId, "Tanks", tankMap);
                 Database.ReplaceDefenseModelAmounts(uid, sess.AttackChatId, "Planes", fighterMap);
                 long fighters = sess.DefenseModelAmounts.Sum();
+                Database.SetDefenseSoldierConfigured(uid,sess.AttackChatId,true);
                 Database.UpdateDefenseFull(uid, sess.AttackChatId, sess.DefenseTanks,
                     sess.DefenseSoldiers, fighters, country.DefenseStrategy, country.DefenseTactic,
                     100, sess.DefSoldierPct > 0 ? sess.DefSoldierPct : 20, 100);
@@ -9734,9 +9765,10 @@ partial class Program
 
     internal static long GetAttackAvailableSoldiers(Country c)
     {
-        long mandatory = (long)Math.Ceiling(c.Soldiers * 0.20);
-        long reserved = Math.Clamp(Math.Max(mandatory, c.DefenseSoldiers), 0, c.Soldiers);
-        return Math.Max(0, c.Soldiers - reserved);
+        int percent=Database.IsDefenseSoldierConfigured(c.OwnerId,c.ChatId)
+            ? Math.Clamp(c.DefSoldierPct,20,100) : 20;
+        long reserved=Math.Clamp((long)Math.Ceiling(c.Soldiers*(percent/100.0)),0,c.Soldiers);
+        return Math.Max(0,c.Soldiers-reserved);
     }
 
     internal static List<(string ModelName, long Count)> GetAttackBreakdown(Country c, string resType)
@@ -11907,6 +11939,7 @@ partial class Program
                         i => currentSession.DefenseTankModelAmountsFinal[i], StringComparer.OrdinalIgnoreCase);
                 Database.ReplaceDefenseModelAmounts(uid, cid, "Tanks", tankMap);
                 Database.ReplaceDefenseModelAmounts(uid, cid, "Planes", new Dictionary<string, long>());
+                Database.SetDefenseSoldierConfigured(uid,cid,true);
                 Database.UpdateDefenseFull(uid, cid, defT, ds, 0, c.DefenseStrategy, c.DefenseTactic, 100, pct, 100);
                 EndSession(uid);
                 await bot.AnswerCallbackQueryAsync(cb.Id, $"🪖 {pct}% – ذخیره شد.", cancellationToken: ct);

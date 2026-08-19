@@ -43,7 +43,12 @@ static class AttackSelectionRegressionTests
             Assert(fighters.GetValueOrDefault("P-36")==10&&fighters.GetValueOrDefault("I-16")==20&&fighters.GetValueOrDefault("Bf 109")==10,
                 "fighter attack capacities must be model-exact after defense");
             Assert(fighters.Values.Sum()==40,"exactly ten of fifty fighters must remain in defense");
-            Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"soldier selection must exclude configured 20 percent defense");
+            Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"legacy implicit 100 percent must fall back to the mandatory 20 percent reserve");
+            c.DefenseSoldiers=c.Soldiers;c.DefSoldierPct=100;
+            Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"stale full-defense aggregate must not make all soldiers disappear from attack selection");
+            Database.SetDefenseSoldierConfigured(owner,chat,true);
+            Assert(Program.GetAttackAvailableSoldiers(c)==0,"an explicitly configured 100 percent soldier defense must remain respected");
+            Database.SetDefenseSoldierConfigured(owner,chat,false);
             var weak=new Country{Population=1_000,Soldiers=10,Tanks=0,Planes=0,Welfare=100};
             Assert(!Program.PassesAttackTypePowerRule(c,weak,isNaval:true),"one-quarter rule must still block an undersized naval target");
             Assert(Program.PassesAttackTypePowerRule(c,weak,isNaval:false),"one-quarter rule must never block a ground/air attack");
