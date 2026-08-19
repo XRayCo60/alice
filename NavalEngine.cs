@@ -115,7 +115,12 @@ static class NavalEngine
             return result;
         }
 
+        double attackerRecon = request.AttackerBattleships.Sum(x =>
+            WarEngineV2Core.GetBattleshipSpecByModel(x.Model).ReconAircraft * (1 - x.DamagePercent / 100.0));
+        double defenderRecon = request.DefenderBattleships.Sum(x =>
+            WarEngineV2Core.GetBattleshipSpecByModel(x.Model).ReconAircraft * (1 - x.DamagePercent / 100.0));
         double surpriseChance = request.AttackerTactic == 1 ? 0.58 : 0.18;
+        surpriseChance += Math.Clamp((attackerRecon - defenderRecon) * 0.025, -0.15, 0.15);
         if (request.DefenderStrategy == 1 && request.DefenderTactic == 1) surpriseChance -= 0.28;
         if (request.DefenderStrategy == 1 && request.DefenderTactic == 2) surpriseChance -= 0.13;
         if (request.DefenderStrategy == 2 && request.DefenderTactic == 2) surpriseChance -= 0.05;
@@ -164,10 +169,12 @@ static class NavalEngine
         AllocateLosses(request.DefenderBoats, defenderLossFraction, false, result.DefenderBoatLosses, ref rng);
         AllocateLosses(request.DefenderSubmarines, defenderLossFraction * 0.90, true, result.DefenderSubmarineLosses, ref rng);
 
-        ResolveBattleships(request.AttackerBattleships, defenderEffective, attackerEffective,
+        ResolveBattleships(request.AttackerBattleships, request.DefenderBattleships,
+            request.DefenderBoats, request.DefenderSubmarines, defenderEffective, attackerEffective,
             result.SurpriseSucceeded && request.DefenderStrategy == 2 && request.DefenderTactic == 2,
             result.AttackerBattleships, ref rng);
-        ResolveBattleships(request.DefenderBattleships, attackerEffective, defenderEffective,
+        ResolveBattleships(request.DefenderBattleships, request.AttackerBattleships,
+            request.AttackerBoats, request.AttackerSubmarines, attackerEffective, defenderEffective,
             result.SurpriseSucceeded, result.DefenderBattleships, ref rng);
 
         if (result.AttackerWon)
@@ -215,18 +222,33 @@ static class NavalEngine
     }
 
     static void ResolveBattleships(IEnumerable<NavalBattleshipState> units,
-        double enemyPower, double ownPower, bool tacticalTrap,
-        List<NavalBattleshipOutcome> output, ref Rng rng)
+        IReadOnlyList<NavalBattleshipState> enemyBattleships,
+        IReadOnlyList<NavalModelAmount> enemyBoats,IReadOnlyList<NavalModelAmount> enemySubmarines,
+        double enemyPower,double ownPower,bool tacticalTrap,
+        List<NavalBattleshipOutcome> output,ref Rng rng)
     {
-        double ratio = enemyPower / Math.Max(1, ownPower);
-        foreach (var unit in units)
+        double ratio=enemyPower/Math.Max(1,ownPower);
+        double enemyCaliber=enemyBattleships.Count==0?0:enemyBattleships.Max(x =>
         {
-            double pressure = Math.Clamp(ratio, 0.15, 5.0);
-            int added = (int)Math.Round(rng.Range(7, 22) * Math.Sqrt(pressure) * (tacticalTrap ? 1.25 : 1));
-            int finalDamage = Math.Clamp(unit.DamagePercent + added, 0, 99);
-            bool sinkEligible = ratio >= 3.0 && tacticalTrap && unit.DamagePercent >= 50;
-            bool sunk = sinkEligible && unit.DamagePercent + added >= 100 &&
-                        rng.NextD() < Math.Clamp(0.20 + (ratio - 3) * 0.15, 0.20, 0.75);
+            var s=WarEngineV2Core.GetBattleshipSpecByModel(x.Model);
+            return s.MainCaliber*(1-0.70*Math.Clamp(x.DamagePercent/100.0,0,1));
+        });
+        double torpedoStrike=enemySubmarines.Sum(x=>x.Count*WarEngineV2Core.GetSubSpecByModel(x.Model).Torpedo)+
+            enemyBoats.Sum(x=>x.Count*WarEngineV2Core.GetBoatSpecByModel(x.Model).Torpedo*0.55);
+        foreach(var unit in units)
+        {
+            var target=WarEngineV2Core.GetBattleshipSpecByModel(unit.Model);
+            double existing=Math.Clamp(unit.DamagePercent/100.0,0,1);
+            double effectiveBelt=target.Belt*(1-0.35*existing);
+            double gunPenetration=enemyCaliber<=0?0:1/(1+Math.Exp(-(enemyCaliber-effectiveBelt*0.90)/55.0));
+            double torpedoPenetration=Math.Clamp(torpedoStrike/Math.Max(1,effectiveBelt*4.0),0,1);
+            double penetration=Math.Clamp(gunPenetration*0.68+torpedoPenetration*0.32,0.08,1);
+            double pressure=Math.Clamp(ratio,0.15,5.0);
+            int added=(int)Math.Round(rng.Range(7,22)*Math.Sqrt(pressure)*(0.55+penetration*0.75)*(tacticalTrap?1.25:1));
+            int finalDamage=Math.Clamp(unit.DamagePercent+added,0,99);
+            bool sinkEligible=ratio>=3.0&&tacticalTrap&&unit.DamagePercent>=50&&penetration>=0.55;
+            bool sunk=sinkEligible&&unit.DamagePercent+added>=100&&
+                        rng.NextD()<Math.Clamp(0.20+(ratio-3)*0.15,0.20,0.75);
             output.Add(new NavalBattleshipOutcome
             {
                 UnitId = unit.UnitId,
@@ -238,43 +260,50 @@ static class NavalEngine
         }
     }
 
-    static void BuildReports(NavalBattleRequest q, NavalBattleResult r,
-        double attackPower, double defensePower)
+    static void BuildReports(NavalBattleRequest q,NavalBattleResult r,double attackPower,double defensePower)
     {
-        string outcome = r.Outcome switch
+        string outcome=r.Outcome switch
+        {NavalOutcomeKind.EmptyBaseVictory=>"⚓ پیروزی در حمله به پایگاه خالی",NavalOutcomeKind.AttackerDecisiveNavalVictory=>$"🏆 پیروزی دریایی قاطع {q.AttackerName}",
+         NavalOutcomeKind.AttackerNavalVictory=>$"⚓ پیروزی دریایی {q.AttackerName}",NavalOutcomeKind.Stalemate=>"⚖️ نبرد دریایی بدون برنده قاطع",_=>$"🛡 پیروزی دریایی {q.DefenderName}"};
+        string tactic=q.AttackerTactic==1?"حمله غافلگیرانه به پایگاه دریایی":"کشاندن ناوگان به نبرد تعیین‌کننده";
+        string defense=(q.DefenderStrategy,q.DefenderTactic) switch
+        {(1,1)=>"استحکامات، توپخانه ساحلی و میدان مین",(1,2)=>"خروج سریع ناوگان و ضدحمله",(2,1)=>"حمله و عقب‌نشینی",_=>"کمین دریایی"};
+        string Models(IEnumerable<NavalModelAmount> units)
         {
-            NavalOutcomeKind.EmptyBaseVictory => "⚓ پیروزی در حمله به پایگاه خالی",
-            NavalOutcomeKind.AttackerDecisiveNavalVictory => $"🏆 پیروزی دریایی قاطع {q.AttackerName}",
-            NavalOutcomeKind.AttackerNavalVictory => $"⚓ پیروزی دریایی {q.AttackerName}",
-            NavalOutcomeKind.Stalemate => "⚖️ نبرد دریایی بدون برنده قاطع",
-            _ => $"🛡 پیروزی دریایی {q.DefenderName}"
-        };
-        string tactic = q.AttackerTactic == 1
-            ? "حمله غافلگیرانه به پایگاه دریایی" : "نبرد تعیین‌کننده";
-        string defense = (q.DefenderStrategy, q.DefenderTactic) switch
-        {
-            (1, 1) => "استحکامات، توپخانه ساحلی و میدان مین",
-            (1, 2) => "خروج سریع ناوگان و ضدحمله",
-            (2, 1) => "حمله و عقب‌نشینی",
-            _ => "کمین دریایی"
-        };
-        long aBoat = r.AttackerBoatLosses.Values.Sum(), aSub = r.AttackerSubmarineLosses.Values.Sum();
-        long dBoat = r.DefenderBoatLosses.Values.Sum(), dSub = r.DefenderSubmarineLosses.Values.Sum();
-        int aSunk = r.AttackerBattleships.Count(x => x.Sunk), dSunk = r.DefenderBattleships.Count(x => x.Sunk);
-        string surprise = r.SurpriseSucceeded ? "موفق" : "ناموفق";
-        r.AttackerReport = $"⚔️ گزارش نبرد دریایی — {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n" +
-            $"🎯 تاکتیک: {tactic}\n🛡 دفاع دشمن: {defense}\n🔎 غافلگیری: {surprise}\n" +
-            $"📊 موفقیت: {r.SuccessPercent}٪ | قدرت آغازین: {attackPower:F0} برابر {defensePower:F0}\n" +
-            $"🔻 تلفات شما: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n" +
-            $"🔻 تلفات دشمن: {dBoat:N0} قایق، {dSub:N0} زیردریایی، {dSunk} نبردناو\n" +
+            string text=string.Join("، ",units.Where(x=>x.Count>0).Select(x=>$"{x.Model} ×{x.Count:N0}"));
+            return text.Length>0?text:"ندارد";
+        }
+        string Losses(IReadOnlyDictionary<string,long> losses)=>losses.Count==0?"بدون تلفات":string.Join("، ",losses.Select(x=>$"{x.Key} ×{x.Value:N0}"));
+        string ShipSpecs(IEnumerable<NavalBattleshipState> ships)=>string.Join("\n",ships.Select(x=>
+        {var s=WarEngineV2Core.GetBattleshipSpecByModel(x.Model);return $"• {s.Name} #{x.UnitId}: {s.MainGuns:0}×{s.MainCaliber:0.#}mm | زره {s.Belt:0}/{s.DeckMin:0}-{s.DeckMax:0}/{s.Turret:0}mm | سرعت {s.Speed:0.#}kn | شناسایی {s.ReconAircraft:0} | آسیب {x.DamagePercent}%";}));
+        string ShipDamage(IEnumerable<NavalBattleshipOutcome> ships)=>!ships.Any()?"ندارد":string.Join("، ",ships.Select(x=>x.Sunk?$"{x.Model} #{x.UnitId}: غرق شد":$"{x.Model} #{x.UnitId}: {x.PreviousDamage}%→{x.FinalDamage}%"));
+        string phase=r.EmptyBase?"پایگاه بدون ناوگان رزمی مؤثر تصرف شد.":r.SurpriseSucceeded?
+            "شناسایی مهاجم مسیر ورود را باز کرد و موج نخست آتش پیش از آرایش کامل مدافع فرود آمد.":
+            "مدافع حمله را کشف کرد؛ ناوگان‌ها پس از آرایش وارد تبادل آتش و اژدر شدند.";
+        long aBoat=r.AttackerBoatLosses.Values.Sum(),aSub=r.AttackerSubmarineLosses.Values.Sum();
+        long dBoat=r.DefenderBoatLosses.Values.Sum(),dSub=r.DefenderSubmarineLosses.Values.Sum();
+        int aSunk=r.AttackerBattleships.Count(x=>x.Sunk),dSunk=r.DefenderBattleships.Count(x=>x.Sunk);
+        string aSpecs=ShipSpecs(q.AttackerBattleships),dSpecs=ShipSpecs(q.DefenderBattleships);
+        r.AttackerReport=$"⚔️ گزارش عملیات دریایی — {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n━━━━━━━━━━━━━━━━━━\n"+
+            $"🎯 دکترین مهاجم: {tactic}\n🛡 دکترین مدافع: {defense}\n🔎 غافلگیری: {(r.SurpriseSucceeded?"موفق":"ناموفق")}\n"+
+            $"📐 قدرت مؤثر آغازین: {attackPower:F0} ↔ {defensePower:F0} | موفقیت {r.SuccessPercent}%\n\n📜 روند نبرد:\n• {phase}\n"+
+            $"• قایق‌های مهاجم: {Models(q.AttackerBoats)}\n• زیردریایی‌های مهاجم: {Models(q.AttackerSubmarines)}\n"+
+            (aSpecs.Length>0?$"\n🚢 مشخصات نبردناوهای مهاجم:\n{aSpecs}\n":"")+
+            $"\n📊 خسارات مدل‌به‌مدل:\n🔻 قایق خودی: {Losses(r.AttackerBoatLosses)}\n🔻 زیردریایی خودی: {Losses(r.AttackerSubmarineLosses)}\n"+
+            $"🔻 قایق دشمن: {Losses(r.DefenderBoatLosses)}\n🔻 زیردریایی دشمن: {Losses(r.DefenderSubmarineLosses)}\n"+
+            $"🚢 وضعیت نبردناو خودی: {ShipDamage(r.AttackerBattleships)}\n🚢 وضعیت نبردناو دشمن: {ShipDamage(r.DefenderBattleships)}\n"+
             $"💰 غنیمت: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
-        r.DefenderReport = $"🛡 گزارش دفاع دریایی — {q.DefenderName}\n{outcome}\n" +
-            $"🎯 حمله دشمن: {tactic}\n🛡 آرایش شما: {defense}\n" +
-            $"🔻 تلفات شما: {dBoat:N0} قایق، {dSub:N0} زیردریایی، {dSunk} نبردناو\n" +
-            $"🔻 تلفات دشمن: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n" +
+        r.DefenderReport=$"🛡 گزارش دفاع دریایی — {q.DefenderName} برابر {q.AttackerName}\n{outcome}\n━━━━━━━━━━━━━━━━━━\n"+
+            $"🎯 حمله دشمن: {tactic}\n🛡 آرایش دفاعی: {defense}\n🔎 کشف حمله: {(r.SurpriseSucceeded?"دیرهنگام":"به‌موقع")}\n"+
+            $"📐 قدرت مؤثر: {defensePower:F0} برابر {attackPower:F0}\n• {phase}\n"+
+            $"• قایق‌های شما: {Models(q.DefenderBoats)}\n• زیردریایی‌های شما: {Models(q.DefenderSubmarines)}\n"+
+            (dSpecs.Length>0?$"\n🚢 مشخصات نبردناوهای شما:\n{dSpecs}\n":"")+
+            $"\n🔻 تلفات قایق شما: {Losses(r.DefenderBoatLosses)}\n🔻 تلفات زیردریایی شما: {Losses(r.DefenderSubmarineLosses)}\n"+
+            $"🚢 وضعیت نبردناوهای شما: {ShipDamage(r.DefenderBattleships)}\n🔻 دشمن: {aBoat:N0} قایق، {aSub:N0} زیردریایی، {aSunk} نبردناو\n"+
             $"💸 منابع ازدست‌رفته: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
-        r.GroupAnnouncement = $"📰 نبرد دریایی!\n⚓ {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n" +
-            $"📊 موفقیت مهاجم: {r.SuccessPercent}٪\n" +
-            $"💀 مهاجم: {aBoat}🚤 {aSub}⚓ {aSunk}🚢 | مدافع: {dBoat}🚤 {dSub}⚓ {dSunk}🚢";
+        r.GroupAnnouncement=$"📰 نبرد دریایی\n⚓ {q.AttackerName} علیه {q.DefenderName}\n{outcome}\n"+
+            $"🎯 {tactic} ↔ {defense}\n📊 موفقیت مهاجم: {r.SuccessPercent}%\n"+
+            $"💀 مهاجم: {aBoat}🚤 {aSub}⚓ {aSunk}🚢 | مدافع: {dBoat}🚤 {dSub}⚓ {dSunk}🚢\n"+
+            $"💰 غنیمت: {r.LootMoney:N0} پول، {r.LootIron:N0} آهن";
     }
 }

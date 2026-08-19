@@ -1474,6 +1474,29 @@ static partial class Database
         cmd.ExecuteNonQuery();
     }
 
+    public static bool TryUpgradeMineWithRoyal(long ownerId,long chatId,int expectedLevel,int targetLevel,int royalCost)
+    {
+        if ((targetLevel != 6 && targetLevel != 7) || targetLevel != expectedLevel + 1 || royalCost <= 0)
+            return false;
+        using var con=OpenCon();using var transaction=con.BeginTransaction();
+        using(var debit=con.CreateCommand())
+        {
+            debit.Transaction=transaction;
+            debit.CommandText="UPDATE RoyalCoins SET Amount=Amount-@cost WHERE OwnerId=@owner AND Amount>=@cost";
+            debit.Parameters.AddWithValue("@cost",royalCost);debit.Parameters.AddWithValue("@owner",ownerId);
+            if(debit.ExecuteNonQuery()!=1){transaction.Rollback();return false;}
+        }
+        using(var upgrade=con.CreateCommand())
+        {
+            upgrade.Transaction=transaction;
+            upgrade.CommandText="UPDATE Countries SET MineLevel=@target WHERE OwnerId=@owner AND ChatId=@chat AND MineLevel=@expected";
+            upgrade.Parameters.AddWithValue("@target",targetLevel);upgrade.Parameters.AddWithValue("@expected",expectedLevel);
+            upgrade.Parameters.AddWithValue("@owner",ownerId);upgrade.Parameters.AddWithValue("@chat",chatId);
+            if(upgrade.ExecuteNonQuery()!=1){transaction.Rollback();return false;}
+        }
+        transaction.Commit();return true;
+    }
+
     public static void DeleteCountry(long ownerId, long chatId)
     {
         // Settle every related deployment before removing the country. Deleting the parent
@@ -2293,6 +2316,24 @@ static partial class Database
         cmd.Parameters.AddWithValue("@ms", t.ArriveAtMs);
         cmd.Parameters.AddWithValue("@notif", t.Notified);
         return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    public static (long Boats,long Submarines,long Battleships) GetOutgoingNavalTransfers(long ownerId,long chatId)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"SELECT
+ COALESCE(SUM(CASE WHEN ResourceType='boats' THEN Amount ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN ResourceType='submarines' THEN Amount ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN ResourceType='battleships' THEN Amount ELSE 0 END),0)
+ FROM Transfers WHERE SenderId=@owner AND ChatId=@chat";
+        cmd.Parameters.AddWithValue("@owner",ownerId);cmd.Parameters.AddWithValue("@chat",chatId);
+        using var reader=cmd.ExecuteReader();reader.Read();return(reader.GetInt64(0),reader.GetInt64(1),reader.GetInt64(2));
+    }
+
+    public static long GetOutgoingTransferAmount(long ownerId,long chatId,string resourceType)
+    {
+        var naval=GetOutgoingNavalTransfers(ownerId,chatId);
+        return resourceType switch{"boats"=>naval.Boats,"submarines"=>naval.Submarines,"battleships"=>naval.Battleships,_=>0};
     }
 
     public static long GetBattleshipCapacityUsed(long ownerId, long chatId, bool includeIncoming = true)
@@ -4182,6 +4223,12 @@ partial class Program
     static readonly int[] FactoryUpgradeCost = { 0, 5, 12, 30, 80 };
     static readonly int[] PortUpgradeCost = { 0, 13, 25, 50, 75 };
     static readonly int[] MineUpgradeCost = { 0, 5, 12, 30, 80, 0, 0 };
+    // Levels 6 and 7 are premium upgrades. These prices are keyed by TARGET level;
+    // existing level-6/7 countries are never migrated, charged again, or downgraded.
+    static readonly IReadOnlyDictionary<int, int> MineRoyalUpgradeCost =
+        new Dictionary<int, int> { [6] = 5, [7] = 10 };
+    static int MineRoyalCostForTargetLevel(int targetLevel) =>
+        MineRoyalUpgradeCost.TryGetValue(targetLevel, out int cost) ? cost : 0;
     static readonly double[] FactoryIncome = { 0, 1, 2, 5, 15, 30 };
     static readonly double[] PortIncome = { 0, 1, 2, 4, 8, 15 };
     static readonly double[] MineIncome = { 0, 1, 2, 5, 15, 30, 40, 50 };
@@ -4363,6 +4410,12 @@ partial class Program
         if (args.Length > 0 && args[0].Equals("navaltest", StringComparison.OrdinalIgnoreCase))
         {
             NavalRegressionTests.Run();
+            return;
+        }
+        if (args.Length > 0 && args[0].Equals("alltests", StringComparison.OrdinalIgnoreCase))
+        {
+            NavalRegressionTests.Run();
+            EconomyRegressionTests.Run();
             return;
         }
         if (string.IsNullOrWhiteSpace(BOT_TOKEN))
@@ -6197,7 +6250,7 @@ partial class Program
             string portInfo = country.PortLevel < 4 ? "\n⚠️ برای ساخت نبردناو بندر سطح ۴ لازم است" : "";
             // Keep the purchase menu read-only and fast. Per-ship damage is loaded only
             // when the user opens repair/scrap details, not on every «خرید ناو» command.
-            string dmgInfo = $"\n🚢 نبردناو حاضر در بندر: {country.Battleships}/3";
+            string dmgInfo = $"\n🚢 نبردناو: کل {country.Battleships+country.BattleshipsAtSea}/3 | آماده در بندر {country.Battleships}";
             string seaInfo = (country.BoatsAtSea + country.SubmarinesAtSea + country.BattleshipsAtSea) > 0 ? $"\n🌊 در دریا: {country.BoatsAtSea}🚤 {country.SubmarinesAtSea}⚓ {country.BattleshipsAtSea}🚢" : "";
             var navalKb = country.Faction switch
             {
@@ -7924,7 +7977,7 @@ partial class Program
 
         if (usesRoyalCoins)
         {
-            int royalCost = next == 6 ? 5 : 10;
+            int royalCost = MineRoyalCostForTargetLevel(next);
             long royalBalance = Database.GetRoyalCoins(uid);
 
             priceText = $"{royalCost:N0} رویال‌کوین 💎";
@@ -8060,7 +8113,7 @@ partial class Program
 
         if (usesRoyalCoins)
         {
-            royalCost = newLevel == 6 ? 5 : 10;
+            royalCost = MineRoyalCostForTargetLevel(newLevel);
             long royalBalance = Database.GetRoyalCoins(uid);
 
             if (royalBalance < royalCost)
@@ -8076,22 +8129,12 @@ partial class Program
                 return;
             }
 
-            Database.AddRoyalCoins(uid, -royalCost);
-
-            try
+            if (!Database.TryUpgradeMineWithRoyal(uid, chatId, cur, newLevel, royalCost))
             {
-                Database.UpdateBuildingLevel(
-                    uid,
-                    chatId,
-                    bt,
-                    newLevel,
-                    0
-                );
-            }
-            catch
-            {
-                Database.AddRoyalCoins(uid, royalCost);
-                throw;
+                await bot.AnswerCallbackQueryAsync(cb.Id,
+                    "❌ ارتقای معدن انجام نشد؛ سطح یا موجودی رویال تغییر کرده است.",
+                    showAlert: true, cancellationToken: ct);
+                return;
             }
         }
         else
@@ -8172,7 +8215,7 @@ partial class Program
             if (nextUsesRoyal)
             {
                 int nextRoyalCost =
-                    followingLevel == 6 ? 5 : 10;
+                    MineRoyalCostForTargetLevel(followingLevel);
 
                 nextPrice =
                     $"{nextRoyalCost:N0} رویال‌کوین";
@@ -8479,18 +8522,28 @@ partial class Program
         await bot.AnswerCallbackQueryAsync(cb.Id, "✅", cancellationToken: ct);
     }
 
+    static string FormatBattleshipTechnicalSpec(string modelKey)
+    {
+        string model=modelKey=="Soyuz"?"Sovetsky Soyuz":modelKey;
+        var s=WarEngineV2Core.GetBattleshipSpecByModel(model);
+        var weapons=new List<string>{$"{s.MainGuns:0} × توپ {s.MainCaliber:0.#} میلی‌متری",$"{s.SecGuns:0} × توپ {s.SecondaryCaliber:0.#} میلی‌متری"};
+        if(s.HeavyAACount>0)weapons.Add($"{s.HeavyAACount:0} × توپ {s.HeavyAACaliber:0.#} میلی‌متری ضدهوایی");
+        if(s.MediumAACount>0)weapons.Add($"{s.MediumAACount:0} × توپ {s.MediumAACaliber:0.#} میلی‌متری ضدهوایی");
+        if(s.LightAACount>0)weapons.Add($"{s.LightAACount:0} × توپ {s.LightAACaliber:0.#} میلی‌متری ضدهوایی");
+        if(s.MachineGunCount>0)weapons.Add($"{s.MachineGunCount:0} × مسلسل {s.MachineGunCaliber:0.#} میلی‌متری");
+        weapons.Add(s.ReconAircraft>0?$"{s.ReconAircraft:0} × هواپیمای شناسایی":"بدون هواپیمای شناسایی");
+        return $"🚢 {s.Name}\nتعداد تولیدشده: {s.UnitsBuilt:0} فروند\nسرعت: {s.Speed:0.#} گره ({s.SpeedKph:0.#} کیلومتر بر ساعت)\n"+
+               $"خدمه: {s.Crew:N0} نفر\n\n🛡 زره\nکمربند اصلی: {s.Belt:0}mm\nعرشه: {s.DeckMin:0}-{s.DeckMax:0}mm\n"+
+               $"برجک‌ها: {s.Turret:0}mm\nبرج فرماندهی: {s.CommandArmor:0}mm\n\n🔫 تسلیحات\n• {string.Join("\n• ",weapons)}";
+    }
+
     static async Task HandleBattleshipInfoCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
     {
         if (parts.Length != 3 || cb.Message == null) return;
         long uid = cb.From.Id;
         string bid = parts[2];
-        string info = bid switch
-        {
-            "Bismarck" => "🇩🇪 Bismarck\n⚓ تعداد ساخته شده: 2\n⚡ سرعت: 30 گره (56 km/h)\n👥 خدمه: 2,092 نفر\n🛡 زره: کمربند اصلی 320mm، عرشه 100–120mm، برجک‌ها 360mm، برج فرماندهی 350mm\n🔫 تسلیحات: 8x 380mm (4 برجک دوتایی)، 12x 150mm، 16x 105mm ضدهوایی، 16x 37mm ضدهوایی، 12x 20mm ضدهوایی، 4x Arado Ar 196 شناسایی\n💰 هر 1: 50K پول + 30K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
-            "Iowa" => "🇺🇸 Iowa\n⚡ سرعت: 28 گره (52 km/h)\n👥 خدمه: 1,800 نفر\n🛡 زره: کمربند اصلی 305mm، عرشه 140mm، برجک‌ها 406mm، برج فرماندهی 373mm\n🔫 تسلیحات: 9x 406mm (3 برجک سه‌تایی)، 20x 127mm دو منظوره، 16x 28mm ضدهوایی، 18x 12.7mm مسلسل، 3x Vought OS2U Kingfisher شناسایی\n💰 هر 1: 50K پول + 40K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
-            "Soyuz" => "🇷🇺 Sovetsky Soyuz\n⚓ تعداد ساخته شده: 4\n⚡ سرعت: 23 گره (43 km/h)\n👥 خدمه: 1,220 نفر\n🛡 زره: کمربند اصلی 225mm، عرشه 50–75mm، برجک‌ها 203mm، برج فرماندهی 254mm\n🔫 تسلیحات: 12x 305mm (4 برجک سه‌تایی)، 16x 120mm، 6x 76.2mm ضدهوایی، 6x 37mm ضدهوایی، 12x 12.7mm مسلسل\n💰 هر 1: 45K پول + 25K آهن\n⚠️ نیاز بندر سطح 4، حداکثر 3 عدد",
-            _ => "نبردناو ناشناخته"
-        };
+        string price=bid switch{"Bismarck"=>"50K پول + 30K آهن","Iowa"=>"50K پول + 40K آهن","Soyuz"=>"45K پول + 25K آهن",_=>"نامشخص"};
+        string info=FormatBattleshipTechnicalSpec(bid)+$"\n\n💰 هزینه ساخت: {price}\n⚠️ نیازمند بندر سطح ۴؛ سقف مالکیت، مأموریت و محموله‌های درراه روی‌هم ۳ فروند";
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
         var kb = new InlineKeyboardMarkup(new[]
         {
@@ -9113,6 +9166,20 @@ partial class Program
         }
     }
 
+    internal static string BuildNavalInventorySummary(Country c)
+    {
+        var outgoing=Database.GetOutgoingNavalTransfers(c.OwnerId,c.ChatId);
+        long boatsTransfer=outgoing.Boats,subsTransfer=outgoing.Submarines,shipsTransfer=outgoing.Battleships;
+        long boatsTotal=c.Boats+c.BoatsAtSea+boatsTransfer;
+        long subsTotal=c.Submarines+c.SubmarinesAtSea+subsTransfer;
+        long shipsTotal=c.Battleships+c.BattleshipsAtSea+shipsTransfer;
+        string Segment(long ready,long mission,long transfer) =>
+            $"آماده {ready:N0}"+(mission>0?$"، مأموریت {mission:N0}":"")+(transfer>0?$"، انتقال {transfer:N0}":"");
+        return $"🚤 قایق: کل {boatsTotal:N0} ({Segment(c.Boats,c.BoatsAtSea,boatsTransfer)})\n"+
+               $"⚓ زیردریایی: کل {subsTotal:N0} ({Segment(c.Submarines,c.SubmarinesAtSea,subsTransfer)})\n"+
+               $"🚢 نبردناو: کل {shipsTotal:N0}/3 ({Segment(c.Battleships,c.BattleshipsAtSea,shipsTransfer)})";
+    }
+
     static async Task SendCountryInfo(long chatId, Country c, CancellationToken ct)
     {
         double bInc = CalcBuildingMoney(c);
@@ -9125,8 +9192,7 @@ partial class Program
         string status = c.Besieged switch { 2 => "🆘 بحرانی", 1 => "⚠️ تحت محاصره", _ => "🏛 باثبات" };
         long mp = CalcManpower(c);
         string crisis = c.Besieged >= 2 ? "🆘 بحرانی! (۵۰٪ درآمد، قفل سطح ۴-۵)\n\n" : "";
-        // Naval info for وضعیت کشور
-        string navalLine = $"🚤 قایق: {c.Boats}{(c.BoatsAtSea>0 ? $" (در دریا {c.BoatsAtSea})" : "")} | ⚓ زیردریایی: {c.Submarines}{(c.SubmarinesAtSea>0 ? $" در دریا {c.SubmarinesAtSea}" : "")} | 🚢 نبردناو: {c.Battleships}/3{(c.BattleshipsAtSea>0 ? $" در دریا {c.BattleshipsAtSea}" : "")}";
+        string navalLine = BuildNavalInventorySummary(c);
         string info = crisis + $"🏳️ کشور: {c.Name}\n👤 مالک: {c.OwnerName}\n{status}\n⚡ مان‌پاور: {mp / 1000.0:F1}K\n\n" +
             $"💰 پول: {(c.Money / 1000.0):F1}K\n🏭 ساختمان: +{bInc / 1000.0:F1}K\n🧾 مالیات: +{tInc / 1000.0:F1}K ({c.TaxRate}%)\n\n" +
             $"🔩 آهن: {(c.Iron / 1000.0):F1}K\n⛏️ معدن: +{iInc / 1000.0:F1}K\n\n" +
@@ -11507,7 +11573,7 @@ partial class Program
 
             "📊 کل موجودی کشور\n" +
             $"تانک: {country.Tanks:N0} | سرباز: {country.Soldiers:N0} | جنگنده: {country.Planes:N0}\n" +
-            $"قایق: {country.Boats:N0} (در دریا {country.BoatsAtSea}) | زیردریایی: {country.Submarines:N0} (در دریا {country.SubmarinesAtSea}) | نبردناو: {country.Battleships}/3 (در دریا {country.BattleshipsAtSea})";
+            BuildNavalInventorySummary(country);
 
         bool isPrivate = sendTo == ownerId;
 

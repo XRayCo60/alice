@@ -165,14 +165,36 @@ static class WarEngineV2Core
     public readonly struct BattleshipSpec
     {
         public readonly string Name;
-        public readonly float Speed, Belt, Deck, Turret, MainGuns, SecGuns, AAGuns, Crew, UnitsBuilt;
-        public readonly float Power;
-        public BattleshipSpec(string n, float speed, float belt, float deck, float turret, float mainGuns, float sec, float aa, float crew, float built, float power)
-        { Name=n; Speed=speed; Belt=belt; Deck=deck; Turret=turret; MainGuns=mainGuns; SecGuns=sec; AAGuns=aa; Crew=crew; UnitsBuilt=built; Power=power; }
+        public readonly float Speed, SpeedKph, Belt, DeckMin, DeckMax, Deck, Turret, CommandArmor;
+        public readonly float MainGuns, MainCaliber, SecGuns, SecondaryCaliber;
+        public readonly float HeavyAACount, HeavyAACaliber, MediumAACount, MediumAACaliber;
+        public readonly float LightAACount, LightAACaliber, MachineGunCount, MachineGunCaliber;
+        public readonly float AAGuns, ReconAircraft, Crew, UnitsBuilt, Power;
+        public BattleshipSpec(string name,float speed,float speedKph,float belt,float deckMin,float deckMax,
+            float turret,float commandArmor,float mainGuns,float mainCaliber,float secondaryCount,float secondaryCaliber,
+            float heavyAaCount,float heavyAaCaliber,float mediumAaCount,float mediumAaCaliber,
+            float lightAaCount,float lightAaCaliber,float machineGunCount,float machineGunCaliber,
+            float reconAircraft,float crew,float unitsBuilt)
+        {
+            Name=name;Speed=speed;SpeedKph=speedKph;Belt=belt;DeckMin=deckMin;DeckMax=deckMax;
+            Deck=(deckMin+deckMax)*0.5f;Turret=turret;CommandArmor=commandArmor;
+            MainGuns=mainGuns;MainCaliber=mainCaliber;SecGuns=secondaryCount;SecondaryCaliber=secondaryCaliber;
+            HeavyAACount=heavyAaCount;HeavyAACaliber=heavyAaCaliber;MediumAACount=mediumAaCount;MediumAACaliber=mediumAaCaliber;
+            LightAACount=lightAaCount;LightAACaliber=lightAaCaliber;MachineGunCount=machineGunCount;MachineGunCaliber=machineGunCaliber;
+            AAGuns=heavyAaCount+mediumAaCount+lightAaCount+machineGunCount;ReconAircraft=reconAircraft;Crew=crew;UnitsBuilt=unitsBuilt;
+            float main=mainGuns*MathF.Pow(mainCaliber/100f,2f);
+            float secondary=secondaryCount*MathF.Pow(secondaryCaliber/100f,2f)*0.35f;
+            float protection=(belt+Deck+turret+commandArmor)/20f;
+            Power=main+secondary+protection+speed+reconAircraft*3f;
+        }
     }
-    static readonly BattleshipSpec BSGermany = new("Bismarck", 30f, 320f, 110f, 360f, 8f, 12f, 44f, 2092f, 2f, 180f);
-    static readonly BattleshipSpec BSUSA     = new("Iowa", 28f, 305f, 140f, 406f, 9f, 20f, 34f, 1800f, 6f, 195f);
-    static readonly BattleshipSpec BSUSSR    = new("Sovetsky Soyuz", 23f, 225f, 62f, 203f, 12f, 16f, 18f, 1220f, 4f, 150f);
+    // Exact technical data supplied for the game; every field participates in naval calculations/reporting.
+    static readonly BattleshipSpec BSGermany = new("Bismarck",30f,56f,320f,100f,120f,360f,350f,
+        8f,380f,12f,150f,16f,105f,16f,37f,12f,20f,0f,0f,4f,2092f,2f);
+    static readonly BattleshipSpec BSUSA = new("Iowa",28f,52f,305f,140f,140f,406f,373f,
+        9f,406f,20f,127f,16f,28f,0f,0f,0f,0f,18f,12.7f,3f,1800f,2f);
+    static readonly BattleshipSpec BSUSSR = new("Sovetsky Soyuz",23f,43f,225f,50f,75f,203f,254f,
+        12f,305f,16f,120f,6f,76.2f,6f,37f,0f,0f,12f,12.7f,0f,1220f,4f);
     static BattleshipSpec BattleshipOf(Faction f) => f==Faction.USA?BSUSA: f==Faction.USSR?BSUSSR:BSGermany;
 
     // Per-model mapping for naval
@@ -2217,16 +2239,21 @@ static class WarEngineV2Core
     static BattleshipSpec BlendBattleshipSpecs(List<(string Model, long Count)> breakdown)
     {
         if (breakdown == null || breakdown.Count == 0) return BSGermany;
-        double total = breakdown.Sum(x => (double)x.Count);
-        if (total <= 0) return BSGermany;
-        double speed=0, belt=0, deck=0, turret=0, main=0, sec=0, aa=0, crew=0, power=0;
-        foreach (var (model, cnt) in breakdown)
+        double total = breakdown.Sum(x => (double)x.Count); if (total <= 0) return BSGermany;
+        double speed=0,kph=0,belt=0,dmin=0,dmax=0,turret=0,command=0,main=0,mainCal=0,sec=0,secCal=0;
+        double haa=0,haaCal=0,maa=0,maaCal=0,laa=0,laaCal=0,mg=0,mgCal=0,recon=0,crew=0,built=0;
+        foreach (var (model,cnt) in breakdown)
         {
-            var spec = GetBattleshipSpecByModel(model);
-            double w = cnt / total;
-            speed+=spec.Speed*w; belt+=spec.Belt*w; deck+=spec.Deck*w; turret+=spec.Turret*w; main+=spec.MainGuns*w; sec+=spec.SecGuns*w; aa+=spec.AAGuns*w; crew+=spec.Crew*w; power+=spec.Power*w;
+            var s=GetBattleshipSpecByModel(model);double w=cnt/total;
+            speed+=s.Speed*w;kph+=s.SpeedKph*w;belt+=s.Belt*w;dmin+=s.DeckMin*w;dmax+=s.DeckMax*w;
+            turret+=s.Turret*w;command+=s.CommandArmor*w;main+=s.MainGuns*w;mainCal+=s.MainCaliber*w;
+            sec+=s.SecGuns*w;secCal+=s.SecondaryCaliber*w;haa+=s.HeavyAACount*w;haaCal+=s.HeavyAACaliber*w;
+            maa+=s.MediumAACount*w;maaCal+=s.MediumAACaliber*w;laa+=s.LightAACount*w;laaCal+=s.LightAACaliber*w;
+            mg+=s.MachineGunCount*w;mgCal+=s.MachineGunCaliber*w;recon+=s.ReconAircraft*w;crew+=s.Crew*w;built+=s.UnitsBuilt*w;
         }
-        return new BattleshipSpec($"Blended({breakdown.Count})", (float)speed, (float)belt, (float)deck, (float)turret, (float)main, (float)sec, (float)aa, (float)crew, 2f, (float)power);
+        return new BattleshipSpec($"Blended({breakdown.Count})",(float)speed,(float)kph,(float)belt,(float)dmin,(float)dmax,
+            (float)turret,(float)command,(float)main,(float)mainCal,(float)sec,(float)secCal,(float)haa,(float)haaCal,
+            (float)maa,(float)maaCal,(float)laa,(float)laaCal,(float)mg,(float)mgCal,(float)recon,(float)crew,(float)built);
     }
 
     static float CalculateNavalStrategyAdvantage(int aStrat, int aTac, int dStrat, int dTac, float aPower, float dPower, BoatSpec aBoat, SubSpec aSub, BattleshipSpec aBS, BoatSpec dBoat, SubSpec dSub, BattleshipSpec dBS, long aBoats, long aSubs, long aBSCount, long dBoats, long dSubs, long dBSCount, int defenderPortLevel, ref XorRng rng)

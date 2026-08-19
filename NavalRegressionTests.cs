@@ -193,6 +193,11 @@ static class NavalRegressionTests
             "defender losses must not exceed deployed units");
         Assert(x.LootMoney <= request.DefenderMoney && x.LootIron <= request.DefenderIron,
             "loot must not exceed defender resources");
+        Assert(x.AttackerReport.Contains("Iowa #1") && x.AttackerReport.Contains("9×406mm") &&
+               x.AttackerReport.Contains("زره 305/140-140/406mm"),
+            "attacker report must expose exact battleship technical data");
+        Assert(x.AttackerReport.Contains("خسارات مدل‌به‌مدل") && x.DefenderReport.Contains("وضعیت نبردناوهای شما"),
+            "naval reports must contain model losses and per-ship damage");
 
         var empty = new NavalBattleRequest
         {

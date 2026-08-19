@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS NavalBattleHistory(
  LootMoney INTEGER NOT NULL DEFAULT 0, LootIron INTEGER NOT NULL DEFAULT 0,
  Report TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS IX_BattleshipUnits_Owner ON BattleshipUnits(OwnerId,ChatId,Status);
+CREATE TRIGGER IF NOT EXISTS TR_Countries_BattleshipCap_Update
+BEFORE UPDATE OF Battleships,BattleshipsAtSea ON Countries
+WHEN (NEW.Battleships+NEW.BattleshipsAtSea)>3
+ AND (NEW.Battleships+NEW.BattleshipsAtSea)>(OLD.Battleships+OLD.BattleshipsAtSea)
+BEGIN SELECT RAISE(ABORT,'battleship capacity exceeds 3'); END;
 ";
         cmd.ExecuteNonQuery();
         EnsureColumn(con, "NavalInvasions", "ScenarioSeed", "INTEGER DEFAULT 0");
