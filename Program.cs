@@ -1989,7 +1989,7 @@ static partial class Database
 
         // Exact per-model defense. A compulsory 20% reserve is repaired with the
         // country's factory model first and foreign equipment only for the remainder.
-        long ExactDefenseTotal(string category, string resourceType, long oldTotal)
+        long ExactDefenseTotal(string category, string resourceType)
         {
             var breakdown = GetEquipmentBreakdownForReconcile(c, resourceType);
             long total = breakdown.Sum(x => x.Count);
@@ -1997,12 +1997,14 @@ static partial class Database
             long mandatory = (long)Math.Ceiling(total * 0.20);
             var saved = GetDefenseModelAmounts(ownerId, chatId, category);
             long selected = breakdown.Sum(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName)));
-            if (saved.Count == 0) selected = Math.Max(mandatory, Math.Min(total, oldTotal));
+            // Old databases stored 100% tank/fighter defense as an implicit default.
+            // Without an explicit per-model map, reserve only the mandatory 20%.
+            if (saved.Count == 0) selected = mandatory;
             return Math.Clamp(selected, mandatory, total);
         }
 
-        long dt = ExactDefenseTotal("Tanks", "tanks", c.DefenseTanks);
-        long df = ExactDefenseTotal("Planes", "planes", c.DefenseFighters);
+        long dt = ExactDefenseTotal("Tanks", "tanks");
+        long df = ExactDefenseTotal("Planes", "planes");
         int effectiveSoldierPct=IsDefenseSoldierConfigured(ownerId,chatId)
             ? Math.Clamp(c.DefSoldierPct,20,100) : 20;
         long ds=(long)Math.Ceiling(c.Soldiers*(effectiveSoldierPct/100.0));
@@ -9745,11 +9747,8 @@ partial class Program
         var saved = Database.GetDefenseModelAmounts(c.OwnerId, c.ChatId, category);
         var selected = models.Select(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName))).ToArray();
 
-        long fallbackTotal = resType == "tanks"
-            ? Math.Max(mandatoryTotal, Math.Min(total, c.DefenseTanks))
-            : Math.Min(total, c.DefenseFighters);
         if (saved.Count == 0)
-            selected = AllocateModelPriority(models, defaultModel, fallbackTotal);
+            selected = AllocateModelPriority(models, defaultModel, mandatoryTotal);
         else if (selected.Sum() < mandatoryTotal)
         {
             // A stale/invalid setup is repaired deterministically: domestic factory model first,
@@ -10835,8 +10834,8 @@ partial class Program
 
     static async Task PromptAttackAirOrRun(long uid,UserSession session,CancellationToken ct)
     {
-        if(session.AttackFighters==0&&session.AttackBombers==0)
-        {await RunAttackBattle(uid,session,ct);return;}
+        // Keep the command sequence stable: tanks → soldiers → fighters → bombers →
+        // air strategy → air tactic. Even a zero-air attack explicitly chooses orders.
         session.Step=SessionStep.AttackWaitingAirStrategy;
         var keyboard=new InlineKeyboardMarkup(new[]{
             new[]{InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی","attack_air_strategy:1")},

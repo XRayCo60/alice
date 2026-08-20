@@ -49,6 +49,17 @@ static class AttackSelectionRegressionTests
             Database.SetDefenseSoldierConfigured(owner,chat,true);
             Assert(Program.GetAttackAvailableSoldiers(c)==0,"an explicitly configured 100 percent soldier defense must remain respected");
             Database.SetDefenseSoldierConfigured(owner,chat,false);
+
+            var legacyArmor=new Country{OwnerId=850,ChatId=chat,Name="LegacyArmor",OwnerName="Legacy",Faction=Faction.USSR,
+                Money=1000,Iron=1000,Population=100_000,Soldiers=1000,Tanks=100,Planes=50,Bombers=0,
+                DefenseTanks=100,DefenseFighters=50,Cities=4};
+            Database.AddCountry(legacyArmor);
+            legacyArmor=Database.GetCountry(850,chat)!;
+            Assert(Program.GetAttackBreakdown(legacyArmor,"tanks").Sum(x=>x.Count)==80,
+                "legacy full tank defense without an explicit model map must fall back to 20 percent");
+            Assert(Program.GetAttackBreakdown(legacyArmor,"planes").Sum(x=>x.Count)==40,
+                "legacy full fighter defense without an explicit model map must fall back to 20 percent");
+
             var weak=new Country{Population=1_000,Soldiers=10,Tanks=0,Planes=0,Welfare=100};
             Assert(!Program.PassesAttackTypePowerRule(c,weak,isNaval:true),"one-quarter rule must still block an undersized naval target");
             Assert(Program.PassesAttackTypePowerRule(c,weak,isNaval:false),"one-quarter rule must never block a ground/air attack");
