@@ -632,12 +632,13 @@ static partial class Database
         string defenseModels = @"CREATE TABLE IF NOT EXISTS DefenseModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, DefPct INTEGER NOT NULL DEFAULT 100, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseModelAmounts = @"CREATE TABLE IF NOT EXISTS DefenseModelAmounts(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseConfigurationFlags = @"CREATE TABLE IF NOT EXISTS DefenseConfigurationFlags(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, SoldiersConfigured INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
+        string botGroupStatus = @"CREATE TABLE IF NOT EXISTS BotGroupStatus(ChatId INTEGER PRIMARY KEY, IsActive INTEGER NOT NULL DEFAULT 1, UpdatedAtMs INTEGER NOT NULL DEFAULT 0);";
         //  – naval expansion tables
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, botGroupStatus, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -2096,6 +2097,28 @@ static partial class Database
         while (reader.Read()) list.Add(ReadCountry(reader));
         return list;
     }
+
+    public static void SetBotGroupActive(long chatId,bool active)
+    {
+        if(chatId>=0)return;
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"INSERT INTO BotGroupStatus(ChatId,IsActive,UpdatedAtMs) VALUES(@chat,@active,@now)
+ ON CONFLICT(ChatId) DO UPDATE SET IsActive=@active,UpdatedAtMs=@now
+ WHERE BotGroupStatus.IsActive!=excluded.IsActive";
+        cmd.Parameters.AddWithValue("@chat",chatId);cmd.Parameters.AddWithValue("@active",active?1:0);
+        cmd.Parameters.AddWithValue("@now",DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());cmd.ExecuteNonQuery();
+    }
+
+    public static bool IsBotGroupActive(long chatId)
+    {
+        if(chatId>=0)return true;
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="SELECT IsActive FROM BotGroupStatus WHERE ChatId=@chat";cmd.Parameters.AddWithValue("@chat",chatId);
+        object? value=cmd.ExecuteScalar();return value==null||value==DBNull.Value||Convert.ToInt32(value)==1;
+    }
+
+    public static List<long> GetUserActiveChatIds(long ownerId) =>
+        GetUserChatIds(ownerId).Where(IsBotGroupActive).ToList();
 
     public static List<long> GetUserChatIds(long ownerId)
     {
@@ -4486,6 +4509,7 @@ partial class Program
             EconomyRegressionTests.Run();
             AttackSelectionRegressionTests.Run();
             StrategicBattleRegressionTests.Run();
+            GroupLifecycleRegressionTests.Run();
             return;
         }
         if (string.IsNullOrWhiteSpace(BOT_TOKEN))
@@ -4725,6 +4749,7 @@ partial class Program
         long arriveAtMs,
         CancellationToken ct)
     {
+        if(!Database.IsBotGroupActive(chatId))return false;
         // Receiver is locked too: battleship capacity (including in-flight transfers) must
         // be checked and reserved atomically against concurrent senders.
         var locks = await AcquireCountryMutationLocks(chatId, new[] { senderId, receiverId }, ct);
@@ -4764,6 +4789,7 @@ partial class Program
         IReadOnlyDictionary<string, long>? fighterModels = null,
         IReadOnlyDictionary<string, long>? bomberModels = null)
     {
+        if(!Database.IsBotGroupActive(deployment.ChatId))return 0;
         await deploymentProcessorLock.WaitAsync(ct);
         List<SemaphoreSlim>? locks = null;
         try
@@ -4798,6 +4824,7 @@ partial class Program
         IReadOnlyDictionary<string, long>? fighterModels = null,
         IReadOnlyDictionary<string, long>? bomberModels = null)
     {
+        if(!Database.IsBotGroupActive(deployment.ChatId))return false;
         await deploymentProcessorLock.WaitAsync(ct);
         List<SemaphoreSlim>? locks = null;
         try
@@ -5022,6 +5049,25 @@ partial class Program
         sessions.TryRemove(uid, out _);
     }
 
+    static long SessionGameChatId(UserSession? session)
+    {
+        if(session==null)return 0;
+        foreach(long id in new[]{session.AttackChatId,session.TransferChatId,session.DeployChatId,session.AllianceChatId,session.ChatId})
+            if(id<0)return id;
+        return 0;
+    }
+
+    static long ResolveCallbackGameChatId(long uid,string? data)
+    {
+        if(sessions.TryGetValue(uid,out var session))
+        {
+            long fromSession=SessionGameChatId(session);if(fromSession!=0)return fromSession;
+        }
+        var parts=(data??"").Split(':');
+        if(parts.Length>1&&long.TryParse(parts[1],out long parsed)&&parsed<0)return parsed;
+        return 0;
+    }
+
     static SemaphoreSlim GetUserLock(long uid) =>
         userLocks.GetOrAdd(uid, _ => new SemaphoreSlim(1, 1));
 
@@ -5073,6 +5119,14 @@ partial class Program
             if (!processedUpdates.Add(update.Id)) return;
             if (processedUpdates.Count > 5000) processedUpdates.Clear();
         }
+        if(update.MyChatMember!=null)
+        {
+            string status=update.MyChatMember.NewChatMember.Status.ToString();
+            bool active=status is not ("Left" or "Kicked");
+            Database.SetBotGroupActive(update.MyChatMember.Chat.Id,active);
+            Console.WriteLine($"[BOT GROUP STATUS] chat={update.MyChatMember.Chat.Id} status={status} active={active}");
+            return;
+        }
         if (Volatile.Read(ref databaseMaintenanceRunning) != 0)
             return;
 
@@ -5094,6 +5148,7 @@ partial class Program
                     (cbChat.Type == ChatType.Group || cbChat.Type == ChatType.Supergroup))
                 {
                     Database.MarkGroupActive(cbChat.Id);
+                    Database.SetBotGroupActive(cbChat.Id,true);
                 }
 
                 var l = GetUserLock(cbUid);
@@ -5107,6 +5162,14 @@ partial class Program
                 List<SemaphoreSlim>? callbackCountryLocks = null;
                 try
                 {
+                    long gameChatId=ResolveCallbackGameChatId(cbUid,update.CallbackQuery.Data);
+                    if(gameChatId!=0&&!Database.IsBotGroupActive(gameChatId))
+                    {
+                        EndSession(cbUid);
+                        try{await bot.AnswerCallbackQueryAsync(update.CallbackQuery.Id,
+                            "⛔ ربات دیگر در گروه این کشور حضور ندارد؛ عملیات خصوصی غیرفعال است.",showAlert:true,cancellationToken:ct);}catch{}
+                        return;
+                    }
                     if (cbChat != null &&
                         (cbChat.Type == ChatType.Group || cbChat.Type == ChatType.Supergroup) &&
                         !(update.CallbackQuery.Data?.StartsWith("dep_", StringComparison.Ordinal) ?? false))
@@ -5150,6 +5213,7 @@ partial class Program
                     (msg.Chat.Type == ChatType.Group || msg.Chat.Type == ChatType.Supergroup))
                 {
                     Database.MarkGroupActive(msg.Chat.Id);
+                    Database.SetBotGroupActive(msg.Chat.Id,true);
                 }
                 if (isPrivate && IsPanelAdmin(uid))
                 {
@@ -6631,6 +6695,13 @@ partial class Program
 
         if (sessions.TryGetValue(uid, out var sess) && sess != null)
         {
+            long gameChatId=SessionGameChatId(sess);
+            if(gameChatId!=0&&!Database.IsBotGroupActive(gameChatId))
+            {
+                EndSession(uid);
+                await SendTemp(uid,"⛔ ربات از گروه مربوط به این کشور حذف شده است؛ هیچ عملیات خصوصی برای آن گروه قابل انجام نیست.",ct:ct);
+                return;
+            }
             if (sess.Step == SessionStep.TransferWaitingAmount)
             {
                 // Single-model transfer (or fallback)
@@ -7728,7 +7799,7 @@ partial class Program
 
         if (txt == "وضعیت دفاع")
         {
-            var chatIds = Database.GetUserChatIds(uid);
+            var chatIds = Database.GetUserActiveChatIds(uid);
             if (chatIds.Count == 0) { await SendTemp(uid, "❌ شما در هیچ گروهی کشور ندارید.", ct: ct); return; }
             if (chatIds.Count == 1) { await SendDefenseStatus(uid, uid, chatIds[0], ct); }
             else
@@ -7743,7 +7814,7 @@ partial class Program
 
         if (txt == "ترنسفر" || txt == "انتقال" || txt == "ارسال محموله" || txt == "ارسال منابع")
         {
-            var chatIds = Database.GetUserChatIds(uid);
+            var chatIds = Database.GetUserActiveChatIds(uid);
             if (chatIds.Count == 0) { await SendTemp(uid, "❌ شما در هیچ گروهی کشور ندارید.", ct: ct); return; }
             if (chatIds.Count == 1)
             {
@@ -7775,7 +7846,7 @@ partial class Program
         if (txt == "صف آرایی تهاجمی" || txt == "صف آرایی دفاعی" || txt == "صف‌آرایی تهاجمی" || txt == "صف‌آرایی دفاعی")
         {
             bool isOff = txt.Contains("تهاجمی");
-            var chatIds = Database.GetUserChatIds(uid);
+            var chatIds = Database.GetUserActiveChatIds(uid);
             if (chatIds.Count == 0) { await SendTemp(uid, "❌ شما کشوری ندارید.", ct: ct); return; }
             if (chatIds.Count == 1)
             {
@@ -7801,7 +7872,7 @@ partial class Program
 
         if (txt == "حمله")
         {
-            var chatIds = Database.GetUserChatIds(uid);
+            var chatIds = Database.GetUserActiveChatIds(uid);
             if (chatIds.Count == 0) { await SendTemp(uid, "❌ شما کشوری ندارید.", ct: ct); return; }
             if (chatIds.Count == 1)
             {
@@ -9856,6 +9927,7 @@ partial class Program
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var t in transfers)
         {
+            if(!Database.IsBotGroupActive(t.ChatId))continue;
             var receiver = Database.GetCountry(t.ReceiverId, t.ChatId);
             var sender = Database.GetCountry(t.SenderId, t.ChatId);
             string sName = sender?.OwnerName ?? $"کاربر {t.SenderId}";
@@ -9939,6 +10011,7 @@ partial class Program
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var d in deployments)
         {
+            if(!Database.IsBotGroupActive(d.ChatId))continue;
             var alliance = Database.GetAllianceById(d.AllianceId);
             string aName = alliance?.Name ?? "اتحاد";
             var tc = Database.GetCountry(d.TargetUserId, d.ChatId);
@@ -10250,13 +10323,13 @@ partial class Program
         attackCounts.Clear();
         transferCounts.Clear();
         lastAssetUpdateAt = DateTime.UtcNow;
-        var countryKeys = Database.GetAllCountries()
-            .Select(c => (c.ChatId, c.OwnerId));
+        var eligibleCountries=Database.GetAllCountries().Where(c=>Database.IsBotGroupActive(c.ChatId)).ToList();
+        var countryKeys = eligibleCountries.Select(c => (c.ChatId, c.OwnerId));
         var mutationLocks = await AcquireCountryMutationLocks(countryKeys, CancellationToken.None);
         var countries = new List<Country>();
         try
         {
-        countries = Database.GetAllCountries();
+        countries = eligibleCountries;
         Console.WriteLine($"[TIMER] RunAssetUpdate started at {DateTime.Now} — {countries.Count} countries");
         foreach (var c in countries)
         {
@@ -10308,6 +10381,12 @@ partial class Program
                         await SendPermanent(cid, updateCaption, ct: CancellationToken.None);
                     sent = true;
                     sentGroups++;
+                }
+                catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 403)
+                {
+                    Database.SetBotGroupActive(cid,false);
+                    Console.WriteLine($"[BOT GROUP STATUS] chat={cid} inactive after forbidden update send");
+                    break;
                 }
                 catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
                 {
@@ -10427,6 +10506,7 @@ partial class Program
         foreach (var inv in Database.GetPendingNavalInvasions(now))
         {
             ct.ThrowIfCancellationRequested();
+            if(!Database.IsBotGroupActive(inv.ChatId))continue;
             Console.WriteLine($"[NAVAL RESOLUTION START] operation={inv.Id} status={inv.Status} due={inv.ArriveAtMs} now={now}");
             var locks = await AcquireCountryMutationLocks(inv.ChatId,
                 new[] { inv.AttackerId, inv.DefenderId }, ct);
@@ -11092,6 +11172,11 @@ partial class Program
         long chatId = sess.AttackChatId;
         long defenderId = sess.AttackTargetId;
         EndSession(uid);
+        if(!Database.IsBotGroupActive(chatId))
+        {
+            await SendTemp(uid,"⛔ ربات دیگر در گروه این کشور حضور ندارد؛ حمله ثبت نشد.",ct:ct);
+            return;
+        }
 
         bool deploymentLockHeld = false;
         var defensiveDeployments = Database.GetActiveDeployments()

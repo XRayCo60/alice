@@ -404,6 +404,7 @@ BEGIN SELECT RAISE(ABORT,'battleship damage outside 0..100'); END;
         IReadOnlyList<NavalModelAmount> boats, IReadOnlyList<NavalModelAmount> subs,
         IReadOnlyList<NavalModelAmount> battleships, int tactic, long nowMs, int travelMinutes)
     {
+        if(!IsBotGroupActive(attacker.ChatId))throw new InvalidOperationException("Bot is no longer active in this group.");
         bool Fits(IReadOnlyList<NavalModelAmount> selected,string resource)
         {
             var available=GetNavalAttackableModels(attacker,resource)
