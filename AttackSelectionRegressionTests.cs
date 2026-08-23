@@ -44,22 +44,19 @@ static class AttackSelectionRegressionTests
                 "fighter attack capacities must be model-exact after defense");
             Assert(fighters.Values.Sum()==40,"exactly ten of fifty fighters must remain in defense");
             Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"legacy implicit 100 percent must fall back to the mandatory 20 percent reserve");
+            var legacyArmor=new Country{OwnerId=802,ChatId=chat,Name="LegacyArmor",OwnerName="LegacyArmor",Faction=Faction.USA,
+                Money=1000,Iron=1000,Population=100_000,Soldiers=10_000,Tanks=100,Planes=50,
+                DefenseTanks=100,DefenseFighters=50,DefenseSoldiers=10_000,DefTankPct=100,DefFighterPct=100,DefSoldierPct=100,Cities=4};
+            Database.AddCountry(legacyArmor);
+            var legacyTankAttack=Program.GetAttackBreakdown(Database.GetCountry(802,chat)!,"tanks");
+            var legacyPlaneAttack=Program.GetAttackBreakdown(Database.GetCountry(802,chat)!,"planes");
+            Assert(legacyTankAttack.Sum(x=>x.Count)==80,"legacy 100 percent tank default must still leave 80 percent selectable for attack");
+            Assert(legacyPlaneAttack.Sum(x=>x.Count)==40,"legacy 100 percent fighter default must still leave 80 percent selectable for attack");
             c.DefenseSoldiers=c.Soldiers;c.DefSoldierPct=100;
             Assert(Program.GetAttackAvailableSoldiers(c)==8_000,"stale full-defense aggregate must not make all soldiers disappear from attack selection");
             Database.SetDefenseSoldierConfigured(owner,chat,true);
             Assert(Program.GetAttackAvailableSoldiers(c)==0,"an explicitly configured 100 percent soldier defense must remain respected");
             Database.SetDefenseSoldierConfigured(owner,chat,false);
-
-            var legacyArmor=new Country{OwnerId=850,ChatId=chat,Name="LegacyArmor",OwnerName="Legacy",Faction=Faction.USSR,
-                Money=1000,Iron=1000,Population=100_000,Soldiers=1000,Tanks=100,Planes=50,Bombers=0,
-                DefenseTanks=100,DefenseFighters=50,Cities=4};
-            Database.AddCountry(legacyArmor);
-            legacyArmor=Database.GetCountry(850,chat)!;
-            Assert(Program.GetAttackBreakdown(legacyArmor,"tanks").Sum(x=>x.Count)==80,
-                "legacy full tank defense without an explicit model map must fall back to 20 percent");
-            Assert(Program.GetAttackBreakdown(legacyArmor,"planes").Sum(x=>x.Count)==40,
-                "legacy full fighter defense without an explicit model map must fall back to 20 percent");
-
             var weak=new Country{Population=1_000,Soldiers=10,Tanks=0,Planes=0,Welfare=100};
             Assert(!Program.PassesAttackTypePowerRule(c,weak,isNaval:true),"one-quarter rule must still block an undersized naval target");
             Assert(Program.PassesAttackTypePowerRule(c,weak,isNaval:false),"one-quarter rule must never block a ground/air attack");

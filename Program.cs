@@ -1997,8 +1997,8 @@ static partial class Database
             long mandatory = (long)Math.Ceiling(total * 0.20);
             var saved = GetDefenseModelAmounts(ownerId, chatId, category);
             long selected = breakdown.Sum(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName)));
-            // Old databases stored 100% tank/fighter defense as an implicit default.
-            // Without an explicit per-model map, reserve only the mandatory 20%.
+            // Legacy aggregate defense values defaulted to 100% and are not proof of an
+            // explicit choice. Without an exact per-model record, reserve only mandatory 20%.
             if (saved.Count == 0) selected = mandatory;
             return Math.Clamp(selected, mandatory, total);
         }
@@ -9747,6 +9747,9 @@ partial class Program
         var saved = Database.GetDefenseModelAmounts(c.OwnerId, c.ChatId, category);
         var selected = models.Select(x => Math.Min(x.Count, saved.GetValueOrDefault(x.ModelName))).ToArray();
 
+        // Exact rows mean the player configured this category. Without them, old
+        // DefenseTanks/DefenseFighters values are ambiguous legacy defaults (often 100%),
+        // so use only the compulsory 20% with domestic-model priority.
         if (saved.Count == 0)
             selected = AllocateModelPriority(models, defaultModel, mandatoryTotal);
         else if (selected.Sum() < mandatoryTotal)
@@ -10834,8 +10837,8 @@ partial class Program
 
     static async Task PromptAttackAirOrRun(long uid,UserSession session,CancellationToken ct)
     {
-        // Keep the command sequence stable: tanks → soldiers → fighters → bombers →
-        // air strategy → air tactic. Even a zero-air attack explicitly chooses orders.
+        if(session.AttackFighters==0&&session.AttackBombers==0)
+        {await RunAttackBattle(uid,session,ct);return;}
         session.Step=SessionStep.AttackWaitingAirStrategy;
         var keyboard=new InlineKeyboardMarkup(new[]{
             new[]{InlineKeyboardButton.WithCallbackData("✈️ برتری هوایی","attack_air_strategy:1")},
