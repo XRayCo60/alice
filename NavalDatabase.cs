@@ -58,6 +58,83 @@ BEGIN SELECT RAISE(ABORT,'battleship damage outside 0..100'); END;
         slotIndex.ExecuteNonQuery();
     }
 
+    public static string RepairPendingNavalOperations()
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        int unitsCreated=0,processedFlagsReset=0,countriesReconciled=0,arrivalTimesFixed=0;
+        using(var normalizeArrival=con.CreateCommand())
+        {
+            normalizeArrival.Transaction=tx;
+            normalizeArrival.CommandText=@"UPDATE NavalInvasions SET ArriveAtMs=CreatedAtMs+300*60*1000
+ WHERE (Status IN ('Pending','Running') OR Processed=0)
+   AND (ArriveAtMs<=0 OR ArriveAtMs>CreatedAtMs+300*60*1000)";
+            arrivalTimesFixed=normalizeArrival.ExecuteNonQuery();
+        }
+        var operations=new List<(long Id,long Chat,long Attacker,long Boats,long Subs,long Ships,string Models,int Processed,string Status,string Result)>();
+        using(var select=con.CreateCommand())
+        {
+            select.Transaction=tx;select.CommandText=@"SELECT Id,ChatId,AttackerId,Boats,Submarines,Battleships,
+ BattleshipModels,Processed,Status,ResultJson FROM NavalInvasions
+ WHERE Status IN ('Pending','Running') OR (Processed=0 AND Status!='Completed')";
+            using var reader=select.ExecuteReader();while(reader.Read())operations.Add((reader.GetInt64(0),reader.GetInt64(1),reader.GetInt64(2),
+                reader.GetInt64(3),reader.GetInt64(4),reader.GetInt64(5),reader.IsDBNull(6)?"":reader.GetString(6),reader.GetInt32(7),
+                reader.IsDBNull(8)?"Pending":reader.GetString(8),reader.IsDBNull(9)?"":reader.GetString(9)));
+        }
+        foreach(var op in operations)
+        {
+            if(op.Processed!=0&&string.IsNullOrWhiteSpace(op.Result))
+            {
+                using var reset=con.CreateCommand();reset.Transaction=tx;
+                reset.CommandText="UPDATE NavalInvasions SET Processed=0,Status='Pending' WHERE Id=@id";
+                reset.Parameters.AddWithValue("@id",op.Id);processedFlagsReset+=reset.ExecuteNonQuery();
+            }
+            var expected=DecodeNavalModels(op.Models).GroupBy(x=>x.Model,StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x=>x.Key,x=>x.Sum(y=>y.Count),StringComparer.OrdinalIgnoreCase);
+            long unencoded=Math.Max(0,op.Ships-expected.Values.Sum());
+            if(unencoded>0)
+            {
+                using var faction=con.CreateCommand();faction.Transaction=tx;
+                faction.CommandText="SELECT Faction FROM Countries WHERE OwnerId=@owner AND ChatId=@chat";
+                faction.Parameters.AddWithValue("@owner",op.Attacker);faction.Parameters.AddWithValue("@chat",op.Chat);
+                object? value=faction.ExecuteScalar();Faction f=value==null||value==DBNull.Value?Faction.USA:(Faction)Convert.ToInt32(value);
+                string model=GetDefaultBattleshipModel(f);expected[model]=expected.GetValueOrDefault(model)+unencoded;
+            }
+            foreach(var item in expected)
+            {
+                long have;
+                using(var count=con.CreateCommand()){count.Transaction=tx;count.CommandText=@"SELECT COUNT(*) FROM BattleshipUnits
+ WHERE OwnerId=@owner AND ChatId=@chat AND OperationId=@operation AND Status='AtSea' AND ModelName=@model";
+                    count.Parameters.AddWithValue("@owner",op.Attacker);count.Parameters.AddWithValue("@chat",op.Chat);
+                    count.Parameters.AddWithValue("@operation",op.Id);count.Parameters.AddWithValue("@model",item.Key);
+                    have=Convert.ToInt64(count.ExecuteScalar());}
+                for(long i=have;i<item.Value;i++)
+                {
+                    int slot=0;using(var free=con.CreateCommand()){free.Transaction=tx;free.CommandText=@"SELECT n FROM (SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3)
+ WHERE NOT EXISTS(SELECT 1 FROM BattleshipUnits b WHERE b.OwnerId=@owner AND b.ChatId=@chat AND b.SlotNumber=n AND b.Status!='Sunk') ORDER BY n LIMIT 1";
+                        free.Parameters.AddWithValue("@owner",op.Attacker);free.Parameters.AddWithValue("@chat",op.Chat);
+                        slot=Convert.ToInt32(free.ExecuteScalar()??0);}
+                    using var insert=con.CreateCommand();insert.Transaction=tx;insert.CommandText=@"INSERT INTO BattleshipUnits
+ (OwnerId,ChatId,ModelName,DamagePercent,SlotNumber,OperationId,Status)
+ VALUES(@owner,@chat,@model,0,@slot,@operation,'AtSea')";
+                    insert.Parameters.AddWithValue("@owner",op.Attacker);insert.Parameters.AddWithValue("@chat",op.Chat);
+                    insert.Parameters.AddWithValue("@model",item.Key);insert.Parameters.AddWithValue("@slot",slot);
+                    insert.Parameters.AddWithValue("@operation",op.Id);insert.ExecuteNonQuery();unitsCreated++;
+                }
+            }
+        }
+        foreach(var group in operations.GroupBy(x=>(x.Attacker,x.Chat)))
+        {
+            long boats=group.Sum(x=>x.Boats),subs=group.Sum(x=>x.Subs),ships=group.Sum(x=>x.Ships);
+            using var update=con.CreateCommand();update.Transaction=tx;update.CommandText=@"UPDATE Countries SET
+ BoatsAtSea=MAX(BoatsAtSea,@boats),SubmarinesAtSea=MAX(SubmarinesAtSea,@subs),BattleshipsAtSea=MAX(BattleshipsAtSea,@ships)
+ WHERE OwnerId=@owner AND ChatId=@chat";
+            update.Parameters.AddWithValue("@boats",boats);update.Parameters.AddWithValue("@subs",subs);update.Parameters.AddWithValue("@ships",ships);
+            update.Parameters.AddWithValue("@owner",group.Key.Attacker);update.Parameters.AddWithValue("@chat",group.Key.Chat);
+            countriesReconciled+=update.ExecuteNonQuery();
+        }
+        tx.Commit();return $"unitsCreated={unitsCreated}, flagsReset={processedFlagsReset}, arrivalTimesFixed={arrivalTimesFixed}, countries={countriesReconciled}";
+    }
+
     public static bool TryPurchaseBattleship(long ownerId,long chatId,string model,long moneyCost,long ironCost)
     {
         using var con=OpenCon();using var tx=con.BeginTransaction();
@@ -421,6 +498,37 @@ SELECT last_insert_rowid();";
         return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
     }
 
+    public static bool ReturnNavalOperationWithoutBattle(NavalInvasion inv)
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        using(var claim=con.CreateCommand())
+        {
+            claim.Transaction=tx;claim.CommandText="UPDATE NavalInvasions SET Processed=1,Status='Completed' WHERE Id=@id AND Processed=0";
+            claim.Parameters.AddWithValue("@id",inv.Id);if(claim.ExecuteNonQuery()!=1)return false;
+        }
+        using(var restore=con.CreateCommand())
+        {
+            restore.Transaction=tx;restore.CommandText=@"UPDATE Countries SET Boats=Boats+@boats,Submarines=Submarines+@subs,
+ Battleships=Battleships+@ships,BoatsAtSea=MAX(0,BoatsAtSea-@boats),SubmarinesAtSea=MAX(0,SubmarinesAtSea-@subs),
+ BattleshipsAtSea=MAX(0,BattleshipsAtSea-@ships) WHERE OwnerId=@owner AND ChatId=@chat";
+            restore.Parameters.AddWithValue("@boats",inv.Boats);restore.Parameters.AddWithValue("@subs",inv.Submarines);
+            restore.Parameters.AddWithValue("@ships",inv.Battleships);restore.Parameters.AddWithValue("@owner",inv.AttackerId);
+            restore.Parameters.AddWithValue("@chat",inv.ChatId);
+            if(restore.ExecuteNonQuery()==1)
+            {
+                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Boats",DecodeNavalModels(inv.BoatModels),new Dictionary<string,long>());
+                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Submarines",DecodeNavalModels(inv.SubModels),new Dictionary<string,long>());
+                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Battleships",DecodeNavalModels(inv.BattleshipModels),new Dictionary<string,long>());
+                using var ships=con.CreateCommand();ships.Transaction=tx;
+                ships.CommandText="UPDATE BattleshipUnits SET Status='Ready',OperationId=NULL WHERE OwnerId=@owner AND ChatId=@chat AND OperationId=@operation";
+                ships.Parameters.AddWithValue("@owner",inv.AttackerId);ships.Parameters.AddWithValue("@chat",inv.ChatId);
+                ships.Parameters.AddWithValue("@operation",inv.Id);ships.ExecuteNonQuery();
+                UpdateLegacyBattleshipDamage(con,tx,inv.AttackerId,inv.ChatId);
+            }
+        }
+        tx.Commit();return true;
+    }
+
     public static bool SettleNavalOperation(NavalInvasion inv, NavalBattleResult result,
         IReadOnlyList<NavalModelAmount> attackerBoats, IReadOnlyList<NavalModelAmount> attackerSubs,
         IReadOnlyList<NavalModelAmount> defenderBoats, IReadOnlyList<NavalModelAmount> defenderSubs)
@@ -556,6 +664,16 @@ ON CONFLICT(OwnerId,ChatId,Category,ModelName) DO UPDATE SET Count=Count+@n";
             "UPDATE BattleshipUnits SET DamagePercent=@damage,Status='Ready',OperationId=NULL WHERE Id=@id";
         cmd.Parameters.AddWithValue("@id",outcome.UnitId);cmd.Parameters.AddWithValue("@damage",outcome.FinalDamage);
         if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException($"Battleship unit {outcome.UnitId} was not settled.");
+    }
+
+    internal static void BreakNavalOperationForTest(long operationId,long malformedArrival)
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        using(var delete=con.CreateCommand()){delete.Transaction=tx;delete.CommandText="DELETE FROM BattleshipUnits WHERE OperationId=@operation";
+            delete.Parameters.AddWithValue("@operation",operationId);delete.ExecuteNonQuery();}
+        using(var update=con.CreateCommand()){update.Transaction=tx;update.CommandText="UPDATE NavalInvasions SET ArriveAtMs=@arrival,Processed=1,Status='Pending',ResultJson='' WHERE Id=@operation";
+            update.Parameters.AddWithValue("@arrival",malformedArrival);update.Parameters.AddWithValue("@operation",operationId);update.ExecuteNonQuery();}
+        tx.Commit();
     }
 
     internal static bool SetBattleshipDamageForTest(long unitId,int damage)

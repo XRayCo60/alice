@@ -4485,6 +4485,7 @@ partial class Program
             NavalRegressionTests.Run();
             EconomyRegressionTests.Run();
             AttackSelectionRegressionTests.Run();
+            StrategicBattleRegressionTests.Run();
             return;
         }
         if (string.IsNullOrWhiteSpace(BOT_TOKEN))
@@ -4492,6 +4493,7 @@ partial class Program
         Database.Init();
         Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
         Database.InitNavalV2();
+        Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
         Database.InitActivity();
         Database.InitAdminPanel(OWNER_ID);
         LoadSettings();
@@ -4591,6 +4593,7 @@ partial class Program
                 Database.Init();
                 Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
+                Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
                 Database.InitActivity();
                 Database.InitAdminPanel(OWNER_ID);
                 LoadSettings();
@@ -4604,6 +4607,7 @@ partial class Program
                 Database.Init();
                 Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
+                Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
                 Database.InitActivity();
                 Database.InitAdminPanel(OWNER_ID);
                 LoadSettings();
@@ -5371,6 +5375,18 @@ partial class Program
             var all = Database.GetAllCountries();
             foreach (var c in all) Database.ReconcileDefense(c.OwnerId, c.ChatId);
             await SendTemp(uid, $"✅ دفاع همه کشورها بروزرسانی شد. ({all.Count} کشور)", ct: ct);
+            return;
+        }
+        if (txt == "فیکس ناوگان" || txt == "فیکس عملیات دریایی")
+        {
+            await navalProcessorLock.WaitAsync(ct);
+            try
+            {
+                string repair=Database.RepairPendingNavalOperations();
+                await SendTemp(uid,$"✅ دفتر عملیات دریایی ترمیم شد.\n{repair}",ct:ct);
+            }
+            finally{navalProcessorLock.Release();}
+            await ProcessNavalInvasions(ct);
             return;
         }
         if (txt == "فیکس صف آرایی" || txt == "فیکس صف‌آرایی")
@@ -10431,9 +10447,17 @@ partial class Program
                 }
                 var attacker = Database.GetCountry(inv.AttackerId, inv.ChatId);
                 var defender = Database.GetCountry(inv.DefenderId, inv.ChatId);
-                if (attacker == null || defender == null)
+                if (attacker == null)
                 {
                     Database.MarkNavalInvasionProcessed(inv.Id);
+                    continue;
+                }
+                if (defender == null)
+                {
+                    if(Database.ReturnNavalOperationWithoutBattle(inv))
+                    {
+                        try{await SendPermanent(inv.AttackerId,$"↩️ عملیات دریایی #{inv.Id} لغو شد؛ کشور مقصد وجود ندارد و تمام ناوگان بازگشت.",ct:ct);}catch{}
+                    }
                     continue;
                 }
                 Database.SyncBattleshipUnits(defender.OwnerId, defender.ChatId);
@@ -10462,6 +10486,13 @@ partial class Program
                 }
                 var attackerBs = Database.GetBattleshipUnits(attacker.OwnerId, attacker.ChatId,
                     onlyCombatReady: false, operationId: inv.Id);
+                if(attackerBs.Count!=inv.Battleships)
+                {
+                    Console.WriteLine($"[NAVAL LEDGER FALLBACK] operation={inv.Id} sent={inv.Battleships} linked={attackerBs.Count}; returning fleet safely");
+                    Database.ReturnNavalOperationWithoutBattle(inv);
+                    try{await SendPermanent(inv.AttackerId,$"↩️ عملیات دریایی #{inv.Id} به‌دلیل ناسازگاری رکورد قدیمی بدون تلفات بازگردانده شد.",ct:ct);}catch{}
+                    continue;
+                }
                 var orders = Database.GetNavalDefenseOrders(defender.OwnerId, defender.ChatId);
                 var request = new NavalBattleRequest
                 {
@@ -11568,20 +11599,10 @@ partial class Program
                 catch { }
             }
 
-            attacker = Database.GetCountry(attackerId, chatId);
-            if (attacker != null && attacker.Cities < Database.MAX_CITIES)
-            {
-                int wins = Database.IncrementHeavyOffensiveWins(attackerId, chatId);
-                if (wins >= 5)
-                {
-                    Database.ResetHeavyOffensiveWins(attackerId, chatId);
-                    int cities = Math.Min(Database.MAX_CITIES, attacker.Cities + 1);
-                    Database.SetCities(attackerId, chatId, cities);
-                    Database.SetBesieged(attackerId, chatId, cities <= 2 ? 2 : 0);
-                    try { await SendPermanent(chatId, $"🎌 {attacker.Name} با پنج پیروزی سنگین، یک شهر ازدست‌رفته را بازپس گرفت. شهرها: {cities}", ct: ct); }
-                    catch { }
-                }
-            }
+            // City transfer is handled exactly once by the per-attacker/defender rout
+            // counter above. The old global HeavyOffensiveWins block awarded a second city
+            // on the same fifth victory. Keep the legacy counter cleared but do not double-award.
+            Database.ResetHeavyOffensiveWins(attackerId, chatId);
         }
         else if (result.DefenderVictory)
         {

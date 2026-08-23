@@ -34,6 +34,7 @@ static class NavalRegressionTests
             TestSmallCraftTransfers();
             TestRepairPricingAndDamagePreservation();
             TestDamageSettlementMatchesReport();
+            TestLegacyPendingOperationRecovery();
             TestSyncIsStableAndFast();
             TestEngineDeterminismAndBounds();
             Console.WriteLine($"NAVAL REGRESSION TESTS PASSED — {_assertions} assertions");
@@ -192,6 +193,27 @@ static class NavalRegressionTests
             long actual=Database.GetBattleshipUnits(owner,chat,false).Sum(x=>x.DamagePercent);
             Assert(c.BattleshipDamage==actual,"legacy aggregate damage must mirror per-ship damage exactly");
         }
+    }
+
+    static void TestLegacyPendingOperationRecovery()
+    {
+        const long chat=-90008;var attacker=Country(801,chat,"LegacyFleet",Faction.USA);var defender=Country(802,chat,"LegacyTarget",Faction.Reich);
+        Database.AddCountry(attacker);Database.AddCountry(defender);
+        Assert(Database.TryPurchaseBattleship(attacker.OwnerId,chat,"Iowa",50_000,40_000),"legacy recovery ship 1");
+        Assert(Database.TryPurchaseBattleship(attacker.OwnerId,chat,"Iowa",50_000,40_000),"legacy recovery ship 2");
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long operation=Database.CreateNavalOperation(Database.GetCountry(attacker.OwnerId,chat)!,defender,
+            new List<NavalModelAmount>(),new List<NavalModelAmount>(),new List<NavalModelAmount>{new("Iowa",1)},1,now,10);
+        Database.BreakNavalOperationForTest(operation,long.MaxValue);
+        string repaired=Database.RepairPendingNavalOperations();
+        Assert(repaired.Contains("unitsCreated=1"),"repair must recreate a missing legacy at-sea battleship unit");
+        Assert(repaired.Contains("flagsReset=1"),"repair must reset malformed processed flag");
+        Assert(repaired.Contains("arrivalTimesFixed=1"),"repair must clamp impossible arrival time");
+        Assert(Database.GetBattleshipUnits(attacker.OwnerId,chat,false,operation).Count==1,"repaired operation must link its battleship");
+        NavalInvasion inv=Database.GetActiveNavalInvasionsByAttacker(attacker.OwnerId,chat).Single(x=>x.Id==operation);
+        Assert(Database.ReturnNavalOperationWithoutBattle(inv),"safe fallback must return a malformed operation");
+        Country returned=Database.GetCountry(attacker.OwnerId,chat)!;
+        Assert(returned.Battleships==2&&returned.BattleshipsAtSea==0,"fallback must return all battleships and clear at-sea count");
     }
 
     static void TestSyncIsStableAndFast()

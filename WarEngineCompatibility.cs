@@ -122,6 +122,14 @@ static class WarEngine
     static string DefaultFighter(Faction f) => f == Faction.USA ? "P-36" : f == Faction.USSR ? "I-16" : "Bf 109";
     static string DefaultBomber(Faction f) => f == Faction.USA ? "B-17" : f == Faction.USSR ? "DB-3" : "He 111";
 
+    internal static double MapOperationalToStrategicAdvance(double operationalKm) =>
+        Math.Clamp(operationalKm / 30.0 * 40.0,0,40);
+
+    internal static bool IsStrategicHeavyVictory(bool attackerWon,int successPercent,
+        double strategicAdvanceKm,long readySoldiers,long readyTanks) =>
+        attackerWon && successPercent>=90 && strategicAdvanceKm>=35 &&
+        readySoldiers>=5000 && readyTanks>=50;
+
     public static BattleResult Resolve(BattleRequest request)
     {
         Validate(request);
@@ -155,16 +163,19 @@ static class WarEngine
 
         // The v2 core exposes aggregate casualties. Split them back over contributors
         // so Program.cs can settle inventories and deployments exactly once.
-        result.EffectiveAdvanceKm = result.PenetrationKm;
+        // Core v2 reports operational depth on a 0..30 km scale, while the strategic
+        // city system uses 0..40 km. Comparing raw 30 against >35 made heavy victories
+        // impossible and silently disabled city conquest.
+        result.EffectiveAdvanceKm = MapOperationalToStrategicAdvance(result.PenetrationKm);
         result.CombatReadyReturnedSoldiers = Math.Max(0, aSold - result.AttackerSoldiersLost);
         result.CombatReadyReturnedTanks = Math.Max(0, aTanks - result.AttackerTanksLost);
         result.AttackerTanksDestroyed = DestroyedShare(result.AttackerTanksLost);
         result.AttackerTanksDamaged = result.AttackerTanksLost - result.AttackerTanksDestroyed;
         result.DefenderTanksDestroyed = DestroyedShare(result.DefenderTanksLost);
         result.DefenderTanksDamaged = result.DefenderTanksLost - result.DefenderTanksDestroyed;
-        result.AttackerHeavyVictory = result.AttackerWon && result.PenetrationKm > 35 &&
-                                      result.CombatReadyReturnedSoldiers >= 5000 &&
-                                      result.CombatReadyReturnedTanks >= 50;
+        result.AttackerHeavyVictory = IsStrategicHeavyVictory(result.AttackerWon,
+            result.SuccessPercent,result.EffectiveAdvanceKm,result.CombatReadyReturnedSoldiers,
+            result.CombatReadyReturnedTanks);
         result.OutcomeKind = result.AttackerHeavyVictory ? BattleOutcomeKind.AttackerHeavyVictory :
             result.AttackerWon ? BattleOutcomeKind.AttackerLimitedVictory :
             result.AttackerFailed && result.SuccessPercent == 0 ? BattleOutcomeKind.AttackerRouted :
