@@ -116,6 +116,18 @@ static class NavalEngine
             result.AttackerWon = true;
             result.SuccessPercent = 100;
             result.SurpriseSucceeded = request.AttackerTactic == 1;
+            // Even when there is no defending fleet, settlement still needs one outcome
+            // for every deployed battleship so its AtSea ledger row can return to Ready.
+            result.AttackerBattleships = request.AttackerBattleships.Select(ship => new NavalBattleshipOutcome
+            {
+                UnitId = ship.UnitId,
+                ShipNumber = ship.ShipNumber,
+                Model = ship.Model,
+                PreviousDamage = ship.DamagePercent,
+                DamageInflicted = 0,
+                FinalDamage = ship.DamagePercent,
+                Sunk = false
+            }).ToList();
             result.LootMoney = Math.Min(request.DefenderMoney,
                 (long)Math.Round(request.DefenderMoney * 0.15 * NAVAL_LOOT_MULTIPLIER * EMPTY_BASE_LOOT_FACTOR));
             result.LootIron = Math.Min(request.DefenderIron,

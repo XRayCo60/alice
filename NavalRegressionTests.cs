@@ -290,13 +290,24 @@ static class NavalRegressionTests
         {
             Seed = 7, AttackerName = "A", DefenderName = "Empty",
             DefenderMoney = 100_000, DefenderIron = 50_000,
-            AttackerBoats = new() { new("PT Boat", 5) }
+            AttackerBoats = new() { new("PT Boat", 5) },
+            AttackerBattleships = new()
+            {
+                new() { UnitId = 701, ShipNumber = 2, Model = "Iowa", DamagePercent = 37 }
+            }
         };
         NavalBattleResult emptyResult = NavalEngine.Resolve(empty);
         Assert(emptyResult.Outcome == NavalOutcomeKind.EmptyBaseVictory && emptyResult.AttackerWon,
             "empty base must count as attacker victory");
         Assert(emptyResult.LootMoney == 18_750 && emptyResult.LootIron == 6_250,
             "empty base loot must be half of the 2.5x naval rate");
+        Assert(emptyResult.AttackerBattleships.Count == 1 &&
+               emptyResult.AttackerBattleships[0].UnitId == 701 &&
+               emptyResult.AttackerBattleships[0].PreviousDamage == 37 &&
+               emptyResult.AttackerBattleships[0].FinalDamage == 37 &&
+               emptyResult.AttackerBattleships[0].DamageInflicted == 0 &&
+               !emptyResult.AttackerBattleships[0].Sunk,
+            "empty-base victory must return every deployed battleship unchanged");
 
         var fatalDamage = new NavalBattleRequest
         {
