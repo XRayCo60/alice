@@ -499,13 +499,41 @@ SELECT last_insert_rowid();";
         return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
     }
 
-    public static bool ReturnNavalOperationWithoutBattle(NavalInvasion inv)
+    public static NavalInvasion? GetCancelableNavalOperation(long operationId,long attackerId,long chatId)
     {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"SELECT Id,ChatId,AttackerId,DefenderId,Boats,Submarines,Battleships,
+ BoatModels,SubModels,BattleshipModels,Strategy,Tactic,CreatedAtMs,ArriveAtMs,Processed,
+ AttackerName,DefenderName,Status,ResultJson FROM NavalInvasions
+ WHERE Id=@id AND AttackerId=@attacker AND ChatId=@chat AND Processed=0
+   AND Status NOT IN ('Settled','Completed','Cancelled') LIMIT 1";
+        cmd.Parameters.AddWithValue("@id",operationId);cmd.Parameters.AddWithValue("@attacker",attackerId);
+        cmd.Parameters.AddWithValue("@chat",chatId);
+        using var r=cmd.ExecuteReader();if(!r.Read())return null;
+        return new NavalInvasion
+        {
+            Id=r.GetInt64(0),ChatId=r.GetInt64(1),AttackerId=r.GetInt64(2),DefenderId=r.GetInt64(3),
+            Boats=r.GetInt64(4),Submarines=r.GetInt64(5),Battleships=r.GetInt64(6),
+            BoatModels=r.IsDBNull(7)?"":r.GetString(7),SubModels=r.IsDBNull(8)?"":r.GetString(8),
+            BattleshipModels=r.IsDBNull(9)?"":r.GetString(9),Strategy=r.GetInt32(10),Tactic=r.GetInt32(11),
+            CreatedAtMs=r.GetInt64(12),ArriveAtMs=r.GetInt64(13),Processed=r.GetInt32(14),
+            AttackerName=r.IsDBNull(15)?"":r.GetString(15),DefenderName=r.IsDBNull(16)?"":r.GetString(16),
+            Status=r.IsDBNull(17)?"Pending":r.GetString(17),ResultJson=r.IsDBNull(18)?"":r.GetString(18)
+        };
+    }
+
+    public static bool ReturnNavalOperationWithoutBattle(NavalInvasion inv,string completionStatus="Completed")
+    {
+        completionStatus=completionStatus=="Cancelled"?"Cancelled":"Completed";
         using var con=OpenCon();using var tx=con.BeginTransaction();
         using(var claim=con.CreateCommand())
         {
-            claim.Transaction=tx;claim.CommandText="UPDATE NavalInvasions SET Processed=1,Status='Completed' WHERE Id=@id AND Processed=0";
-            claim.Parameters.AddWithValue("@id",inv.Id);if(claim.ExecuteNonQuery()!=1)return false;
+            claim.Transaction=tx;claim.CommandText=@"UPDATE NavalInvasions SET Processed=1,Status=@status
+ WHERE Id=@id AND AttackerId=@owner AND ChatId=@chat AND Processed=0
+   AND Status NOT IN ('Settled','Completed','Cancelled')";
+            claim.Parameters.AddWithValue("@status",completionStatus);claim.Parameters.AddWithValue("@id",inv.Id);
+            claim.Parameters.AddWithValue("@owner",inv.AttackerId);claim.Parameters.AddWithValue("@chat",inv.ChatId);
+            if(claim.ExecuteNonQuery()!=1)return false;
         }
         using(var restore=con.CreateCommand())
         {
@@ -515,17 +543,15 @@ SELECT last_insert_rowid();";
             restore.Parameters.AddWithValue("@boats",inv.Boats);restore.Parameters.AddWithValue("@subs",inv.Submarines);
             restore.Parameters.AddWithValue("@ships",inv.Battleships);restore.Parameters.AddWithValue("@owner",inv.AttackerId);
             restore.Parameters.AddWithValue("@chat",inv.ChatId);
-            if(restore.ExecuteNonQuery()==1)
-            {
-                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Boats",DecodeNavalModels(inv.BoatModels),new Dictionary<string,long>());
-                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Submarines",DecodeNavalModels(inv.SubModels),new Dictionary<string,long>());
-                AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Battleships",DecodeNavalModels(inv.BattleshipModels),new Dictionary<string,long>());
-                using var ships=con.CreateCommand();ships.Transaction=tx;
-                ships.CommandText="UPDATE BattleshipUnits SET Status='Ready',OperationId=NULL WHERE OwnerId=@owner AND ChatId=@chat AND OperationId=@operation";
-                ships.Parameters.AddWithValue("@owner",inv.AttackerId);ships.Parameters.AddWithValue("@chat",inv.ChatId);
-                ships.Parameters.AddWithValue("@operation",inv.Id);ships.ExecuteNonQuery();
-                UpdateLegacyBattleshipDamage(con,tx,inv.AttackerId,inv.ChatId);
-            }
+            if(restore.ExecuteNonQuery()!=1)return false;
+            AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Boats",DecodeNavalModels(inv.BoatModels),new Dictionary<string,long>());
+            AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Submarines",DecodeNavalModels(inv.SubModels),new Dictionary<string,long>());
+            AddSurvivorModels(con,tx,inv.AttackerId,inv.ChatId,"Battleships",DecodeNavalModels(inv.BattleshipModels),new Dictionary<string,long>());
+            using var ships=con.CreateCommand();ships.Transaction=tx;
+            ships.CommandText="UPDATE BattleshipUnits SET Status='Ready',OperationId=NULL WHERE OwnerId=@owner AND ChatId=@chat AND OperationId=@operation";
+            ships.Parameters.AddWithValue("@owner",inv.AttackerId);ships.Parameters.AddWithValue("@chat",inv.ChatId);
+            ships.Parameters.AddWithValue("@operation",inv.Id);ships.ExecuteNonQuery();
+            UpdateLegacyBattleshipDamage(con,tx,inv.AttackerId,inv.ChatId);
         }
         tx.Commit();return true;
     }

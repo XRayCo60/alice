@@ -4364,7 +4364,8 @@ partial class Program
         "  ☭ G-5 50–53 گره — هر 5: 2.5K+1.5K\n" +
         "• زیردریایی: Type VIIC 17.7/7.6 — 10K+5K | Gato 21/9 — 10K+5K | S-class 13–14/7–8 — 8K+4K\n" +
         "• نبردناو: Bismarck 30 گره 2092 خدمه 8x380mm — 50K+30K | Iowa 28 گره 1800 خدمه 9x406mm — 50K+40K | Sovetsky Soyuz 23 گره 1220 خدمه 12x305mm — 45K+25K (پورت>=4 max3)\n" +
-        "• انتقال نبردناو: <b>نمیتوانید به این کشور نبردناو ترنسفر کنید، تعداد نبرد ناو: 3</b>\n\n" +
+        "• انتقال نبردناو: <b>نمیتوانید به این کشور نبردناو ترنسفر کنید، تعداد نبرد ناو: 3</b>\n" +
+        "• <b>لغو لشکرکشی دریایی</b> در پیوی — انتخاب عملیات و بازگشت فوری کل ناوگان بدون تلفات.\n\n" +
 
         "🗡 <b>حمله زمینی و هوایی — موتور ۱۹۳۹</b>\n" +
         "• میدان هر نبرد ۴۰×۴۰ کیلومتر و حداکثر زمان عملیات ۲۴ ساعت است.\n" +
@@ -5149,6 +5150,7 @@ partial class Program
                 {
                     Database.MarkGroupActive(cbChat.Id);
                     Database.SetBotGroupActive(cbChat.Id,true);
+                    if(!string.IsNullOrWhiteSpace(cbChat.Title))groupTitleCache[cbChat.Id]=cbChat.Title;
                 }
 
                 var l = GetUserLock(cbUid);
@@ -5214,6 +5216,7 @@ partial class Program
                 {
                     Database.MarkGroupActive(msg.Chat.Id);
                     Database.SetBotGroupActive(msg.Chat.Id,true);
+                    if(!string.IsNullOrWhiteSpace(msg.Chat.Title))groupTitleCache[msg.Chat.Id]=msg.Chat.Title;
                 }
                 if (isPrivate && IsPanelAdmin(uid))
                 {
@@ -5292,6 +5295,7 @@ partial class Program
         }
 
         if (ownerTxt == "حمله" || ownerTxt == "ترنسفر" || ownerTxt == "انتقال" || ownerTxt == "ارسال محموله" || ownerTxt == "ارسال منابع" ||
+            IsNavalCancellationCommand(ownerTxt) ||
             ownerTxt == "صف آرایی تهاجمی" || ownerTxt == "صف آرایی دفاعی" || ownerTxt == "صف‌آرایی تهاجمی" || ownerTxt == "صف‌آرایی دفاعی" ||
             (sessions.TryGetValue(uid, out var atkSess) && atkSess != null &&
             (atkSess.Step == SessionStep.AttackWaitingGroup ||
@@ -6664,10 +6668,50 @@ partial class Program
         await SendPermanent(uid, startText, parseMode: ParseMode.Html, ct: ct);
     }
 
+    static bool IsNavalCancellationCommand(string text) =>
+        text is "لغو لشکر کشی دریایی" or "لغو لشکرکشی دریایی" or
+            "لغو لشکرکشی دریائی" or "لغو عملیات دریایی" or "بازگشت ناوگان";
+
+    static async Task ShowNavalCancellationMenu(long uid,CancellationToken ct)
+    {
+        var operations=Database.GetUserActiveChatIds(uid)
+            .SelectMany(chatId=>Database.GetActiveNavalInvasionsByAttacker(uid,chatId))
+            .Where(x=>x.Processed==0)
+            .OrderBy(x=>x.ArriveAtMs)
+            .ToList();
+        if(operations.Count==0)
+        {
+            await SendTemp(uid,"❌ هیچ لشکرکشی دریایی فعال و قابل لغو ندارید.",ct:ct);
+            return;
+        }
+        var lines=new List<string>
+        {
+            "↩️ لغو لشکرکشی دریایی",
+            "با زدن دکمه، همان لحظه کل ناوگان آن عملیات بدون تلفات برمی‌گردد."
+        };
+        var buttons=new List<InlineKeyboardButton[]>();
+        foreach(var op in operations)
+        {
+            string title=await GetGroupTitleCached(op.ChatId,ct);
+            long left=Math.Max(0,op.ArriveAtMs-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            lines.Add($"\n#{op.Id} | گپ: {title}\n🎯 {op.DefenderName} | ⏱ {FormatRemaining(left)}\n🚤 {op.Boats:N0} | ⚓ {op.Submarines:N0} | 🚢 {op.Battleships:N0}");
+            buttons.Add(new[]{InlineKeyboardButton.WithCallbackData(
+                $"↩️ لغو #{op.Id} — {op.DefenderName}",$"naval_cancel:{op.ChatId}:{op.Id}")});
+        }
+        await SendPermanent(uid,string.Join('\n',lines),new InlineKeyboardMarkup(buttons),ct:ct);
+    }
+
     static async Task HandleUserPrivateAsync(Message msg, User user, CancellationToken ct)
     {
         long uid = user.Id;
         string txt = msg.Text?.Trim() ?? "";
+
+        if(IsNavalCancellationCommand(txt))
+        {
+            EndSession(uid);
+            await ShowNavalCancellationMenu(uid,ct);
+            return;
+        }
 
         if (txt == "لغو")
         {
@@ -7657,8 +7701,10 @@ partial class Program
                     $"⏱ زمان تقریبی رسیدن: {travelMinutes} دقیقه", ct: ct);
                 try
                 {
+                    string attackedGroupTitle=await GetGroupTitleCached(sess.AttackChatId,ct);
                     await SendPermanent(defenderCountry.OwnerId,
                         $"⚠️ هشدار حمله دریایی!\nکشور {attackerCountry.Name} ناوگانی به سمت شما فرستاده است.\n" +
+                        $"💬 گپ مورد حمله: {attackedGroupTitle}\n🆔 شناسه گپ: {sess.AttackChatId}\n" +
                         $"⏱ زمان تقریبی رسیدن: {travelMinutes} دقیقه\nترکیب ناوگان مهاجم نامشخص است.", ct: ct);
                 }
                 catch { }
@@ -7969,6 +8015,7 @@ partial class Program
             case "naval_defense": await HandleNavalDefenseCallback(cb, parts, ct); break;
             case "naval_defense_strategy": await HandleNavalDefenseStrategyCallback(cb, parts, ct); break;
             case "naval_defense_tactic": await HandleNavalDefenseTacticCallback(cb, parts, ct); break;
+            case "naval_cancel": await HandleNavalCancellationCallback(cb, parts, ct); break;
             case "naval_locked": await bot.AnswerCallbackQueryAsync(cb.Id, "🔒 این استراتژی فعلاً قفل است.", showAlert: true, cancellationToken: ct); break;
             case "defense_pct": await HandleDefensePctCallback(cb, parts, ct); break;
             case "defense_model_pct": await HandleDefenseModelPctCallback(cb, parts, ct); break;
@@ -8004,6 +8051,42 @@ partial class Program
         await bot.AnswerCallbackQueryAsync(cb.Id, cancellationToken: ct);
         EndSession(uid);
         if (cb.Message != null) DeleteNow(cb.Message.Chat.Id, cb.Message.MessageId);
+    }
+
+    static async Task HandleNavalCancellationCallback(CallbackQuery cb,string[] parts,CancellationToken ct)
+    {
+        long uid=cb.From.Id;
+        if(parts.Length<3||!TryParseLong(parts[1],out long chatId)||!TryParseLong(parts[2],out long operationId))
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id,"❌ درخواست نامعتبر است.",showAlert:true,cancellationToken:ct);
+            return;
+        }
+        NavalInvasion? cancelled=null;
+        var locks=await AcquireCountryMutationLocks(chatId,new[]{uid},ct);
+        try
+        {
+            var operation=Database.GetCancelableNavalOperation(operationId,uid,chatId);
+            if(operation!=null&&Database.ReturnNavalOperationWithoutBattle(operation,"Cancelled"))cancelled=operation;
+        }
+        finally{ReleaseCountryMutationLocks(locks);}
+        if(cancelled==null)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id,"❌ عملیات قبلاً رسیده، لغو شده یا متعلق به شما نیست.",showAlert:true,cancellationToken:ct);
+            return;
+        }
+        EndSession(uid);
+        await bot.AnswerCallbackQueryAsync(cb.Id,"✅ کل ناوگان برگشت.",showAlert:true,cancellationToken:ct);
+        if(cb.Message!=null)DeleteNow(cb.Message.Chat.Id,cb.Message.MessageId);
+        string groupTitle=await GetGroupTitleCached(chatId,ct);
+        await SendPermanent(uid,$"✅ لشکرکشی دریایی #{operationId} لغو شد.\n"+
+            $"💬 گپ: {groupTitle}\n🎯 مقصد قبلی: {cancelled.DefenderName}\n"+
+            $"↩️ کل ناوگان بدون تلفات همان لحظه به دارایی برگشت.\n"+
+            $"🚤 {cancelled.Boats:N0} | ⚓ {cancelled.Submarines:N0} | 🚢 {cancelled.Battleships:N0}",ct:ct);
+        try{await SendPermanent(cancelled.DefenderId,
+            $"ℹ️ هشدار دریایی لغو شد.\nعملیات #{operationId} کشور {cancelled.AttackerName} در گپ «{groupTitle}» متوقف شد.",ct:ct);}catch{}
+        try{await SendPermanent(chatId,
+            $"↩️ {cancelled.AttackerName} لشکرکشی دریایی #{operationId} علیه {cancelled.DefenderName} را لغو کرد و ناوگانش برگشت.",ct:ct);}catch{}
+        Console.WriteLine($"[NAVAL CANCELLED] operation={operationId} attacker={uid} chat={chatId} boats={cancelled.Boats} subs={cancelled.Submarines} battleships={cancelled.Battleships}");
     }
 
     static async Task HandleFactionCallback(CallbackQuery cb, string[] parts, CancellationToken ct)

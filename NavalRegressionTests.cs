@@ -35,6 +35,7 @@ static class NavalRegressionTests
             TestRepairPricingAndDamagePreservation();
             TestDamageSettlementMatchesReport();
             TestLegacyPendingOperationRecovery();
+            TestImmediateNavalCancellation();
             TestSyncIsStableAndFast();
             TestEngineDeterminismAndBounds();
             Console.WriteLine($"NAVAL REGRESSION TESTS PASSED — {_assertions} assertions");
@@ -214,6 +215,35 @@ static class NavalRegressionTests
         Assert(Database.ReturnNavalOperationWithoutBattle(inv),"safe fallback must return a malformed operation");
         Country returned=Database.GetCountry(attacker.OwnerId,chat)!;
         Assert(returned.Battleships==2&&returned.BattleshipsAtSea==0,"fallback must return all battleships and clear at-sea count");
+    }
+
+    static void TestImmediateNavalCancellation()
+    {
+        const long chat=-90009;
+        var attacker=Country(901,chat,"CancelFleet",Faction.USA);
+        var defender=Country(902,chat,"CancelTarget",Faction.Reich);
+        attacker.Boats=10;
+        Database.AddCountry(attacker);Database.AddCountry(defender);
+        Database.AddEquipmentModel(attacker.OwnerId,chat,"Boats","PT Boat",10);
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long operation=Database.CreateNavalOperation(Database.GetCountry(attacker.OwnerId,chat)!,defender,
+            new List<NavalModelAmount>{new("PT Boat",5)},new List<NavalModelAmount>(),
+            new List<NavalModelAmount>(),1,now,120);
+        Country sailing=Database.GetCountry(attacker.OwnerId,chat)!;
+        Assert(sailing.Boats==5&&sailing.BoatsAtSea==5,"launch must reserve the cancellation test fleet");
+        Assert(Database.GetCancelableNavalOperation(operation,defender.OwnerId,chat)==null,
+            "another player must never be able to claim a naval cancellation");
+        NavalInvasion pending=Database.GetCancelableNavalOperation(operation,attacker.OwnerId,chat)!;
+        Assert(pending!=null&&Database.ReturnNavalOperationWithoutBattle(pending,"Cancelled"),
+            "owner cancellation must atomically return the fleet");
+        Country returned=Database.GetCountry(attacker.OwnerId,chat)!;
+        Assert(returned.Boats==10&&returned.BoatsAtSea==0,
+            "cancelled fleet must return immediately with exact aggregate counts");
+        Assert(Database.GetEquipmentModels(attacker.OwnerId,chat,"Boats").Sum(x=>x.Count)==10,
+            "cancelled fleet must restore exact model inventory");
+        Assert(Database.GetCancelableNavalOperation(operation,attacker.OwnerId,chat)==null&&
+               !Database.ReturnNavalOperationWithoutBattle(pending,"Cancelled"),
+            "repeated cancellation must be idempotent and never duplicate ships");
     }
 
     static void TestSyncIsStableAndFast()
