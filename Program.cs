@@ -4301,6 +4301,18 @@ partial class Program
     static string AtkKey(long chatId, long ownerId) => $"{chatId}:{ownerId}";
     static int GetAttackCount(long chatId, long ownerId) => attackCounts.TryGetValue(AtkKey(chatId, ownerId), out var v) ? v : 0;
     static int IncAttackCount(long chatId, long ownerId) => attackCounts.AddOrUpdate(AtkKey(chatId, ownerId), 1, (_, v) => v + 1);
+    // Starting an attack forfeits every kind of protection held by the attacker.
+    // Outgoing attacks never add a hit toward the attacker's own five-hit shield.
+    internal static void BreakAttackerShieldOnAttack(long attackerId,long chatId)
+    {
+        Database.ClearAttackShield(attackerId,chatId);
+        Database.SetShieldExemption(attackerId,chatId); // also ends the new-country shield
+    }
+    internal static void ApplyCompletedAttackShieldRules(long attackerId,long defenderId,long chatId,bool fullExemption)
+    {
+        BreakAttackerShieldOnAttack(attackerId,chatId);
+        if(!fullExemption)Database.AddAttackShieldHit(defenderId,chatId);
+    }
     static string TfKey(long chatId, long ownerId) => $"{chatId}:{ownerId}";
     static int GetTransferCount(long chatId, long ownerId) => transferCounts.TryGetValue(TfKey(chatId, ownerId), out var v) ? v : 0;
     static int IncTransferCount(long chatId, long ownerId) => transferCounts.AddOrUpdate(TfKey(chatId, ownerId), 1, (_, v) => v + 1);
@@ -4461,8 +4473,8 @@ partial class Program
                     string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
                     Database.IncDailyDefendCount(context.DefenderId, today);
                     Database.SetAttackerFlag(context.AttackerId, today);
-                    if (!Database.HasGroupLockExemption(context.ChatId))
-                        Database.AddAttackShieldHit(context.DefenderId, context.ChatId);
+                    ApplyCompletedAttackShieldRules(context.AttackerId,context.DefenderId,context.ChatId,
+                        Database.HasGroupLockExemption(context.ChatId));
                     try { await SendPermanent(context.AttackerId, result.AttackerReport, ct: ct); } catch { }
                     try { await SendPermanent(context.DefenderId, result.DefenderReport, ct: ct); } catch { }
                     try { await SendPermanent(context.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
@@ -7682,6 +7694,7 @@ partial class Program
                 {
                     operationId = Database.CreateNavalOperation(attackerCountry, defenderCountry,
                         selectedBoats, selectedSubs, selectedBs, sess.AttackNavalTactic, nowMs, travelMinutes);
+                    BreakAttackerShieldOnAttack(attackerCountry.OwnerId,attackerCountry.ChatId);
                     ScheduleNavalArrival(operationId,nowMs+travelMinutes*60_000L);
                 }
                 catch (Exception ex)
@@ -11457,8 +11470,8 @@ partial class Program
             string today = DateTime.UtcNow.AddHours(3.5).ToString("yyyy-MM-dd");
             Database.IncDailyDefendCount(defenderId, today);
             Database.SetAttackerFlag(uid, today);
-            if (!Database.HasGroupLockExemption(chatId))
-                Database.AddAttackShieldHit(defenderId, chatId);
+            ApplyCompletedAttackShieldRules(uid,defenderId,chatId,
+                Database.HasGroupLockExemption(chatId));
 
             try { await SendPermanent(uid, result.AttackerReport, ct: ct); } catch { }
             try { await SendPermanent(defenderId, result.DefenderReport, ct: ct); } catch { }
