@@ -626,6 +626,7 @@ static partial class Database
         string dailyDefendCounts = @"CREATE TABLE IF NOT EXISTS DailyDefendCounts(DefenderId INTEGER NOT NULL, AttackDate TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(DefenderId,AttackDate));";
         string attackerFlags = @"CREATE TABLE IF NOT EXISTS AttackerFlags(OwnerId INTEGER NOT NULL, AttackDate TEXT NOT NULL, PRIMARY KEY(OwnerId, AttackDate));";
         string heavyOffensiveWins = @"CREATE TABLE IF NOT EXISTS HeavyOffensiveWins(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
+        string activeSieges = @"CREATE TABLE IF NOT EXISTS ActiveSieges(DefenderId INTEGER NOT NULL, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, PRIMARY KEY(DefenderId,ChatId));";
         string warBattles = @"CREATE TABLE IF NOT EXISTS WarBattles(Id INTEGER PRIMARY KEY AUTOINCREMENT, Timestamp TEXT NOT NULL, ChatId INTEGER, AttackerId INTEGER, DefenderId INTEGER, AttackerName TEXT, DefenderName TEXT, Winner TEXT, PenetrationKm REAL, SuccessPercent INTEGER, AtkTankLoss INTEGER, AtkSoldierLoss INTEGER, DefTankLoss INTEGER, DefSoldierLoss INTEGER, LootMoney INTEGER, LootIron INTEGER, DurationMinutes INTEGER, Report TEXT);";
         string battleJobs = @"CREATE TABLE IF NOT EXISTS BattleJobs(BattleId INTEGER PRIMARY KEY, JobType TEXT NOT NULL, RequestJson TEXT NOT NULL, ContextJson TEXT NOT NULL DEFAULT '', Status TEXT NOT NULL DEFAULT 'Pending', ResultJson TEXT NOT NULL DEFAULT '', LastError TEXT NOT NULL DEFAULT '', CreatedAtMs INTEGER NOT NULL, UpdatedAtMs INTEGER NOT NULL);";
         string eqModels = @"CREATE TABLE IF NOT EXISTS EquipmentModels(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
@@ -638,7 +639,7 @@ static partial class Database
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, botGroupStatus, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, activeSieges, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, botGroupStatus, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -1572,6 +1573,14 @@ static partial class Database
         delDefeat.Parameters.AddWithValue("@cid", chatId);
         delDefeat.ExecuteNonQuery();
 
+        using var delSiege = con.CreateCommand();
+        delSiege.CommandText = @"UPDATE Countries SET Besieged=0 WHERE ChatId=@cid AND OwnerId IN
+ (SELECT DefenderId FROM ActiveSieges WHERE ChatId=@cid AND AttackerId=@oid);
+ DELETE FROM ActiveSieges WHERE ChatId=@cid AND (DefenderId=@oid OR AttackerId=@oid);";
+        delSiege.Parameters.AddWithValue("@oid", ownerId);
+        delSiege.Parameters.AddWithValue("@cid", chatId);
+        delSiege.ExecuteNonQuery();
+
         using var delAlly = con.CreateCommand();
         delAlly.CommandText = "DELETE FROM AllianceMembers WHERE AllianceId IN (SELECT Id FROM Alliances WHERE ChatId=@cid AND LeaderId=@oid); " +
                               "DELETE FROM Alliances WHERE ChatId=@cid AND LeaderId=@oid; " +
@@ -1773,6 +1782,116 @@ static partial class Database
         return (res == null || res == DBNull.Value) ? 0 : Convert.ToInt32(res);
     }
 
+    public static List<(long AttackerId,string AttackerName,long DefenderId,string DefenderName,int Count)> GetRoutBattleProgress(long ownerId,long chatId)
+    {
+        var list=new List<(long AttackerId,string AttackerName,long DefenderId,string DefenderName,int Count)>();
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"SELECT r.AttackerId,a.Name,r.DefenderId,d.Name,r.Count
+ FROM RoutDefeats r
+ JOIN Countries a ON a.OwnerId=r.AttackerId AND a.ChatId=r.ChatId
+ JOIN Countries d ON d.OwnerId=r.DefenderId AND d.ChatId=r.ChatId
+ WHERE r.ChatId=@chat AND r.Count>0 AND (r.AttackerId=@owner OR r.DefenderId=@owner)
+ ORDER BY r.Count DESC,a.Name,d.Name";
+        cmd.Parameters.AddWithValue("@owner",ownerId);cmd.Parameters.AddWithValue("@chat",chatId);
+        using var r=cmd.ExecuteReader();while(r.Read())list.Add((r.GetInt64(0),r.GetString(1),r.GetInt64(2),r.GetString(3),r.GetInt32(4)));
+        return list;
+    }
+
+    public static void SetActiveSiege(long defenderId,long chatId,long attackerId,int cities)
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        if(cities<4)
+        {
+            using var siege=con.CreateCommand();siege.Transaction=tx;
+            siege.CommandText=@"INSERT INTO ActiveSieges(DefenderId,ChatId,AttackerId) VALUES(@d,@c,@a)
+ ON CONFLICT(DefenderId,ChatId) DO UPDATE SET AttackerId=@a";
+            siege.Parameters.AddWithValue("@d",defenderId);siege.Parameters.AddWithValue("@c",chatId);siege.Parameters.AddWithValue("@a",attackerId);
+            siege.ExecuteNonQuery();
+        }
+        else
+        {
+            using var clear=con.CreateCommand();clear.Transaction=tx;clear.CommandText="DELETE FROM ActiveSieges WHERE DefenderId=@d AND ChatId=@c";
+            clear.Parameters.AddWithValue("@d",defenderId);clear.Parameters.AddWithValue("@c",chatId);clear.ExecuteNonQuery();
+        }
+        using var state=con.CreateCommand();state.Transaction=tx;
+        state.CommandText="UPDATE Countries SET Besieged=@state WHERE OwnerId=@d AND ChatId=@c";
+        state.Parameters.AddWithValue("@state",cities>=4?0:cities<=2?2:1);state.Parameters.AddWithValue("@d",defenderId);state.Parameters.AddWithValue("@c",chatId);
+        state.ExecuteNonQuery();tx.Commit();
+    }
+
+    public static void RefreshActiveSiegeAfterCityRecovery(long defenderId,long chatId,int cities)
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        if(cities>=4)
+        {
+            using var clear=con.CreateCommand();clear.Transaction=tx;clear.CommandText="DELETE FROM ActiveSieges WHERE DefenderId=@d AND ChatId=@c";
+            clear.Parameters.AddWithValue("@d",defenderId);clear.Parameters.AddWithValue("@c",chatId);clear.ExecuteNonQuery();
+        }
+        using var state=con.CreateCommand();state.Transaction=tx;
+        state.CommandText=@"UPDATE Countries SET Besieged=CASE
+ WHEN @cities>=4 THEN 0
+ WHEN EXISTS(SELECT 1 FROM ActiveSieges s WHERE s.DefenderId=@d AND s.ChatId=@c) THEN CASE WHEN @cities<=2 THEN 2 ELSE 1 END
+ ELSE 0 END WHERE OwnerId=@d AND ChatId=@c";
+        state.Parameters.AddWithValue("@cities",cities);state.Parameters.AddWithValue("@d",defenderId);state.Parameters.AddWithValue("@c",chatId);
+        state.ExecuteNonQuery();tx.Commit();
+    }
+
+    public static string RepairSiegeIntegrity()
+    {
+        using var con=OpenCon();using var tx=con.BeginTransaction();
+        int migrated,progressRemoved,activeRemoved,statesFixed;
+        using(var migrate=con.CreateCommand())
+        {
+            migrate.Transaction=tx;migrate.CommandText=@"INSERT OR IGNORE INTO ActiveSieges(DefenderId,ChatId,AttackerId)
+ SELECT c.OwnerId,c.ChatId,
+   (SELECT w.AttackerId FROM WarBattles w
+    WHERE w.DefenderId=c.OwnerId AND w.ChatId=c.ChatId AND w.Winner='AttackerHeavyVictory' AND w.AttackerId IS NOT NULL
+    ORDER BY w.Id DESC LIMIT 1)
+ FROM Countries c
+ WHERE c.Besieged>0 AND c.Cities<4
+   AND EXISTS(SELECT 1 FROM WarBattles w WHERE w.DefenderId=c.OwnerId AND w.ChatId=c.ChatId
+              AND w.Winner='AttackerHeavyVictory' AND w.AttackerId IS NOT NULL)";
+            migrated=migrate.ExecuteNonQuery();
+        }
+        using(var cleanProgress=con.CreateCommand())
+        {
+            cleanProgress.Transaction=tx;cleanProgress.CommandText=@"DELETE FROM RoutDefeats
+ WHERE Count<=0
+ OR NOT EXISTS(SELECT 1 FROM Countries a WHERE a.OwnerId=RoutDefeats.AttackerId AND a.ChatId=RoutDefeats.ChatId)
+ OR NOT EXISTS(SELECT 1 FROM Countries d WHERE d.OwnerId=RoutDefeats.DefenderId AND d.ChatId=RoutDefeats.ChatId)
+ OR EXISTS(SELECT 1 FROM AllianceMembers x JOIN AllianceMembers y
+    ON y.AllianceId=x.AllianceId AND y.ChatId=x.ChatId
+    WHERE x.ChatId=RoutDefeats.ChatId AND x.UserId=RoutDefeats.AttackerId AND y.UserId=RoutDefeats.DefenderId)";
+            progressRemoved=cleanProgress.ExecuteNonQuery();
+        }
+        using(var cleanActive=con.CreateCommand())
+        {
+            cleanActive.Transaction=tx;cleanActive.CommandText=@"DELETE FROM ActiveSieges
+ WHERE NOT EXISTS(SELECT 1 FROM Countries a WHERE a.OwnerId=ActiveSieges.AttackerId AND a.ChatId=ActiveSieges.ChatId)
+ OR NOT EXISTS(SELECT 1 FROM Countries d WHERE d.OwnerId=ActiveSieges.DefenderId AND d.ChatId=ActiveSieges.ChatId)
+ OR EXISTS(SELECT 1 FROM Countries d WHERE d.OwnerId=ActiveSieges.DefenderId AND d.ChatId=ActiveSieges.ChatId AND d.Cities>=4)
+ OR EXISTS(SELECT 1 FROM AllianceMembers x JOIN AllianceMembers y
+    ON y.AllianceId=x.AllianceId AND y.ChatId=x.ChatId
+    WHERE x.ChatId=ActiveSieges.ChatId AND x.UserId=ActiveSieges.AttackerId AND y.UserId=ActiveSieges.DefenderId)";
+            activeRemoved=cleanActive.ExecuteNonQuery();
+        }
+        using(var fix=con.CreateCommand())
+        {
+            fix.Transaction=tx;fix.CommandText=@"UPDATE Countries SET Besieged=CASE
+ WHEN Cities>=4 THEN 0
+ WHEN EXISTS(SELECT 1 FROM ActiveSieges s WHERE s.DefenderId=Countries.OwnerId AND s.ChatId=Countries.ChatId)
+   THEN CASE WHEN Cities<=2 THEN 2 ELSE 1 END
+ ELSE 0 END
+ WHERE Besieged<>CASE
+ WHEN Cities>=4 THEN 0
+ WHEN EXISTS(SELECT 1 FROM ActiveSieges s WHERE s.DefenderId=Countries.OwnerId AND s.ChatId=Countries.ChatId)
+   THEN CASE WHEN Cities<=2 THEN 2 ELSE 1 END
+ ELSE 0 END";
+            statesFixed=fix.ExecuteNonQuery();
+        }
+        tx.Commit();return $"migrated={migrated}, progressRemoved={progressRemoved}, activeRemoved={activeRemoved}, statesFixed={statesFixed}";
+    }
+
     public static int IncrementHeavyOffensiveWins(long ownerId, long chatId)
     {
         using var con = OpenCon();
@@ -1933,7 +2052,9 @@ static partial class Database
         var c = GetCountry(ownerId, chatId);
         if (c == null) return false;
         if (c.Cities >= MAX_CITIES) return false;
-        SetCities(ownerId, chatId, c.Cities + 1);
+        int cities=c.Cities+1;
+        SetCities(ownerId, chatId, cities);
+        RefreshActiveSiegeAfterCityRecovery(ownerId,chatId,cities);
         return true;
     }
 
@@ -4292,6 +4413,8 @@ partial class Program
 
     static readonly ConcurrentDictionary<string, int> attackCounts = new();
     static int MAX_ATTACKS_PER_UPDATE = 8;
+    const int MAX_NAVAL_ATTACKS_PER_UPDATE = 8;
+    static readonly ConcurrentDictionary<string, int> navalAttackCounts = new();
     static readonly ConcurrentDictionary<string, int> transferCounts = new();
     static int MAX_TRANSFERS_PER_UPDATE = 2;
     static DateTime lastAssetUpdateAt = DateTime.MinValue;
@@ -4313,6 +4436,8 @@ partial class Program
         BreakAttackerShieldOnAttack(attackerId,chatId);
         if(!fullExemption)Database.AddAttackShieldHit(defenderId,chatId);
     }
+    static int GetNavalAttackCount(long chatId,long ownerId) => navalAttackCounts.TryGetValue(AtkKey(chatId,ownerId),out var v)?v:0;
+    static int IncNavalAttackCount(long chatId,long ownerId) => navalAttackCounts.AddOrUpdate(AtkKey(chatId,ownerId),1,(_,v)=>v+1);
     static string TfKey(long chatId, long ownerId) => $"{chatId}:{ownerId}";
     static int GetTransferCount(long chatId, long ownerId) => transferCounts.TryGetValue(TfKey(chatId, ownerId), out var v) ? v : 0;
     static int IncTransferCount(long chatId, long ownerId) => transferCounts.AddOrUpdate(TfKey(chatId, ownerId), 1, (_, v) => v + 1);
@@ -4384,7 +4509,7 @@ partial class Program
         "• زمین و آب‌وهوا پس از ثبت فرمان‌ها به‌صورت منسجم تولید می‌شوند.\n" +
         "• فرماندهان بر اساس استراتژی، تاکتیک، اطلاعات کشف‌شده و وضعیت واقعی میدان تصمیم می‌گیرند.\n" +
         "• پیروزی سنگین: بیش از ۳۵km پیشروی مؤثر با بازگشت حداقل ۵۰۰۰ سرباز و ۵۰ تانک سالم.\n" +
-        "• موتور دریایی فعلاً غیرفعال است.\n\n" +
+        "• <b>لیست نبردهای در جریان</b> در پیوی — نمایش پیشرفت گرفتن یا از دست دادن شهر.\n\n" +
 
         "🛡 <b>دفاع — چندمدلی و دریایی</b>\n" +
         "• <b>وضعیت دفاع</b> در پیوی: درصد برای هر مدل تانک/جنگنده/قایق/زیر جداگانه (20-100%). حداقل 20% همیشه در دفاع.\n" +
@@ -4518,12 +4643,14 @@ partial class Program
             EconomyRegressionTests.Run();
             AttackSelectionRegressionTests.Run();
             StrategicBattleRegressionTests.Run();
+            SiegeRegressionTests.Run();
             GroupLifecycleRegressionTests.Run();
             return;
         }
         if (string.IsNullOrWhiteSpace(BOT_TOKEN))
             throw new InvalidOperationException("BOT_TOKEN environment variable is required.");
         Database.Init();
+        Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}");
         Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
         Database.InitNavalV2();
         Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
@@ -4624,6 +4751,7 @@ partial class Program
             try
             {
                 Database.Init();
+                Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}");
                 Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
                 Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
@@ -4638,6 +4766,7 @@ partial class Program
                 TryDeleteSqliteSidecar("gamedata.db-wal");
                 TryDeleteSqliteSidecar("gamedata.db-shm");
                 Database.Init();
+                Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}");
                 Console.WriteLine($"[DEPLOYMENT INTEGRITY] {Database.RepairDeploymentIntegrity()}");
                 Database.InitNavalV2();
                 Console.WriteLine($"[NAVAL INTEGRITY] {Database.RepairPendingNavalOperations()}");
@@ -5303,7 +5432,7 @@ partial class Program
         }
 
         if (ownerTxt == "حمله" || ownerTxt == "ترنسفر" || ownerTxt == "انتقال" || ownerTxt == "ارسال محموله" || ownerTxt == "ارسال منابع" ||
-            IsNavalCancellationCommand(ownerTxt) ||
+            (IsNavalCancellationCommand(ownerTxt) || IsOngoingBattlesCommand(ownerTxt)) ||
             ownerTxt == "صف آرایی تهاجمی" || ownerTxt == "صف آرایی دفاعی" || ownerTxt == "صف‌آرایی تهاجمی" || ownerTxt == "صف‌آرایی دفاعی" ||
             (sessions.TryGetValue(uid, out var atkSess) && atkSess != null &&
             (atkSess.Step == SessionStep.AttackWaitingGroup ||
@@ -5674,6 +5803,17 @@ partial class Program
     {
         long uid = user.Id;
         string txt = msg.Text?.Trim() ?? "";
+        if(IsOngoingBattlesCommand(txt))
+        {
+            if(Database.GetCountry(uid,chat.Id)==null)
+            {
+                await SendTemp(chat.Id,MsgNoCountryGuide,replyTo:msg.MessageId,ct:ct);
+                return;
+            }
+            await SendTemp(chat.Id,"⚔️ لیست نبردهای در جریان به پیوی شما ارسال شد.",replyTo:msg.MessageId,ct:ct);
+            try{await ShowOngoingBattles(uid,ct,chat.Id);}catch{await SendTemp(chat.Id,"❌ اول ربات را در پیوی استارت کنید.",replyTo:msg.MessageId,ct:ct);}
+            return;
+        }
         if (uid == OWNER_ID && txt == "یک مقصد است اینجا برایمان")
         {
             sessions[uid] = new UserSession { Step = SessionStep.OwnerWaitingVisionSource, VisionDestChatId = chat.Id };
@@ -6679,6 +6819,36 @@ partial class Program
     static bool IsNavalCancellationCommand(string text) =>
         text is "لغو لشکر کشی دریایی" or "لغو لشکرکشی دریایی" or
             "لغو لشکرکشی دریائی" or "لغو عملیات دریایی" or "بازگشت ناوگان";
+    static bool IsOngoingBattlesCommand(string text) =>
+        text is "لیست نبرد های در جریان" or "لیست نبردهای در جریان" or
+            "لیست نبرد‌های در جریان" or "نبرد های در جریان" or "نبردهای در جریان" or "نبرد‌های در جریان";
+
+    static async Task ShowOngoingBattles(long uid,CancellationToken ct,long? onlyChatId=null)
+    {
+        Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}");
+        var lines=new List<string>{"⚔️ لیست نبردهای در جریان","فقط پیروزی‌های سنگین برای فتح شهر شمرده می‌شوند."};
+        int shown=0;
+        var chatIds=Database.GetUserActiveChatIds(uid);
+        if(onlyChatId.HasValue)chatIds=chatIds.Where(x=>x==onlyChatId.Value).ToList();
+        foreach(long chatId in chatIds)
+        {
+            var progress=Database.GetRoutBattleProgress(uid,chatId);
+            if(progress.Count==0)continue;
+            string title=await GetGroupTitleCached(chatId,ct);
+            lines.Add($"\n💬 {title}");
+            foreach(var battle in progress)
+            {
+                int remaining=Math.Max(0,5-battle.Count);
+                if(battle.AttackerId==uid)
+                    lines.Add($"🟢 علیه {battle.DefenderName}: {battle.Count}/5 — {remaining} پیروزی سنگین تا گرفتن یک شهر");
+                else
+                    lines.Add($"🔴 مقابل {battle.AttackerName}: {battle.Count}/5 — {remaining} شکست سنگین تا از دست دادن یک شهر");
+                shown++;
+            }
+        }
+        if(shown==0)lines.Add("\n✅ در حال حاضر هیچ نبردی با پیشرفت فتح شهر ندارید.");
+        await SendPermanent(uid,string.Join('\n',lines),ct:ct);
+    }
 
     static async Task ShowNavalCancellationMenu(long uid,CancellationToken ct)
     {
@@ -6714,6 +6884,12 @@ partial class Program
         long uid = user.Id;
         string txt = msg.Text?.Trim() ?? "";
 
+        if(IsOngoingBattlesCommand(txt))
+        {
+            EndSession(uid);
+            await ShowOngoingBattles(uid,ct);
+            return;
+        }
         if(IsNavalCancellationCommand(txt))
         {
             EndSession(uid);
@@ -7686,6 +7862,12 @@ partial class Program
                 var selectedBs = bsModelsList.Select(x => x.Split(':', 2))
                     .Where(x => x.Length == 2 && long.TryParse(x[1], out _))
                     .Select(x => new NavalModelAmount(x[0], long.Parse(x[1]))).ToList();
+                if(GetNavalAttackCount(sess.AttackChatId,uid)>=MAX_NAVAL_ATTACKS_PER_UPDATE&&!fullExemption)
+                {
+                    EndSession(uid);
+                    await SendTemp(uid,$"⛔ سهمیه حمله دریایی این کشور تمام شده است ({MAX_NAVAL_ATTACKS_PER_UPDATE} عملیات تا آپدیت بعدی).",ct:ct);
+                    return;
+                }
                 // معافیت کامل تمام انتظارهای حمله را حذف می‌کند؛ سفر دریایی فقط یک دقیقه است.
                 int travelMinutes = fullExemption ? 1 : Random.Shared.Next(10, 301);
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -7695,6 +7877,7 @@ partial class Program
                     operationId = Database.CreateNavalOperation(attackerCountry, defenderCountry,
                         selectedBoats, selectedSubs, selectedBs, sess.AttackNavalTactic, nowMs, travelMinutes);
                     BreakAttackerShieldOnAttack(attackerCountry.OwnerId,attackerCountry.ChatId);
+                    IncNavalAttackCount(attackerCountry.ChatId,attackerCountry.OwnerId);
                     ScheduleNavalArrival(operationId,nowMs+travelMinutes*60_000L);
                 }
                 catch (Exception ex)
@@ -8044,6 +8227,7 @@ partial class Program
             case "airdef_tactic": await HandleAirDefTacticCallback(cb, parts, ct); break;
             case "attack_group": await HandleAttackGroupCallback(cb, parts, ct); break;
             case "attack_target": await HandleAttackTargetCallback(cb, parts, ct); break;
+            case "revenge": await HandleRevengeCallback(cb, parts, ct); break;
             case "attack_type": await HandleAttackTypeCallback(cb, parts, ct); break;
             case "attack_strategy": await HandleAttackStrategyCallback(cb, parts, ct); break;
             case "attack_tactic": await HandleAttackTacticCallback(cb, parts, ct); break;
@@ -8997,8 +9181,9 @@ partial class Program
     }
 
     static double GetPopulationFactor(long population) => 1.0;
-    static int MaxBuildLevel(Country c, string buildingType) => c.Besieged >= 2 ? 3 : buildingType == "mine" ? 7 : 5;
-    static double SiegeIncomeFactor(Country c) => c.Besieged >= 2 ? 0.5 : 1.0;
+    internal static bool HasDefaultCitySiege(Country c) => c.Cities<4&&c.Besieged>0;
+    static int MaxBuildLevel(Country c, string buildingType) => HasDefaultCitySiege(c)&&c.Besieged>=2 ? 3 : buildingType == "mine" ? 7 : 5;
+    static double SiegeIncomeFactor(Country c) => HasDefaultCitySiege(c)&&c.Besieged>=2 ? 0.5 : 1.0;
 
     static long CalcTaxIncome(Country c)
     {
@@ -9087,6 +9272,7 @@ partial class Program
             if (Database.GetAllianceMembers(inv.AllianceId).Count >= maxMembers) { await bot.AnswerCallbackQueryAsync(cb.Id, "⛔ ظرفیت پر!", showAlert: true, cancellationToken: ct); return; }
             if (IsSuperpowerCollision(inv.ChatId, inv.LeaderId, inv.TargetUserId, out string reason)) { await bot.AnswerCallbackQueryAsync(cb.Id, "❌ " + reason, showAlert: true, cancellationToken: ct); return; }
             Database.AddAllianceMember(inv.AllianceId, inv.ChatId, inv.TargetUserId);
+            Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}");
             Database.DeleteUserInvites(inv.ChatId, inv.TargetUserId);
             await bot.AnswerCallbackQueryAsync(cb.Id, "🎉 عضو شدید!", cancellationToken: ct);
             if (cb.Message != null) await bot.EditMessageTextAsync(cb.Message.Chat.Id, cb.Message.MessageId, $"🎉 به اتحاد «{alliance.Name}» پیوستید!", cancellationToken: ct);
@@ -9439,9 +9625,10 @@ partial class Program
         tInc *= SiegeIncomeFactor(c);
         double birthRate = c.Welfare / 100.0 * 0.05;
         double wTarget = WelfareTarget(c);
-        string status = c.Besieged switch { 2 => "🆘 بحرانی", 1 => "⚠️ تحت محاصره", _ => "🏛 باثبات" };
+        bool defaultCitySiege=HasDefaultCitySiege(c);
+        string status = !defaultCitySiege?"🏛 باثبات":c.Besieged>=2?"🆘 بحرانی":"⚠️ تحت محاصره";
         long mp = CalcManpower(c);
-        string crisis = c.Besieged >= 2 ? "🆘 بحرانی! (۵۰٪ درآمد، قفل سطح ۴-۵)\n\n" : "";
+        string crisis = defaultCitySiege&&c.Besieged>=2 ? "🆘 بحرانی! (۵۰٪ درآمد، قفل سطح ۴-۵)\n\n" : "";
         string navalLine = BuildNavalInventorySummary(c);
         string info = crisis + $"🏳️ کشور: {c.Name}\n👤 مالک: {c.OwnerName}\n{status}\n⚡ مان‌پاور: {mp / 1000.0:F1}K\n\n" +
             $"💰 پول: {(c.Money / 1000.0):F1}K\n🏭 ساختمان: +{bInc / 1000.0:F1}K\n🧾 مالیات: +{tInc / 1000.0:F1}K ({c.TaxRate}%)\n\n" +
@@ -10412,7 +10599,9 @@ partial class Program
         try { await ProcessActiveTransfers(CancellationToken.None); } catch (Exception ex) { Console.WriteLine($"[Transfers ERR] {ex.Message}"); }
         try { await ProcessActiveDeployments(CancellationToken.None); } catch (Exception ex) { Console.WriteLine($"[Deployments ERR] {ex.Message}"); }
         try { await ProcessNavalInvasions(CancellationToken.None); } catch (Exception ex) { Console.WriteLine($"[NavalInvasions ERR] {ex.Message}"); }
+        try { Console.WriteLine($"[SIEGE INTEGRITY] {Database.RepairSiegeIntegrity()}"); } catch(Exception ex) { Console.WriteLine($"[SIEGE INTEGRITY ERR] {ex.Message}"); }
         attackCounts.Clear();
+        navalAttackCounts.Clear();
         transferCounts.Clear();
         lastAssetUpdateAt = DateTime.UtcNow;
         var eligibleCountries=Database.GetAllCountries().Where(c=>Database.IsBotGroupActive(c.ChatId)).ToList();
@@ -10702,6 +10891,26 @@ partial class Program
             }
             finally { ReleaseCountryMutationLocks(locks); }
         }
+    }
+
+    static async Task HandleRevengeCallback(CallbackQuery cb,string[] parts,CancellationToken ct)
+    {
+        if(parts.Length<3||cb.Message==null||!TryParseLong(parts[1],out long chatId)||!TryParseLong(parts[2],out long targetId))return;
+        long uid=cb.From.Id;
+        var attacker=Database.GetCountry(uid,chatId);
+        var target=Database.GetCountry(targetId,chatId);
+        if(attacker==null||target==null)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id,"❌ یکی از دو کشور دیگر وجود ندارد.",showAlert:true,cancellationToken:ct);
+            return;
+        }
+        long myAlliance=Database.GetUserAllianceId(chatId,uid);
+        if(myAlliance>0&&Database.GetUserAllianceId(chatId,targetId)==myAlliance)
+        {
+            await bot.AnswerCallbackQueryAsync(cb.Id,"❌ اکنون هم‌اتحاد هستید و امکان انتقام وجود ندارد.",showAlert:true,cancellationToken:ct);
+            return;
+        }
+        await HandleAttackTargetCallback(cb,new[]{"attack_target",chatId.ToString(),targetId.ToString()},ct);
     }
 
     static async Task HandleAttackGroupCallback(CallbackQuery cb, string[] parts, CancellationToken ct)
@@ -11763,17 +11972,28 @@ partial class Program
                 int cities = Math.Max(0, defender.Cities - 1);
                 Database.SetCities(defenderId, chatId, cities);
                 bool gained = Database.AddCityToAttacker(attackerId, chatId);
-                Database.SetBesieged(defenderId, chatId, cities <= 2 ? 2 : 1);
+                Database.SetActiveSiege(defenderId,chatId,attackerId,cities);
                 if (cities == 0) Database.DeleteCountry(defenderId, chatId);
                 try
                 {
                     await SendPermanent(chatId,
                         $"🏙 پس از پنجمین شکست سنگین برابر {attacker.Name}، کشور {defender.Name} یک شهر از دست داد. شهرهای باقی‌مانده: {cities}" +
                         (gained ? "" : "\nسقف شهرهای مهاجم پر است."), ct: ct);
-                    if (cities == 0)
-                        await SendPermanent(chatId, $"☠️ کشور {defender.Name} سقوط کرد.", ct: ct);
                 }
                 catch { }
+                try
+                {
+                    string groupTitle=await GetGroupTitleCached(chatId,ct);
+                    InlineKeyboardMarkup? revengeMarkup=cities>0
+                        ?new InlineKeyboardMarkup(new[]{new[]{InlineKeyboardButton.WithCallbackData("⚔️ انتقام",$"revenge:{chatId}:{attackerId}")}})
+                        :null;
+                    await SendPermanent(defenderId,
+                        $"🏙 یکی از شهرهای شما تصرف شد!\n⚔️ {attacker.Name} شهر شما را در گپ «{groupTitle}» تصرف کرد.\n"+
+                        $"🏘 شهرهای باقی‌مانده: {cities}",revengeMarkup,ct:ct);
+                }
+                catch { }
+                if(cities==0)
+                    try{await SendPermanent(chatId,$"☠️ کشور {defender.Name} سقوط کرد.",ct:ct);}catch{}
             }
 
             // City transfer is handled exactly once by the per-attacker/defender rout
@@ -11791,7 +12011,7 @@ partial class Program
                 {
                     int cities = Math.Min(Database.MAX_CITIES, defender.Cities + 1);
                     Database.SetCities(defenderId, chatId, cities);
-                    Database.SetBesieged(defenderId, chatId, cities <= 2 ? 2 : 0);
+                    Database.RefreshActiveSiegeAfterCityRecovery(defenderId,chatId,cities);
                     try { await SendPermanent(chatId, $"🛡 {defender.Name} با پنج دفاع موفق یک شهر را بازپس گرفت. شهرها: {cities}", ct: ct); }
                     catch { }
                 }
