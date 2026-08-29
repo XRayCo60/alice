@@ -160,6 +160,18 @@ class DeploymentContributor
     public int Tactic { get; set; } = 1;
 }
 
+sealed class SpamRestrictionInfo
+{
+    public long UserId { get; set; }
+    public long ChatId { get; set; }
+    public long UntilMs { get; set; }
+    public int Level { get; set; }
+    public string Reason { get; set; } = "";
+    public string LastFingerprint { get; set; } = "";
+    public int DroppedCount { get; set; }
+    public long UpdatedAtMs { get; set; }
+}
+
 class NavalInvasion
 {
     public long Id { get; set; }
@@ -634,12 +646,13 @@ static partial class Database
         string defenseModelAmounts = @"CREATE TABLE IF NOT EXISTS DefenseModelAmounts(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, Category TEXT NOT NULL, ModelName TEXT NOT NULL, Count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId,Category,ModelName));";
         string defenseConfigurationFlags = @"CREATE TABLE IF NOT EXISTS DefenseConfigurationFlags(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, SoldiersConfigured INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string botGroupStatus = @"CREATE TABLE IF NOT EXISTS BotGroupStatus(ChatId INTEGER PRIMARY KEY, IsActive INTEGER NOT NULL DEFAULT 1, UpdatedAtMs INTEGER NOT NULL DEFAULT 0);";
+        string spamRestrictions = @"CREATE TABLE IF NOT EXISTS SpamRestrictions(UserId INTEGER PRIMARY KEY, ChatId INTEGER NOT NULL DEFAULT 0, UntilMs INTEGER NOT NULL DEFAULT 0, Level INTEGER NOT NULL DEFAULT 0, Reason TEXT NOT NULL DEFAULT '', LastFingerprint TEXT NOT NULL DEFAULT '', DroppedCount INTEGER NOT NULL DEFAULT 0, UpdatedAtMs INTEGER NOT NULL DEFAULT 0);";
         //  – naval expansion tables
         string navalInvasions = @"CREATE TABLE IF NOT EXISTS NavalInvasions(Id INTEGER PRIMARY KEY AUTOINCREMENT, ChatId INTEGER NOT NULL, AttackerId INTEGER NOT NULL, DefenderId INTEGER NOT NULL, Boats INTEGER DEFAULT 0, Submarines INTEGER DEFAULT 0, Battleships INTEGER DEFAULT 0, BoatModels TEXT DEFAULT '', SubModels TEXT DEFAULT '', BattleshipModels TEXT DEFAULT '', Strategy INTEGER DEFAULT 1, Tactic INTEGER DEFAULT 1, CreatedAtMs INTEGER NOT NULL, ArriveAtMs INTEGER NOT NULL, Processed INTEGER DEFAULT 0, AttackerName TEXT DEFAULT '', DefenderName TEXT DEFAULT '');";
         string attackShields = @"CREATE TABLE IF NOT EXISTS AttackShields(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, ShieldUntilMs INTEGER NOT NULL, AttackCount INTEGER DEFAULT 0, LastAttackMs INTEGER DEFAULT 0, PRIMARY KEY(OwnerId,ChatId));";
         string boatFuelStates = @"CREATE TABLE IF NOT EXISTS BoatFuelStates(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, FuelPct INTEGER DEFAULT 100, PRIMARY KEY(OwnerId,ChatId));";
         string navalBoatCooldowns = @"CREATE TABLE IF NOT EXISTS NavalBoatCooldowns(OwnerId INTEGER NOT NULL, ChatId INTEGER NOT NULL, CooldownUntilMs INTEGER NOT NULL, PRIMARY KEY(OwnerId,ChatId));";
-        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, activeSieges, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, botGroupStatus, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
+        foreach (var sql in new[] { countries, flags, settings, royal, cooldowns, defeats, shieldExemptions, alliances, allianceMembers, allianceInvites, transfers, deployments, deploymentContributors, deploymentContributorModels, groupLockExemptions, visionLogs, visionMessageMap, attackAbandonLocks, dailyDefendCounts, attackerFlags, heavyOffensiveWins, activeSieges, warBattles, battleJobs, eqModels, defenseModels, defenseModelAmounts, defenseConfigurationFlags, botGroupStatus, spamRestrictions, navalInvasions, attackShields, boatFuelStates, navalBoatCooldowns })
         {
             using var cmd = con.CreateCommand();
             cmd.CommandText = sql;
@@ -1253,6 +1266,46 @@ static partial class Database
         cmd.Parameters.AddWithValue("@k", key);
         var result = cmd.ExecuteScalar();
         return result?.ToString() ?? "";
+    }
+
+    public static SpamRestrictionInfo? GetSpamRestriction(long userId)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="SELECT UserId,ChatId,UntilMs,Level,Reason,LastFingerprint,DroppedCount,UpdatedAtMs FROM SpamRestrictions WHERE UserId=@id";
+        cmd.Parameters.AddWithValue("@id",userId);using var r=cmd.ExecuteReader();if(!r.Read())return null;
+        return new SpamRestrictionInfo{UserId=r.GetInt64(0),ChatId=r.GetInt64(1),UntilMs=r.GetInt64(2),Level=r.GetInt32(3),
+            Reason=r.IsDBNull(4)?"":r.GetString(4),LastFingerprint=r.IsDBNull(5)?"":r.GetString(5),
+            DroppedCount=r.GetInt32(6),UpdatedAtMs=r.GetInt64(7)};
+    }
+
+    public static void SaveSpamRestriction(SpamRestrictionInfo item)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText=@"INSERT INTO SpamRestrictions(UserId,ChatId,UntilMs,Level,Reason,LastFingerprint,DroppedCount,UpdatedAtMs)
+ VALUES(@u,@c,@until,@level,@reason,@fingerprint,@dropped,@updated)
+ ON CONFLICT(UserId) DO UPDATE SET ChatId=@c,UntilMs=@until,Level=@level,Reason=@reason,
+ LastFingerprint=@fingerprint,DroppedCount=@dropped,UpdatedAtMs=@updated";
+        cmd.Parameters.AddWithValue("@u",item.UserId);cmd.Parameters.AddWithValue("@c",item.ChatId);
+        cmd.Parameters.AddWithValue("@until",item.UntilMs);cmd.Parameters.AddWithValue("@level",item.Level);
+        cmd.Parameters.AddWithValue("@reason",item.Reason);cmd.Parameters.AddWithValue("@fingerprint",item.LastFingerprint);
+        cmd.Parameters.AddWithValue("@dropped",item.DroppedCount);cmd.Parameters.AddWithValue("@updated",item.UpdatedAtMs);
+        cmd.ExecuteNonQuery();
+    }
+
+    public static void ClearSpamRestriction(long userId)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();cmd.CommandText="DELETE FROM SpamRestrictions WHERE UserId=@id";
+        cmd.Parameters.AddWithValue("@id",userId);cmd.ExecuteNonQuery();
+    }
+
+    public static List<SpamRestrictionInfo> GetSpamRestrictionReport(int limit=30)
+    {
+        var list=new List<SpamRestrictionInfo>();using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="SELECT UserId,ChatId,UntilMs,Level,Reason,LastFingerprint,DroppedCount,UpdatedAtMs FROM SpamRestrictions ORDER BY UpdatedAtMs DESC LIMIT @limit";
+        cmd.Parameters.AddWithValue("@limit",Math.Clamp(limit,1,100));using var r=cmd.ExecuteReader();
+        while(r.Read())list.Add(new SpamRestrictionInfo{UserId=r.GetInt64(0),ChatId=r.GetInt64(1),UntilMs=r.GetInt64(2),Level=r.GetInt32(3),
+            Reason=r.IsDBNull(4)?"":r.GetString(4),LastFingerprint=r.IsDBNull(5)?"":r.GetString(5),DroppedCount=r.GetInt32(6),UpdatedAtMs=r.GetInt64(7)});
+        return list;
     }
 
     public static void UpdateCountryResources(long ownerId, long chatId, long money, long iron, long tanks = 0)
@@ -4382,6 +4435,147 @@ partial class Program
     static readonly HashSet<int> processedUpdates = new();
     static readonly object processedLock = new();
 
+    enum SpamDecisionKind { Allow, Drop, Warn }
+    readonly record struct SpamDecision(SpamDecisionKind Kind,long UserId,long UntilMs,string Reason);
+    readonly record struct SpamEvent(long AtMs,string Fingerprint,bool InvalidCallback);
+    sealed class SpamState
+    {
+        public readonly object Gate=new();
+        public readonly Queue<SpamEvent> Events=new();
+        public bool Loaded;
+        public long RestrictUntilMs;
+        public int Level;
+        public long LastViolationMs;
+        public long LastWarningMs;
+        public string LastFingerprint="";
+        public long LastFingerprintAtMs;
+        public int Dropped;
+        public string Reason="";
+    }
+    static readonly ConcurrentDictionary<long,SpamState> spamStates=new();
+    static readonly HashSet<string> knownCallbackActions=new(StringComparer.Ordinal)
+    {
+        "cancel","faction","eq_details","dep_info","build_menu","upgrade","timing","tank_info","tank_buy",
+        "plane_info","plane_buy","bomber_info","bomber_buy","aa_info","aa_buy","defense_status","defense_tactic",
+        "defense_tactic_select","defense_set","naval_defense","naval_defense_strategy","naval_defense_tactic","naval_cancel",
+        "naval_locked","defense_pct","defense_model_pct","boat_info","boat_buy","sub_info","sub_buy","battleship_info",
+        "battleship_buy","battleship_repair","battleship_repair_quote","battleship_repair_unit","battleship_scrap_menu",
+        "battleship_scrap","battleship_scrap_confirm","airdef_strategy","airdef_tactic","attack_group","attack_target",
+        "revenge","attack_type","attack_strategy","attack_tactic","attack_air_strategy","attack_air_tactic",
+        "attack_naval_strategy","attack_naval_tactic"
+    };
+
+    static bool IsKnownCallbackData(string data)
+    {
+        if(data.StartsWith("adm:",StringComparison.Ordinal)||data.StartsWith("spam_admin:",StringComparison.Ordinal)||
+           data.StartsWith("ally_",StringComparison.Ordinal)||data.StartsWith("tf_",StringComparison.Ordinal)||
+           data.StartsWith("dep_",StringComparison.Ordinal))return true;
+        string action=data.Split(':',2)[0];return knownCallbackActions.Contains(action);
+    }
+
+    static string SpamFingerprint(Update update,out long userId,out long chatId,out bool invalidCallback,out bool callback)
+    {
+        userId=0;chatId=0;invalidCallback=false;callback=false;
+        if(update.CallbackQuery!=null)
+        {
+            callback=true;userId=update.CallbackQuery.From.Id;chatId=update.CallbackQuery.Message?.Chat.Id??userId;
+            string data=update.CallbackQuery.Data??"";invalidCallback=!IsKnownCallbackData(data);
+            int messageId=update.CallbackQuery.Message?.MessageId??0;
+            return $"cb:{chatId}:{messageId}:{data}";
+        }
+        if(update.Message?.From!=null)
+        {
+            userId=update.Message.From.Id;chatId=update.Message.Chat.Id;
+            string value=(update.Message.Text??update.Message.Caption??update.Message.Type.ToString()).Trim().Replace('\n',' ');
+            if(value.Length>80)value=value[..80];
+            return $"msg:{chatId}:{value}";
+        }
+        return "";
+    }
+
+    static SpamDecision EvaluateSpam(Update update)
+    {
+        string fingerprint=SpamFingerprint(update,out long userId,out long chatId,out bool invalidCallback,out bool callback);
+        if(userId==0||userId==OWNER_ID||fingerprint.Length==0)return new(SpamDecisionKind.Allow,userId,0,"");
+        var state=spamStates.GetOrAdd(userId,_=>new SpamState());
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        lock(state.Gate)
+        {
+            if(!state.Loaded)
+            {
+                state.Loaded=true;
+                try
+                {
+                    var saved=Database.GetSpamRestriction(userId);
+                    if(saved!=null)
+                    {
+                        state.RestrictUntilMs=saved.UntilMs;state.Level=saved.Level;state.LastViolationMs=saved.UpdatedAtMs;
+                        state.Dropped=saved.DroppedCount;state.Reason=saved.Reason;
+                    }
+                }
+                catch { }
+            }
+            if(state.RestrictUntilMs>now)
+            {
+                state.Dropped++;
+                if(state.Dropped%25==0)
+                    try{Database.SaveSpamRestriction(new SpamRestrictionInfo{UserId=userId,ChatId=chatId,UntilMs=state.RestrictUntilMs,
+                        Level=state.Level,Reason=state.Reason,LastFingerprint=state.LastFingerprint,DroppedCount=state.Dropped,UpdatedAtMs=state.LastViolationMs});}catch{}
+                bool warn=now-state.LastWarningMs>=60_000;
+                if(warn)state.LastWarningMs=now;
+                return new(warn?SpamDecisionKind.Warn:SpamDecisionKind.Drop,userId,state.RestrictUntilMs,"محدودیت ضداسپم فعال است");
+            }
+
+            while(state.Events.Count>0&&now-state.Events.Peek().AtMs>60_000)state.Events.Dequeue();
+            bool exactFast=callback&&state.LastFingerprint==fingerprint&&now-state.LastFingerprintAtMs<=1_200;
+            state.LastFingerprint=fingerprint;state.LastFingerprintAtMs=now;
+            state.Events.Enqueue(new SpamEvent(now,fingerprint,invalidCallback));
+            var tenSeconds=state.Events.Where(x=>now-x.AtMs<=10_000).ToList();
+            int sameTen=tenSeconds.Count(x=>x.Fingerprint==fingerprint);
+            int invalidTen=tenSeconds.Count(x=>x.InvalidCallback);
+            string? violation=null;
+            if(invalidTen>=8)violation="دکمه‌های نامعتبر تکراری";
+            else if(exactFast&&sameTen>=7)violation="فشردن پشت‌سرهم یک دکمه";
+            else if(tenSeconds.Count>=30&&tenSeconds.GroupBy(x=>x.Fingerprint).Max(x=>x.Count())>=15)violation="درخواست تکراری سنگین";
+            else if(tenSeconds.Count>=60)violation="حجم غیرعادی درخواست";
+            else if(state.Events.Count>=180)violation="اسپم مداوم یک‌دقیقه‌ای";
+
+            if(violation==null)
+            {
+                if(exactFast||invalidCallback)
+                {
+                    state.Dropped++;
+                    return new(SpamDecisionKind.Drop,userId,0,"");
+                }
+                return new(SpamDecisionKind.Allow,userId,0,"");
+            }
+
+            state.Level=now-state.LastViolationMs>3_600_000?1:Math.Min(3,state.Level+1);
+            state.LastViolationMs=now;
+            long duration=state.Level switch{1=>15_000,2=>120_000,_=>1_800_000};
+            state.RestrictUntilMs=now+duration;state.LastWarningMs=now;state.Dropped++;state.Reason=violation;
+            string storedFingerprint=fingerprint.Length>120?fingerprint[..120]:fingerprint;
+            try{Database.SaveSpamRestriction(new SpamRestrictionInfo{UserId=userId,ChatId=chatId,UntilMs=state.RestrictUntilMs,
+                Level=state.Level,Reason=violation,LastFingerprint=storedFingerprint,DroppedCount=state.Dropped,UpdatedAtMs=now});}catch{}
+            Console.WriteLine($"[SPAM BLOCK] user={userId} chat={chatId} level={state.Level} until={state.RestrictUntilMs} reason={violation}");
+            return new(SpamDecisionKind.Warn,userId,state.RestrictUntilMs,violation);
+        }
+    }
+
+    static void ClearSpamState(long userId)
+    {
+        spamStates.TryRemove(userId,out _);Database.ClearSpamRestriction(userId);
+    }
+
+    static void RestrictSpamUser(long userId,long chatId,TimeSpan duration,string reason)
+    {
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();long until=now+(long)duration.TotalMilliseconds;
+        var state=spamStates.GetOrAdd(userId,_=>new SpamState());
+        lock(state.Gate){state.Loaded=true;state.RestrictUntilMs=until;state.Level=3;state.LastViolationMs=now;state.LastWarningMs=0;state.Reason=reason;
+            Database.SaveSpamRestriction(new SpamRestrictionInfo{UserId=userId,ChatId=chatId,UntilMs=until,Level=3,Reason=reason,
+                LastFingerprint=state.LastFingerprint,DroppedCount=state.Dropped,UpdatedAtMs=now});}
+    }
+
     sealed class MsgContext { public long UserId; public long ChatId; public int MessageId; public bool Marked; }
     static readonly AsyncLocal<MsgContext?> incomingCtx = new();
 
@@ -5265,6 +5459,24 @@ partial class Program
             Console.WriteLine($"[BOT GROUP STATUS] chat={update.MyChatMember.Chat.Id} status={status} active={active}");
             return;
         }
+        SpamDecision spamDecision=EvaluateSpam(update);
+        if(spamDecision.Kind!=SpamDecisionKind.Allow)
+        {
+            if(spamDecision.Kind==SpamDecisionKind.Warn)
+            {
+                long leftSeconds=Math.Max(1,(spamDecision.UntilMs-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()+999)/1000);
+                string warning=$"⛔ سیستم ضداسپم فعال شد. درخواست‌های تکراری موقتاً نادیده گرفته می‌شوند.\n⏱ زمان باقی‌مانده: {leftSeconds} ثانیه";
+                try
+                {
+                    if(update.CallbackQuery!=null)
+                        await botClient.AnswerCallbackQueryAsync(update.CallbackQuery.Id,warning,showAlert:true,cancellationToken:ct);
+                    else if(update.Message!=null)
+                        await botClient.SendTextMessageAsync(update.Message.Chat.Id,warning,cancellationToken:ct);
+                }
+                catch { }
+            }
+            return;
+        }
         if (Volatile.Read(ref databaseMaintenanceRunning) != 0)
             return;
 
@@ -5355,6 +5567,11 @@ partial class Program
                     Database.SetBotGroupActive(msg.Chat.Id,true);
                     if(!string.IsNullOrWhiteSpace(msg.Chat.Title))groupTitleCache[msg.Chat.Id]=msg.Chat.Title;
                 }
+                if(isPrivate&&IsPanelAdmin(uid)&&IsSpamReportCommand(msg.Text?.Trim()??""))
+                {
+                    await SendSpamReport(uid,ct);
+                    return;
+                }
                 if (isPrivate && IsPanelAdmin(uid))
                 {
                     bool handledByPanel =
@@ -5395,6 +5612,57 @@ partial class Program
     {
         Console.WriteLine(ex.Message);
         return Task.CompletedTask;
+    }
+
+    static bool IsSpamReportCommand(string text)=>text is "گزارش اسپم" or "گزارش ضد اسپم" or "لیست اسپمرها";
+
+    static async Task SendSpamReport(long adminId,CancellationToken ct)
+    {
+        long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var items=Database.GetSpamRestrictionReport(15);
+        if(items.Count==0)
+        {
+            await SendTemp(adminId,"✅ هنوز هیچ محدودیت ضداسپمی ثبت نشده است.",ct:ct);
+            return;
+        }
+        var lines=new List<string>{"🛡 گزارش ضداسپم"};
+        var buttons=new List<InlineKeyboardButton[]>();
+        foreach(var item in items)
+        {
+            string status=item.UntilMs>now?$"فعال — {FormatRemaining(item.UntilMs-now)}": "پایان‌یافته";
+            string fingerprint=item.LastFingerprint.Replace('\n',' ');
+            if(fingerprint.Length>55)fingerprint=fingerprint[..55]+"…";
+            lines.Add($"\n👤 {item.UserId} | گپ {item.ChatId}\nوضعیت: {status} | مرحله {item.Level}\nحذف‌شده: {item.DroppedCount:N0} | علت: {item.Reason}\nآخرین الگو: {fingerprint}");
+            buttons.Add(new[]{
+                InlineKeyboardButton.WithCallbackData($"✅ رفع {item.UserId}",$"spam_admin:clear:{item.UserId}"),
+                InlineKeyboardButton.WithCallbackData("⛔ ۳۰ دقیقه",$"spam_admin:block:{item.UserId}:{item.ChatId}")
+            });
+        }
+        await SendPermanent(adminId,string.Join('\n',lines),new InlineKeyboardMarkup(buttons),ct:ct);
+    }
+
+    static async Task HandleSpamAdminCallback(CallbackQuery cb,CancellationToken ct)
+    {
+        if(cb.Data==null||!IsPanelAdmin(cb.From.Id))
+        {
+            try{await bot.AnswerCallbackQueryAsync(cb.Id,"⛔ دسترسی ندارید.",showAlert:true,cancellationToken:ct);}catch{}
+            return;
+        }
+        var parts=cb.Data.Split(':');
+        if(parts.Length<3||!TryParseLong(parts[2],out long userId))return;
+        if(parts[1]=="clear")
+        {
+            ClearSpamState(userId);
+            await bot.AnswerCallbackQueryAsync(cb.Id,"✅ محدودیت پاک شد.",showAlert:true,cancellationToken:ct);
+        }
+        else if(parts[1]=="block")
+        {
+            long chatId=parts.Length>3&&TryParseLong(parts[3],out long parsed)?parsed:0;
+            RestrictSpamUser(userId,chatId,TimeSpan.FromMinutes(30),"محدودیت دستی مدیر");
+            await bot.AnswerCallbackQueryAsync(cb.Id,"⛔ محدودیت ۳۰ دقیقه‌ای اعمال شد.",showAlert:true,cancellationToken:ct);
+        }
+        if(cb.Message!=null)DeleteNow(cb.Message.Chat.Id,cb.Message.MessageId);
+        await SendSpamReport(cb.From.Id,ct);
     }
 
     static async Task HandleOwnerPrivateAsync(Message msg, User user, CancellationToken ct)
@@ -8162,6 +8430,11 @@ partial class Program
     {
         if (cb.Data == null) return;
 
+        if(cb.Data.StartsWith("spam_admin:",StringComparison.Ordinal))
+        {
+            await HandleSpamAdminCallback(cb,ct);
+            return;
+        }
         if (cb.Data.StartsWith("adm:", StringComparison.Ordinal))
         {
             await HandleAdminCallbackAsync(cb, ct);
