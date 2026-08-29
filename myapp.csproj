@@ -13,6 +13,23 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="Program.Runtime.cs" />
+    <Compile Include="Program.Callbacks.cs" />
+    <Compile Include="Program.Operations.cs" />
+    <Compile Include="Program.NavalOperations.cs" />
+    <Compile Include="Program.Attack.cs" />
+    <Compile Include="Program.Defense.cs" />
+    <Compile Include="Program.OwnerMessages.cs" />
+    <Compile Include="Program.GroupMessages.cs" />
+    <Compile Include="Program.PrivateMessages.cs" />
+    <Compile Include="Program.AdminCore.cs" />
+    <Compile Include="Program.AdminCallbacks.cs" />
+    <Compile Include="Program.Activity.cs" />
+    <Compile Include="Program.AttackGuides.cs" />
+    <Compile Include="Program.DefenseGuides.cs" />
+    <Compile Include="Database.Core.cs" />
+    <Compile Include="Database.Admin.cs" />
+    <Compile Include="Database.Activity.cs" />
     <Compile Include="WarEngine.cs" />
     <Compile Include="WarEngineCompatibility.cs" />
     <Compile Include="NavalEngine.cs" />
