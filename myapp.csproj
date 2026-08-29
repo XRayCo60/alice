@@ -5,11 +5,25 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Avoid expensive recursive SDK globs on production directories that retain databases/logs/backups. -->
+    <EnableDefaultItems>false</EnableDefaultItems>
     <!-- Avoid blocking restores when nuget.org vulnerability service is unreachable. Run audits separately in CI. -->
     <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="WarEngine.cs" />
+    <Compile Include="WarEngineCompatibility.cs" />
+    <Compile Include="NavalEngine.cs" />
+    <Compile Include="NavalDatabase.cs" />
+    <Compile Include="NavalRegressionTests.cs" />
+    <Compile Include="EconomyRegressionTests.cs" />
+    <Compile Include="AttackSelectionRegressionTests.cs" />
+    <Compile Include="StrategicBattleRegressionTests.cs" />
+    <Compile Include="GroupLifecycleRegressionTests.cs" />
+    <Compile Include="SiegeRegressionTests.cs" />
+
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
     <PackageReference Include="Telegram.Bot" Version="18.0.0" />
   </ItemGroup>
