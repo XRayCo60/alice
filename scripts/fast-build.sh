@@ -63,9 +63,10 @@ with open(global_usings, "w", encoding="utf-8") as stream:
     stream.write("global using System.Threading;\n")
     stream.write("global using System.Threading.Tasks;\n")
 
+optimize = os.environ.get("ALICE_CSC_OPTIMIZE", "false").lower() in ("1", "true", "yes")
 with open(rsp_path, "w", encoding="utf-8") as stream:
     stream.write("/nologo\n/target:exe\n/langversion:latest\n/nullable:enable\n")
-    stream.write("/optimize+\n/deterministic+\n/parallel+\n/utf8output\n")
+    stream.write(("/optimize+\n" if optimize else "/optimize-\n") + "/deterministic+\n/parallel+\n/utf8output\n")
     stream.write(f"/out:{output}\n")
     for reference in sorted(references):
         stream.write(f"/reference:{reference}\n")
@@ -77,13 +78,12 @@ print(f"fast build: {len(sources)} source files, {len(references)} references")
 PY
 
 set +e
-timeout "${ALICE_BUILD_TIMEOUT:-300}" /usr/share/dotnet/dotnet "$CSC" "@$WORK/compile.rsp"
+timeout "${ALICE_BUILD_TIMEOUT:-900}" /usr/share/dotnet/dotnet "$CSC" "@$WORK/compile.rsp"
 result=$?
 set -e
 if [[ $result -eq 124 ]]; then
-    echo "optimized compilation timed out; retrying once without IL optimization"
-    sed -i 's#^/optimize+$#/optimize-#' "$WORK/compile.rsp"
-    /usr/share/dotnet/dotnet "$CSC" "@$WORK/compile.rsp"
+    echo "direct compilation timed out" >&2
+    exit 124
 elif [[ $result -ne 0 ]]; then
     exit "$result"
 fi
