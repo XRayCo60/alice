@@ -53,12 +53,23 @@ for library_name, metadata in assets["targets"][target_key].items():
         if os.path.isfile(candidate):
             references.add(candidate)
 
+global_usings = os.path.join(os.path.dirname(rsp_path), "ImplicitUsings.g.cs")
+with open(global_usings, "w", encoding="utf-8") as stream:
+    stream.write("global using System;\n")
+    stream.write("global using System.Collections.Generic;\n")
+    stream.write("global using System.IO;\n")
+    stream.write("global using System.Linq;\n")
+    stream.write("global using System.Net.Http;\n")
+    stream.write("global using System.Threading;\n")
+    stream.write("global using System.Threading.Tasks;\n")
+
 with open(rsp_path, "w", encoding="utf-8") as stream:
     stream.write("/nologo\n/target:exe\n/langversion:latest\n/nullable:enable\n")
     stream.write("/optimize+\n/deterministic+\n/parallel+\n/utf8output\n")
     stream.write(f"/out:{output}\n")
     for reference in sorted(references):
         stream.write(f"/reference:{reference}\n")
+    stream.write(f"{global_usings}\n")
     for source in sources:
         stream.write(f"{os.path.join(app, source)}\n")
 
