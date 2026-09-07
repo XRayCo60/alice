@@ -52,12 +52,15 @@ partial class Program
         result.AttackerReport=string.Join("\n",(result.AttackerReport??"").Split('\n')
             .Where(line=>!line.TrimStart().StartsWith("🛡 دکترین مدافع:",StringComparison.Ordinal)
                       &&!line.TrimStart().StartsWith("🛡 دفاع دشمن:",StringComparison.Ordinal)));
-        result.GroupAnnouncement=string.Join("\n",(result.GroupAnnouncement??"").Split('\n').Select(line=>
-        {
-            if(line.TrimStart().StartsWith("🎯",StringComparison.Ordinal)&&line.Contains('↔'))
-                return line[..line.IndexOf('↔')].TrimEnd();
-            return line;
-        }));
+        result.GroupAnnouncement=string.Join("\n",(result.GroupAnnouncement??"").Split('\n')
+            .Where(line=>
+            {
+                string trimmed=line.TrimStart();
+                return !trimmed.Contains("استراتژی",StringComparison.Ordinal)
+                    && !trimmed.Contains("تاکتیک",StringComparison.Ordinal)
+                    && !trimmed.Contains("دکترین",StringComparison.Ordinal)
+                    && !trimmed.StartsWith("🎯",StringComparison.Ordinal);
+            }));
     }
 
     static void AppendNavalStrategicProgress(NavalBattleResult result)

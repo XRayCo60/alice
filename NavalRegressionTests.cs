@@ -308,12 +308,16 @@ static class NavalRegressionTests
         Assert(x.AttackerReport.Contains("خسارات مدل‌به‌مدل") && x.DefenderReport.Contains("وضعیت نبردناوهای شما"),
             "naval reports must contain model losses and per-ship damage");
         Assert(!x.AttackerReport.Contains("کمین دریایی")&&!x.AttackerReport.Contains("دکترین مدافع:")&&
-               !x.GroupAnnouncement.Contains("کمین دریایی")&&!x.GroupAnnouncement.Contains('↔'),
-            "attacker and group reports must never reveal defender doctrine");
+               !x.GroupAnnouncement.Contains("کمین دریایی")&&!x.GroupAnnouncement.Contains('↔')&&
+               !x.GroupAnnouncement.Contains("تاکتیک")&&!x.GroupAnnouncement.Contains("استراتژی")&&
+               !x.GroupAnnouncement.Contains("دکترین"),
+            "group reports must never reveal either side's strategy or tactic");
         Assert(x.DefenderReport.Contains("کمین دریایی"),"defender private report may show its own doctrine");
         var legacyLeak=new NavalBattleResult{AttackerReport="گزارش\n🛡 دکترین مدافع: کمین دریایی\nپایان",GroupAnnouncement="خبر\n🎯 حمله مستقیم ↔ کمین دریایی"};
         Program.RedactDefenderNavalDoctrine(legacyLeak);
-        Assert(!legacyLeak.AttackerReport.Contains("کمین دریایی")&&!legacyLeak.GroupAnnouncement.Contains("کمین دریایی")&&!legacyLeak.GroupAnnouncement.Contains('↔'),
+        Assert(!legacyLeak.AttackerReport.Contains("کمین دریایی")&&!legacyLeak.GroupAnnouncement.Contains("کمین دریایی")&&
+               !legacyLeak.GroupAnnouncement.Contains('↔')&&!legacyLeak.GroupAnnouncement.Contains("تاکتیک")&&
+               !legacyLeak.GroupAnnouncement.Contains("استراتژی")&&!legacyLeak.GroupAnnouncement.Contains("دکترین"),
             "persisted legacy reports must be redacted before delivery");
 
         var empty = new NavalBattleRequest
