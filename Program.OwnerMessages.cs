@@ -150,7 +150,7 @@ partial class Program
                     {
                         var copied=await bot.CopyMessageAsync(target,msg.Chat.Id,msg.MessageId,cancellationToken:ct);
                         sentGroup++;
-                        await TryPinGroupAnnouncement(target,copied.MessageId,ct);
+                        await TryPinGroupAnnouncement(target,copied.Id,ct);
                     }
                     catch { }
                 }
