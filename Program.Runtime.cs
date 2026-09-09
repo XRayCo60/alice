@@ -607,6 +607,57 @@ partial class Program
         }
     }
 
+    static string CompressDatabaseBackupForDelivery(string databasePath)
+    {
+        string basePath=System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(databasePath))??".",
+            System.IO.Path.GetFileNameWithoutExtension(databasePath));
+        string rarExecutable=System.IO.File.Exists("/usr/bin/rar")?"/usr/bin/rar":
+            System.IO.File.Exists("/usr/local/bin/rar")?"/usr/local/bin/rar":"";
+        if(rarExecutable.Length>0)
+        {
+            string rarPath=basePath+".rar";
+            TryDeleteSqliteSidecar(rarPath);
+            try
+            {
+                var start=new System.Diagnostics.ProcessStartInfo(rarExecutable)
+                {
+                    UseShellExecute=false,
+                    RedirectStandardOutput=true,
+                    RedirectStandardError=true,
+                    CreateNoWindow=true
+                };
+                start.ArgumentList.Add("a");
+                start.ArgumentList.Add("-ep");
+                start.ArgumentList.Add("-m3");
+                start.ArgumentList.Add("-idq");
+                start.ArgumentList.Add(rarPath);
+                start.ArgumentList.Add(System.IO.Path.GetFullPath(databasePath));
+                using var process=System.Diagnostics.Process.Start(start)
+                    ?? throw new InvalidOperationException("rar process did not start");
+                if(!process.WaitForExit(300_000))
+                {
+                    try{process.Kill(true);}catch{}
+                    throw new TimeoutException("rar compression timed out");
+                }
+                if(process.ExitCode==0&&System.IO.File.Exists(rarPath))return rarPath;
+                throw new InvalidOperationException($"rar exited with code {process.ExitCode}: {process.StandardError.ReadToEnd()}");
+            }
+            catch(Exception ex)
+            {
+                Console.WriteLine($"[RAR BACKUP ERR] {ex.Message}; falling back to ZIP");
+                TryDeleteSqliteSidecar(rarPath);
+            }
+        }
+
+        string zipPath=basePath+".zip";
+        TryDeleteSqliteSidecar(zipPath);
+        using(var archive=System.IO.Compression.ZipFile.Open(zipPath,System.IO.Compression.ZipArchiveMode.Create))
+            System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(archive,databasePath,
+                System.IO.Path.GetFileName(databasePath),System.IO.Compression.CompressionLevel.Optimal);
+        return zipPath;
+    }
+
     static void LoadSettings()
     {
         var mode = Database.GetSetting("UpdateMode");

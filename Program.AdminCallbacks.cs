@@ -1373,16 +1373,22 @@ partial class Program
             if (sub == "get")
             {
                 string backupPath = $"gamedata_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{userId}.db";
+                string archivePath="";
                 try
                 {
                     Database.CreateConsistentBackup(backupPath);
-                    using var backupStream = System.IO.File.OpenRead(backupPath);
-                    await bot.SendDocumentAsync(userId, new InputOnlineFile(backupStream, System.IO.Path.GetFileName(backupPath)), caption: "📦 بکاپ دیتابیس", cancellationToken: ct);
-                    Database.WriteAdminAudit(userId, "BACKUP_GET", "Maintenance", "", "", true);
-                    await AnswerAdminCallback(callback, "✅ بکاپ ارسال شد.", false, ct);
+                    archivePath=CompressDatabaseBackupForDelivery(backupPath);
+                    using var backupStream = System.IO.File.OpenRead(archivePath);
+                    await bot.SendDocumentAsync(userId,new InputOnlineFile(backupStream,System.IO.Path.GetFileName(archivePath)),caption:"📦 بکاپ فشرده دیتابیس",cancellationToken:ct);
+                    Database.WriteAdminAudit(userId,"BACKUP_GET","Maintenance","",System.IO.Path.GetExtension(archivePath),true);
+                    await AnswerAdminCallback(callback,"✅ بکاپ فشرده ارسال شد.",false,ct);
                 }
                 catch (Exception ex) { await AnswerAdminCallback(callback, $"❌ خطا: {ex.Message}", true, ct); }
-                finally { TryDeleteSqliteSidecar(backupPath); }
+                finally
+                {
+                    if(!string.IsNullOrWhiteSpace(archivePath))TryDeleteSqliteSidecar(archivePath);
+                    TryDeleteSqliteSidecar(backupPath);
+                }
                 return true;
             }
             if (sub == "upload")

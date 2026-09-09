@@ -1618,15 +1618,17 @@ partial class Program
         Console.WriteLine($"[TIMER] Update sent to {sentGroups} groups, failed {failedGroups}");
 
         string backupPath = $"gamedata_backup_{DateTime.Now:yyyyMMdd_HHmmss}.db";
+        string archivePath = "";
         try
         {
             Database.CreateConsistentBackup(backupPath);
-            using var backupStream = System.IO.File.OpenRead(backupPath);
+            archivePath=CompressDatabaseBackupForDelivery(backupPath);
+            using var backupStream = System.IO.File.OpenRead(archivePath);
             await bot.SendDocumentAsync(OWNER_ID,
-                new InputOnlineFile(backupStream, System.IO.Path.GetFileName(backupPath)),
-                caption: $"📦 بک‌آپ دیتابیس — {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n👥 تعداد کشورها: {countries.Count}",
+                new InputOnlineFile(backupStream, System.IO.Path.GetFileName(archivePath)),
+                caption: $"📦 بک‌آپ فشرده دیتابیس — {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n👥 تعداد کشورها: {countries.Count}",
                 cancellationToken: CancellationToken.None);
-            Console.WriteLine("[TIMER] DB backup sent to owner");
+            Console.WriteLine($"[TIMER] compressed DB backup sent to owner: {System.IO.Path.GetExtension(archivePath)}");
         }
         catch (Exception ex)
         {
@@ -1634,6 +1636,7 @@ partial class Program
         }
         finally
         {
+            if(!string.IsNullOrWhiteSpace(archivePath))TryDeleteSqliteSidecar(archivePath);
             TryDeleteSqliteSidecar(backupPath);
         }
     }
