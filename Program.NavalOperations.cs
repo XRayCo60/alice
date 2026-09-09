@@ -99,7 +99,12 @@ partial class Program
                     RedactDefenderNavalDoctrine(recovered);
                     try { await SendPermanent(inv.AttackerId, recovered.AttackerReport, ct: ct); } catch { }
                     try { await SendPermanent(inv.DefenderId, recovered.DefenderReport, ct: ct); } catch { }
-                    try { await SendPermanent(inv.ChatId, recovered.GroupAnnouncement, ct: ct); } catch { }
+                    try
+                    {
+                        var groupMessage=await SendPermanent(inv.ChatId,recovered.GroupAnnouncement,ct:ct);
+                        await TryPinGroupAnnouncement(inv.ChatId,groupMessage.MessageId,ct);
+                    }
+                    catch { }
                     Database.MarkNavalInvasionProcessed(inv.Id);
                     continue;
                 }
@@ -178,7 +183,12 @@ partial class Program
                 RedactDefenderNavalDoctrine(result);
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }
                 try { await SendPermanent(inv.DefenderId, result.DefenderReport, ct: ct); } catch { }
-                try { await SendPermanent(inv.ChatId, result.GroupAnnouncement, ct: ct); } catch { }
+                try
+                {
+                    var groupMessage=await SendPermanent(inv.ChatId,result.GroupAnnouncement,ct:ct);
+                    await TryPinGroupAnnouncement(inv.ChatId,groupMessage.MessageId,ct);
+                }
+                catch { }
                 Database.MarkNavalInvasionProcessed(inv.Id);
                 Console.WriteLine($"[NAVAL RESOLUTION COMPLETED] operation={inv.Id} outcome={result.Outcome} success={result.SuccessPercent}");
             }

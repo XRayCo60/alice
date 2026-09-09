@@ -1182,8 +1182,13 @@ partial class Program
                         $"⏱ زمان تقریبی رسیدن: {travelMinutes} دقیقه\nترکیب ناوگان مهاجم نامشخص است.", ct: ct);
                 }
                 catch { }
-                try { await SendPermanent(sess.AttackChatId,
-                    $"⚓ {attackerCountry.Name} عملیات دریایی علیه {defenderCountry.Name} آغاز کرد.", ct: ct); } catch { }
+                try
+                {
+                    var groupAnnouncement=await SendPermanent(sess.AttackChatId,
+                        $"⚓ {attackerCountry.Name} عملیات دریایی علیه {defenderCountry.Name} آغاز کرد.",ct:ct);
+                    await TryPinGroupAnnouncement(sess.AttackChatId,groupAnnouncement.MessageId,ct);
+                }
+                catch { }
                 return true;
             }
 

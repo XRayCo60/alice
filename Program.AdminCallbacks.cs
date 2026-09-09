@@ -1252,13 +1252,15 @@ partial class Program
                 {
                     try
                     {
+                        Message sentMessage;
                         if (isPhoto && !string.IsNullOrEmpty(fileId))
-                            await bot.SendPhotoAsync(tgt, fileId, caption: caption, cancellationToken: ct);
+                            sentMessage=await bot.SendPhotoAsync(tgt,fileId,caption:caption,cancellationToken:ct);
                         else if (isDoc && !string.IsNullOrEmpty(fileId))
-                            await bot.SendDocumentAsync(tgt, new InputOnlineFile(fileId), caption: caption, cancellationToken: ct);
+                            sentMessage=await bot.SendDocumentAsync(tgt,new InputOnlineFile(fileId),caption:caption,cancellationToken:ct);
                         else
-                            await bot.SendTextMessageAsync(tgt, caption, cancellationToken: ct);
+                            sentMessage=await bot.SendTextMessageAsync(tgt,caption,cancellationToken:ct);
                         sent++;
+                        await TryPinGroupAnnouncement(tgt,sentMessage.MessageId,ct);
                         await Task.Delay(50, ct);
                     }
                     catch { }

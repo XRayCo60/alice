@@ -146,7 +146,13 @@ partial class Program
                 foreach (var target in shuffled)
                 {
                     if (wanted > 0 && sentGroup >= wanted) break;
-                    try { await bot.CopyMessageAsync(target, msg.Chat.Id, msg.MessageId, cancellationToken: ct); sentGroup++; } catch { }
+                    try
+                    {
+                        var copied=await bot.CopyMessageAsync(target,msg.Chat.Id,msg.MessageId,cancellationToken:ct);
+                        sentGroup++;
+                        await TryPinGroupAnnouncement(target,copied.MessageId,ct);
+                    }
+                    catch { }
                 }
             }
             EndSession(uid);

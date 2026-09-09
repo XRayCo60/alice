@@ -926,6 +926,13 @@ partial class Program
             replyToMessageId: replyTo, replyMarkup: markup, cancellationToken: ct);
     }
 
+    static async Task TryPinGroupAnnouncement(long chatId,int messageId,CancellationToken ct)
+    {
+        if(chatId>=0||messageId<=0)return;
+        try{await bot.PinChatMessageAsync(chatId,messageId,disableNotification:false,cancellationToken:ct);}
+        catch(Exception ex){Console.WriteLine($"[ANNOUNCEMENT PIN ERR] chat={chatId} message={messageId}: {ex.Message}");}
+    }
+
     static async Task<Message> SendPermanentPhoto(long chatId, string fileId, string caption,
         IReplyMarkup? markup = null, ParseMode? parseMode = null, CancellationToken ct = default)
     {
