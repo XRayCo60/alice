@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 
 static class GroupLifecycleRegressionTests
 {
@@ -21,6 +23,12 @@ static class GroupLifecycleRegressionTests
             Assert(!Database.GetUserActiveChatIds(owner).Contains(chat),"inactive group must disappear from private operation choices");
             Database.SetBotGroupActive(chat,true);
             Assert(Database.IsBotGroupActive(chat)&&Database.GetUserActiveChatIds(owner).Contains(chat),"re-added group must reactivate");
+            var groupChat=new Chat{Id=chat,Type=ChatType.Group};
+            var speaker=new User{Id=owner,FirstName="Fast"};
+            Assert(!Program.IsExplicitGroupBotInteraction(new Message{Chat=groupChat,From=speaker,Text="سلام خوبی؟"},owner),
+                "ordinary fast group conversation must never count toward bot anti-spam limits");
+            Assert(Program.IsExplicitGroupBotInteraction(new Message{Chat=groupChat,From=speaker,Text="حمله"},owner),
+                "an actual game command must still be protected by anti-spam limits");
             Console.WriteLine($"GROUP LIFECYCLE REGRESSION TESTS PASSED — {_assertions} assertions");
         }
         finally

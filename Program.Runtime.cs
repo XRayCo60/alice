@@ -48,6 +48,27 @@ partial class Program
         public string Reason="";
     }
     static readonly ConcurrentDictionary<long,SpamState> spamStates=new();
+    static readonly HashSet<string> knownGroupBotCommands=new(StringComparer.Ordinal)
+    {
+        "لغو","بازگشت","بازگشت نیرو","بازگشت نیروها","برگشت","انتخاب کشور","ساختمان","ارتقاع ساختمان",
+        "ارتقا اقتصاد","اقتصاد","انصراف","دارایی","داراییم","کشورم","کشور من","مان پاور","مان‌پاور",
+        "مانپاور","قدرت نظامی","قدرت","لیست کشور ها","لیست کشورها","کشور ها","کشورها","لیست",
+        "برترین ها","رتبه بندی","لیدربورد","قدرت ها","قدرتمندترین ها","ساخت اتحاد","ایجاد اتحاد",
+        "تاسیس اتحاد","ایجاد درخواست عضویت","درخواست عضویت","دعوت به اتحاد","دعوت","ترنسفر","انتقال",
+        "ارسال محموله","ارسال منابع","صف آرایی تهاجمی","صف آرایی دفاعی","صف‌آرایی تهاجمی",
+        "صف‌آرایی دفاعی","لغو صف آرایی","لغو صف‌آرایی","حذف صف آرایی","حذف صف‌آرایی","اعزام نیرو",
+        "مشارکت","مشارکت در صف آرایی","مشارکت در صف‌آرایی","اعزام","اعزام نیرو ها","اعزام نیروها",
+        "لیست اتحاد ها","لیست اتحادها","اتحاد ها","اتحادها","وضعیت اتحاد","انحلال اتحاد","حذف اتحاد",
+        "خروج از اتحاد","ترک اتحاد","راهنما","خرید تانک","ساخت تانک","خرید هواپیما","ساخت هواپیما",
+        "خرید جنگنده","ساخت جنگنده","خرید بمب افکن","ساخت بمب افکن","خرید بمب‌افکن","ساخت بمب‌افکن",
+        "پدافند","خرید پدافند","ساخت پدافند","ضدهوایی","ضد هوایی","خرید ضد هوایی","ساخت ضد هوایی",
+        "خرید ناو","ساخت ناو","خرید کشتی","ساخت کشتی","خرید قایق","ساخت قایق","نیروی دریایی","ناوگان",
+        "تعمیر ناو","تعمیر ناوگان","تعمیر کشتی","تعمیر ناو جنگی","تعمیرات ناو","اوراق نبردناو",
+        "اوراق ناو","اسقاط نبردناو","اسقاط ناو","تغییر اسم","تعویض اسم","تغییر اسم کشور","تعویض اسم کشور",
+        "ترید","آموزش سرباز","نرخ سرباز گیری","نرخ سربازگیری","مالیات","نرخ مالیات","تغییر پرچم",
+        "تعویض پرچم","پرچم","حمله","وضعیت دفاع","لیست نبرد های در جریان","لیست نبردهای در جریان",
+        "لیست نبرد‌های در جریان","نبرد های در جریان","نبردهای در جریان","نبرد‌های در جریان"
+    };
     static readonly HashSet<string> knownCallbackActions=new(StringComparer.Ordinal)
     {
         "cancel","faction","eq_details","dep_info","build_menu","upgrade","timing","tank_info","tank_buy",
@@ -66,6 +87,17 @@ partial class Program
            data.StartsWith("ally_",StringComparison.Ordinal)||data.StartsWith("tf_",StringComparison.Ordinal)||
            data.StartsWith("dep_",StringComparison.Ordinal))return true;
         string action=data.Split(':',2)[0];return knownCallbackActions.Contains(action);
+    }
+
+    internal static bool IsExplicitGroupBotInteraction(Message message,long userId)
+    {
+        if(message.Chat.Type is not (ChatType.Group or ChatType.Supergroup))return true;
+        if(sessions.ContainsKey(userId))return true;
+        if(message.ReplyToMessage?.From?.IsBot==true)return true;
+        string text=(message.Text??message.Caption??"").Trim();
+        if(text.Length==0)return false;
+        if(text[0]=='/'||text.StartsWith("حذف ",StringComparison.Ordinal))return true;
+        return knownGroupBotCommands.Contains(text);
     }
 
     static string SpamFingerprint(Update update,out long userId,out long chatId,out bool invalidCallback,out bool callback)
@@ -90,6 +122,8 @@ partial class Program
 
     static SpamDecision EvaluateSpam(Update update)
     {
+        if(update.Message?.From!=null&&!IsExplicitGroupBotInteraction(update.Message,update.Message.From.Id))
+            return new(SpamDecisionKind.Allow,update.Message.From.Id,0,"");
         string fingerprint=SpamFingerprint(update,out long userId,out long chatId,out bool invalidCallback,out bool callback);
         if(userId==0||userId==OWNER_ID||fingerprint.Length==0)return new(SpamDecisionKind.Allow,userId,0,"");
         var state=spamStates.GetOrAdd(userId,_=>new SpamState());
@@ -214,7 +248,7 @@ partial class Program
     static int GetAttackCount(long chatId, long ownerId) => attackCounts.TryGetValue(AtkKey(chatId, ownerId), out var v) ? v : 0;
     static int IncAttackCount(long chatId, long ownerId) => attackCounts.AddOrUpdate(AtkKey(chatId, ownerId), 1, (_, v) => v + 1);
     // Starting an attack forfeits every kind of protection held by the attacker.
-    // Outgoing attacks never add a hit toward the attacker's own five-hit shield.
+    // Outgoing attacks never add a hit toward the attacker's own eight-hit shield.
     internal static void BreakAttackerShieldOnAttack(long attackerId,long chatId)
     {
         Database.ClearAttackShield(attackerId,chatId);
@@ -301,7 +335,7 @@ partial class Program
         "• پیروزی سنگین: بیش از ۳۵km پیشروی مؤثر با بازگشت حداقل ۵۰۰۰ سرباز و ۵۰ تانک سالم.\n" +
         "• <b>لیست نبردهای در جریان</b> در گروه یا پیوی — نمایش پیشرفت گرفتن یا از دست دادن شهر.\n" +
         "• با از دست دادن شهر، مالک در پیوی هشدار و دکمه <b>⚔️ انتقام</b> دریافت می‌کند.\n" +
-        "• با آغاز حمله، سپر مهاجم از بین می‌رود و حملات خروجی برای مهاجم سپر ایجاد نمی‌کنند.\n" +
+        "• پس از ۸ حمله کامل به یک کشور، آن کشور سپر ۱۶ ساعته می‌گیرد؛ با آغاز حمله، سپر مهاجم از بین می‌رود.\n" +
         "• اثر محاصره فقط پس از ازدست‌رفتن یکی از ۴ شهر اولیه فعال می‌شود؛ حذف مهاجم یا هم‌اتحادشدن، محاصره را برمی‌دارد.\n\n" +
 
         "🛡 <b>دفاع — چندمدلی و دریایی</b>\n" +

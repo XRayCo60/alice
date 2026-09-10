@@ -61,13 +61,15 @@ static class AttackSelectionRegressionTests
             Assert(!Program.PassesAttackTypePowerRule(c,weak,isNaval:true),"one-quarter rule must still block an undersized naval target");
             Assert(Program.PassesAttackTypePowerRule(c,weak,isNaval:false),"one-quarter rule must never block a ground/air attack");
 
-            for(int i=0;i<5;i++)Database.AddAttackShieldHit(owner,chat);
-            Assert(Database.IsAttackShieldActive(owner,chat),"precondition: five incoming hits must protect the defender");
-            for(int i=0;i<5;i++)Program.ApplyCompletedAttackShieldRules(owner,legacyArmor.OwnerId,chat,false);
+            for(int i=0;i<7;i++)Database.AddAttackShieldHit(owner,chat);
+            Assert(!Database.IsAttackShieldActive(owner,chat),"seven incoming attacks must not activate the shield early");
+            Database.AddAttackShieldHit(owner,chat);
+            Assert(Database.IsAttackShieldActive(owner,chat),"the eighth incoming attack must protect the defender");
+            for(int i=0;i<8;i++)Program.ApplyCompletedAttackShieldRules(owner,legacyArmor.OwnerId,chat,false);
             Assert(!Database.IsAttackShieldActive(owner,chat)&&Database.HasShieldExemption(owner,chat),
-                "attacking must immediately remove both the five-hit and new-country shields from the attacker");
+                "attacking must immediately remove both the eight-hit and new-country shields from the attacker");
             Assert(Database.IsAttackShieldActive(legacyArmor.OwnerId,chat),
-                "five outgoing attacks must award protection only to the defender, never to the attacker");
+                "eight outgoing attacks must award protection only to the defender, never to the attacker");
 
             var selectedTanks=new List<ModelAmount>{new("M2 Medium",10),new("T-28",25),new("Panzer III",5)};
             Assert(Program.ModelSelectionFits(selectedTanks,Program.GetAttackBreakdown(c,"tanks")),"valid mixed tank selection must fit");

@@ -3855,7 +3855,7 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
         return list;
     }
 
-    // Attack Shields – 5 attacks => 16h shield
+    // Attack Shields – 8 completed attacks => 16h shield
     public static long GetAttackShieldUntilMs(long ownerId, long chatId)
     {
         using var con = OpenCon();
@@ -3887,14 +3887,14 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
         return true;
     }
 
-    public static void AddAttackShieldHit(long defenderId, long chatId)
+    private static void AddAttackShieldHit(SqliteConnection con,SqliteTransaction? transaction,
+        long defenderId,long chatId,long now)
     {
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        const long resetAfterMs = 24 * 3600_000L;
-        const long shieldDurationMs = 16 * 3600_000L;
-        using var con = OpenCon();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = @"
+        const long resetAfterMs=24*3600_000L;
+        const long shieldDurationMs=16*3600_000L;
+        using var cmd=con.CreateCommand();
+        cmd.Transaction=transaction;
+        cmd.CommandText=@"
             INSERT INTO AttackShields(OwnerId,ChatId,ShieldUntilMs,AttackCount,LastAttackMs)
             VALUES(@owner,@chat,0,1,@now)
             ON CONFLICT(OwnerId,ChatId) DO UPDATE SET
@@ -3906,7 +3906,7 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
                              AND @now-AttackShields.LastAttackMs > @resetAfter
                                 THEN 1
                             ELSE AttackShields.AttackCount+1
-                          END) >= 5
+                          END) >= 8
                         THEN @now+@shieldDuration
                     ELSE 0
                 END,
@@ -3918,7 +3918,7 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
                              AND @now-AttackShields.LastAttackMs > @resetAfter
                                 THEN 1
                             ELSE AttackShields.AttackCount+1
-                          END) >= 5
+                          END) >= 8
                         THEN 0
                     WHEN AttackShields.LastAttackMs > 0
                      AND @now-AttackShields.LastAttackMs > @resetAfter
@@ -3930,12 +3930,47 @@ VALUES(@did,@uid,COALESCE((SELECT ChatId FROM Deployments WHERE Id=@did),0),@t,@
                         THEN AttackShields.LastAttackMs
                     ELSE @now
                 END;";
-        cmd.Parameters.AddWithValue("@owner", defenderId);
-        cmd.Parameters.AddWithValue("@chat", chatId);
-        cmd.Parameters.AddWithValue("@now", now);
-        cmd.Parameters.AddWithValue("@resetAfter", resetAfterMs);
-        cmd.Parameters.AddWithValue("@shieldDuration", shieldDurationMs);
+        cmd.Parameters.AddWithValue("@owner",defenderId);
+        cmd.Parameters.AddWithValue("@chat",chatId);
+        cmd.Parameters.AddWithValue("@now",now);
+        cmd.Parameters.AddWithValue("@resetAfter",resetAfterMs);
+        cmd.Parameters.AddWithValue("@shieldDuration",shieldDurationMs);
         cmd.ExecuteNonQuery();
+    }
+
+    public static void AddAttackShieldHit(long defenderId,long chatId)
+    {
+        using var con=OpenCon();
+        AddAttackShieldHit(con,null,defenderId,chatId,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    internal static void ApplyNavalAttackShieldRules(SqliteConnection con,SqliteTransaction transaction,
+        long attackerId,long defenderId,long chatId,bool awardDefenderHit)
+    {
+        using(var clear=con.CreateCommand())
+        {
+            clear.Transaction=transaction;
+            clear.CommandText="DELETE FROM AttackShields WHERE OwnerId=@owner AND ChatId=@chat";
+            clear.Parameters.AddWithValue("@owner",attackerId);clear.Parameters.AddWithValue("@chat",chatId);
+            clear.ExecuteNonQuery();
+        }
+        using(var endInitialShield=con.CreateCommand())
+        {
+            endInitialShield.Transaction=transaction;
+            endInitialShield.CommandText="INSERT OR IGNORE INTO ShieldExemptions(OwnerId,ChatId) VALUES(@owner,@chat)";
+            endInitialShield.Parameters.AddWithValue("@owner",attackerId);endInitialShield.Parameters.AddWithValue("@chat",chatId);
+            endInitialShield.ExecuteNonQuery();
+        }
+        if(awardDefenderHit)
+            AddAttackShieldHit(con,transaction,defenderId,chatId,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    internal static int GetAttackShieldHitCount(long ownerId,long chatId)
+    {
+        using var con=OpenCon();using var cmd=con.CreateCommand();
+        cmd.CommandText="SELECT AttackCount FROM AttackShields WHERE OwnerId=@owner AND ChatId=@chat";
+        cmd.Parameters.AddWithValue("@owner",ownerId);cmd.Parameters.AddWithValue("@chat",chatId);
+        return Convert.ToInt32(cmd.ExecuteScalar()??0);
     }
 
     public static void ClearAttackShield(long ownerId, long chatId)

@@ -558,7 +558,8 @@ SELECT last_insert_rowid();";
 
     public static bool SettleNavalOperation(NavalInvasion inv, NavalBattleResult result,
         IReadOnlyList<NavalModelAmount> attackerBoats, IReadOnlyList<NavalModelAmount> attackerSubs,
-        IReadOnlyList<NavalModelAmount> defenderBoats, IReadOnlyList<NavalModelAmount> defenderSubs)
+        IReadOnlyList<NavalModelAmount> defenderBoats, IReadOnlyList<NavalModelAmount> defenderSubs,
+        bool awardDefenderShieldHit=true)
     {
         if(result.AttackerBattleships.Count!=inv.Battleships)
             throw new InvalidOperationException($"Battleship settlement mismatch for operation {inv.Id}: sent={inv.Battleships}, outcomes={result.AttackerBattleships.Count}.");
@@ -568,6 +569,9 @@ SELECT last_insert_rowid();";
             claim.Transaction = tx; claim.CommandText = "UPDATE NavalInvasions SET Processed=1,Status='Settled' WHERE Id=@id AND Processed=0";
             claim.Parameters.AddWithValue("@id", inv.Id); if (claim.ExecuteNonQuery() != 1) return false;
         }
+        // Shield accounting is committed with settlement, so a recovered/retried naval
+        // operation can never count twice. The attacker always forfeits any shield.
+        ApplyNavalAttackShieldRules(con,tx,inv.AttackerId,inv.DefenderId,inv.ChatId,awardDefenderShieldHit);
         long aBoatLoss = result.AttackerBoatLosses.Values.Sum(), aSubLoss = result.AttackerSubmarineLosses.Values.Sum();
         long aBsLost = result.AttackerBattleships.Count(x => x.Sunk);
         long aBoatReturn = Math.Max(0, attackerBoats.Sum(x => x.Count)-aBoatLoss);

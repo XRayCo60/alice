@@ -177,8 +177,17 @@ static class NavalRegressionTests
             AttackerTactic=1,DefenderStrategy=1,DefenderTactic=1,DefenderPortLevel=defender.PortLevel,
             DefenderMoney=defender.Money,DefenderIron=defender.Iron,AttackerBattleships=aShips,DefenderBattleships=dShips};
         NavalBattleResult result=NavalEngine.Resolve(request);
+        for(int i=0;i<8;i++)Database.AddAttackShieldHit(attacker.OwnerId,chat);
+        Assert(Database.IsAttackShieldActive(attacker.OwnerId,chat),"naval attacker shield precondition");
         Assert(Database.SettleNavalOperation(inv,result,new List<NavalModelAmount>(),new List<NavalModelAmount>(),
             new List<NavalModelAmount>(),new List<NavalModelAmount>()),"damage settlement must commit");
+        Assert(!Database.IsAttackShieldActive(attacker.OwnerId,chat),"completed naval attack must remove attacker shield");
+        Assert(Database.GetAttackShieldHitCount(defender.OwnerId,chat)==1,
+            "completed naval attack must count exactly once toward defender eight-hit shield");
+        Assert(!Database.SettleNavalOperation(inv,result,new List<NavalModelAmount>(),new List<NavalModelAmount>(),
+                   new List<NavalModelAmount>(),new List<NavalModelAmount>())&&
+               Database.GetAttackShieldHitCount(defender.OwnerId,chat)==1,
+            "retried naval settlement must never duplicate the defender shield hit");
         foreach(var outcome in result.AttackerBattleships.Concat(result.DefenderBattleships))
         {
             long owner=result.AttackerBattleships.Contains(outcome)?attacker.OwnerId:defender.OwnerId;

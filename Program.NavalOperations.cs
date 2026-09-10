@@ -177,8 +177,9 @@ partial class Program
                     DefenderBattleships = defenderBs
                 };
                 NavalBattleResult result = NavalEngine.Resolve(request);
-                if (!Database.SettleNavalOperation(inv, result, attackerBoats, attackerSubs,
-                        defenderBoats, defenderSubs)) continue;
+                if (!Database.SettleNavalOperation(inv,result,attackerBoats,attackerSubs,
+                        defenderBoats,defenderSubs,
+                        awardDefenderShieldHit:!Database.HasGroupLockExemption(inv.ChatId))) continue;
                 AppendNavalStrategicProgress(result);
                 RedactDefenderNavalDoctrine(result);
                 try { await SendPermanent(inv.AttackerId, result.AttackerReport, ct: ct); } catch { }

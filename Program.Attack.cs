@@ -85,13 +85,13 @@ partial class Program
             return;
         }
 
-        //  – shield check (5 attacks => 16h shield)
+        // Shield check: 8 completed incoming attacks grant 16 hours of protection.
         if (Database.IsAttackShieldActive(tid, cid) && !fullExemption)
         {
             long until = Database.GetAttackShieldUntilMs(tid, cid);
             long leftMs = until - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             long leftH = Math.Max(1, leftMs / 3600000);
-            await bot.AnswerCallbackQueryAsync(cb.Id, $"🛡 {defender.Name} به دلیل 5 حمله اخیر تا {leftH} ساعت دیگر سپر 16 ساعته دارد و قابل حمله نیست!", showAlert: true, cancellationToken: ct);
+            await bot.AnswerCallbackQueryAsync(cb.Id, $"🛡 {defender.Name} به دلیل ۸ حمله اخیر تا {leftH} ساعت دیگر سپر ۱۶ ساعته دارد و قابل حمله نیست!", showAlert: true, cancellationToken: ct);
             return;
         }
 
